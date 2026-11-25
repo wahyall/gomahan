@@ -1038,7 +1038,7 @@ export class HouseScene {
 
       for (const col of struct.columns) {
         const isCanopy = col.z < 1.0;
-        const h = isCanopy ? lt2Y - lt1Y + 0.1 : colH;
+        const h = isCanopy ? Math.max(2.2, lt2Y - 0.38 - (4.45 - col.z) * 0.055 - (lt1Y - 0.15)) : colH;
         batch.addGeo(
           "struct:col",
           colMat,
@@ -1446,6 +1446,8 @@ export class HouseScene {
 
     // 8. Roof Structure (Cutout for Rear Open Void [1.70..5.00, 15.35..maxZ] & Central Stair Skylight)
     if ((showTruss || showRoofCover) && view.activeLevelView !== "lt1") {
+      // roof.heightAt() is relative to LT1 floor (lt2.elevation + lt2.height); shift by lt1Y so roof sits flush atop LT2 walls!
+      const roofH = (x: number, z: number) => roof.heightAt(x, z) + lt1Y;
       const spanX = roof.maxX - roof.minX;
       const spanZ = roof.maxZ - roof.minZ;
       const midX = (roof.minX + roof.maxX) * 0.5;
@@ -1461,7 +1463,7 @@ export class HouseScene {
           const tSpan = tx1 - tx0;
           if (tSpan < 0.25) continue;
           const tMidX = (tx0 + tx1) * 0.5;
-          const h = roof.heightAt(tMidX, z);
+          const h = roofH(tMidX, z);
           batch.addBox(
             "roof:truss",
             this.palette.steelLight,
@@ -1492,7 +1494,7 @@ export class HouseScene {
             roof.maxZ,
             voidCut,
             skylightHole,
-            roof.heightAt,
+            roofH,
             thickness,
           );
           if (g) roofGeos.push(g);
@@ -1505,7 +1507,7 @@ export class HouseScene {
             roof.maxZ,
             voidCut,
             skylightHole,
-            roof.heightAt,
+            roofH,
             thickness,
           );
           const gRight = this.buildCutoutRoofGeometry(
@@ -1515,7 +1517,7 @@ export class HouseScene {
             roof.maxZ,
             voidCut,
             skylightHole,
-            roof.heightAt,
+            roofH,
             thickness,
           );
           if (gLeft) roofGeos.push(gLeft);
@@ -1534,7 +1536,7 @@ export class HouseScene {
         }
 
         // Fascia / Coping border strips around Void aperture & Stair Skylight Curb
-        const voidEdgeY = roof.heightAt(3.35, 15.35);
+        const voidEdgeY = roofH(3.35, 15.35);
         batch.addGeo(
           "roof:fascia",
           this.palette.lisplank,
@@ -1554,8 +1556,8 @@ export class HouseScene {
         const hMidZ = (hz0 + hz1) * 0.5;
         const hW = hx1 - hx0;
         const hD = hz1 - hz0;
-        const skyMinY = roof.heightAt(hMidX, hz0);
-        const skyMaxY = roof.heightAt(hMidX, hz1);
+        const skyMinY = roofH(hMidX, hz0);
+        const skyMaxY = roofH(hMidX, hz1);
         const skyAvgY = (skyMinY + skyMaxY) * 0.5 + 0.11;
         const skyRotX = Math.atan2(skyMaxY - skyMinY, hD);
 
@@ -1575,8 +1577,8 @@ export class HouseScene {
         this.tagPickable(skyGlass, { kind: "part", id: "plafon" }, "Skylight Tangga Tempered Glass");
         this.explodePieces.push({ obj: skyGlass, base: skyGlass.position.clone(), off: new THREE.Vector3(0, 3.2, 0) });
 
-        // Front Gutter (Talang Depan) + Curved TubeGeometry Downspouts with gooseneck elbows
-        const eaveY = roof.heightAt(midX, roof.minZ) - 0.03;
+        // Front Gutter (Talang Depan) + Curved TubeGeometry Downspouts hugging left balcony column (Z=3.04) & right bedroom corner (Z=3.92)
+        const eaveY = roofH(midX, roof.minZ) - 0.03;
         batch.addGeo(
           "roof:gutter",
           this.palette.aluDark,
@@ -1587,44 +1589,52 @@ export class HouseScene {
           eaveY,
           roof.minZ + 0.05,
         );
-        for (const dx of [0.18, project.site.width - 0.18]) {
+        const pipeTargets: [number, number][] = [
+          [0.14, 3.04],
+          [project.site.width - 0.14, 3.92],
+        ];
+        for (const [dx, wallZ] of pipeTargets) {
           const curve = new THREE.CatmullRomCurve3([
             new THREE.Vector3(dx, eaveY - 0.05, roof.minZ + 0.06),
-            new THREE.Vector3(dx, eaveY - 0.34, roof.minZ + 0.18),
-            new THREE.Vector3(dx, eaveY - 0.58, 3.06),
-            new THREE.Vector3(dx, 0.25, 3.06),
-            new THREE.Vector3(dx, 0.09, 2.84),
+            new THREE.Vector3(dx, eaveY - 0.34, roof.minZ + 0.25),
+            new THREE.Vector3(dx, eaveY - 0.65, wallZ),
+            new THREE.Vector3(dx, 0.25, wallZ),
+            new THREE.Vector3(dx, 0.09, wallZ - 0.22),
           ]);
-          const tubeGeo = attachBvh(new THREE.TubeGeometry(curve, 20, 0.044, 10, false));
+          const tubeGeo = attachBvh(new THREE.TubeGeometry(curve, 22, 0.044, 10, false));
           batch.addGeo("roof:gutter", this.palette.aluDark, "talang", "Pipa Turun Hujan (Downspout)", tubeGeo);
-          // Wall clamp rings along front column
           for (const cy of [1.2, 3.4, 5.6]) {
             const collar = new THREE.CylinderGeometry(0.062, 0.062, 0.045, 10);
-            batch.addGeo("roof:gutter", this.palette.aluDark, "talang", "Klem Pipa Talang", collar, dx, cy, 3.06);
+            batch.addGeo("roof:gutter", this.palette.aluDark, "talang", "Klem Pipa Talang", collar, dx, cy, wallZ);
           }
         }
 
-        // Carport Canopy (covers Carport X: 1.48..5.00, Z: -0.35..4.45 ONLY — keeps Taman Depan [0..1.48] open to sky!)
+        // Carport Canopy (covers Carport X: 1.48..5.00, Z: -0.35..4.45 ONLY; planar slope aligned seamlessly with front steel fascia!)
         const cpMinX = 1.48;
         const cpMaxX = project.site.width;
         const cpW = cpMaxX - cpMinX;
         const cpMidX = (cpMinX + cpMaxX) * 0.5;
-        const cpAvgY = lt2Y - 0.35;
-        const cpGeo = attachBvh(createChamferBox(cpW, 0.065, 4.82, 0.01, 1));
-        const cpRoof = new THREE.Mesh(cpGeo, this.palette.roofCover);
-        cpRoof.position.set(cpMidX, cpAvgY, 2.05);
-        cpRoof.rotation.x = -0.13;
-        cpRoof.castShadow = true;
-        cpRoof.receiveShadow = true;
-        this.houseRoot.add(cpRoof);
-        this.dynResources.push(cpGeo);
-        this.tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport Depan");
-        this.explodePieces.push({ obj: cpRoof, base: cpRoof.position.clone(), off: new THREE.Vector3(0, 1.8, 0) });
+        const cpZ0 = -0.35;
+        const cpZ1 = 4.45;
+        const cpHeightAt = (_x: number, z: number) => lt2Y - 0.34 - (cpZ1 - z) * 0.055; // rear 3.76m (clear under balcony!) -> front 3.49m
+        const cpGeo = this.buildCutoutRoofGeometry(cpMinX, cpMaxX, cpZ0, cpZ1, null, null, cpHeightAt, 0.065);
+        if (cpGeo) {
+          const cpRoof = new THREE.Mesh(cpGeo, this.palette.roofCover);
+          cpRoof.castShadow = true;
+          cpRoof.receiveShadow = true;
+          this.houseRoot.add(cpRoof);
+          this.dynResources.push(cpGeo);
+          this.tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport Depan");
+          this.explodePieces.push({ obj: cpRoof, base: cpRoof.position.clone(), off: new THREE.Vector3(0, 1.8, 0) });
+        }
 
-        // Carport perimeter steel fascia frame
-        batch.addBox("roof:cpframe", this.palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpAvgY + 0.25, -0.33, cpW, 0.1, 0.06);
-        batch.addBox("roof:cpframe", this.palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMinX + 0.03, cpAvgY - 0.03, 2.05, 0.06, 0.1, 4.82, {
-          rotX: -0.13,
+        // Carport perimeter steel fascia frame aligned flush under the front & inner side edges of canopy
+        const cpFrontY = cpHeightAt(cpMidX, cpZ0);
+        const cpAvgY = (cpHeightAt(cpMinX, cpZ0) + cpHeightAt(cpMinX, cpZ1)) * 0.5;
+        const cpTilt = Math.atan(0.055);
+        batch.addBox("roof:cpframe", this.palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpFrontY - 0.03, cpZ0 + 0.03, cpW, 0.1, 0.06);
+        batch.addBox("roof:cpframe", this.palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMinX + 0.03, cpAvgY - 0.03, (cpZ0 + cpZ1) * 0.5, 0.06, 0.1, cpZ1 - cpZ0, {
+          rotX: cpTilt,
         });
       }
     }
@@ -1674,12 +1684,12 @@ export class HouseScene {
           lvGrp.add(mesh);
           this.tagPickable(mesh, { kind: "hvac", id: hv.id, levelIndex: lv.index }, hv.name);
 
-          // Render realistic Outdoor AC Condenser on nearest open facade (Front Z~3.85 or Rear Void/Wall)
+          // Render realistic Outdoor AC Condenser high on solid facade pier (Front Z=3.84 or Rear Void wall Z=15.42)
           if (hv.type === "ac_split") {
             const isFront = hv.position.z < 9.5;
-            const extZ = isFront ? 3.88 : 15.42;
-            const extX = Math.max(0.45, Math.min(4.55, hv.position.x));
-            const outUnit = this.buildAcCondenserUnit(extX, Math.min(2.2, hv.position.y), extZ, isFront ? 0 : Math.PI);
+            const extZ = isFront ? 3.84 : 15.42;
+            const extX = isFront ? (hv.position.x > 2.8 ? Math.min(4.45, hv.position.x) : 3.15) : Math.max(2.1, Math.min(4.45, hv.position.x));
+            const outUnit = this.buildAcCondenserUnit(extX, 2.72, extZ, isFront ? 0 : Math.PI);
             lvGrp.add(outUnit);
             this.tagPickable(outUnit, { kind: "hvac", id: hv.id, levelIndex: lv.index }, `Outdoor ${hv.name}`);
           }
