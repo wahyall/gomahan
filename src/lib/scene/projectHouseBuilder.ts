@@ -44,6 +44,7 @@ export interface ProjectHouseBuildOptions {
   activeLevelView: "all" | "lt1" | "lt2_cut";
   supportWallCutaway?: boolean;
   hideUpperPropsInLt1?: boolean;
+  walkOpenDoorsFull?: boolean;
   onExplodePiece?: (obj: THREE.Object3D, off: THREE.Vector3) => void;
   onExplodeInstanced?: (im: THREE.InstancedMesh, off: Float32Array) => void;
 }
@@ -928,7 +929,9 @@ export function buildProjectHouse(
             if (op.kind === "door") {
               const pivot = new THREE.Group();
               pivot.position.set(-op.width * 0.5 + ft, 0, 0);
-              pivot.rotation.y = op.swing * ((op.openPct / 100) * Math.PI * 0.48);
+              const renderOpenPct =
+                opts.walkOpenDoorsFull && op.openPct > 5 ? Math.max(op.openPct, 94) : op.openPct;
+              pivot.rotation.y = op.swing * ((renderOpenPct / 100) * Math.PI * 0.48);
               const leafMat = op.width > 1.3 ? palette.glass : palette.woodTeak;
               const leafGeo = attachBvh(createChamferBox(op.width - ft * 2, op.height - ft, 0.044, 0.008, 1));
               leafGeo.translate((op.width - ft * 2) * 0.5, (op.height - ft) * 0.5, 0);

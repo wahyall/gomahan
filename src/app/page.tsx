@@ -21,7 +21,7 @@ import { OutlinerPanel } from "@/components/panels/OutlinerPanel";
 import { InspectorPanel } from "@/components/panels/InspectorPanel";
 import { StageTimelineBar } from "@/components/panels/StageTimelineBar";
 import { BuildWorkspace } from "@/components/build/BuildWorkspace";
-import { WalkModeStub } from "@/components/walk/WalkModeStub";
+import { WalkWorkspace } from "@/components/walk/WalkWorkspace";
 import { StructureWorkspace } from "@/components/workspaces/StructureWorkspace";
 import { LightingWorkspace } from "@/components/workspaces/LightingWorkspace";
 import { AirflowWorkspace } from "@/components/workspaces/AirflowWorkspace";
@@ -300,7 +300,7 @@ export default function HomePage() {
             onSaveSnapshot={handleSaveSnapshot}
           />
         )}
-        {isWalkStub && <WalkModeStub />}
+        {isWalkStub && <WalkWorkspace derived={derived} struct={struct} />}
 
         {/* Analytical 3D Viewport + Timeline */}
         {isSimSplit && (

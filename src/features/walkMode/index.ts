@@ -1,16 +1,20 @@
-/**
- * Entry point stub for the new physics/collision-driven Walk Mode module (Phase 4).
- * Uses a single capsule config source and derives all collision from build data.
- */
-
-export interface WalkModeModuleStub {
-  status: "stub";
-  readyPhase: number;
-}
-
-export function getWalkModeStubState(): WalkModeModuleStub {
-  return {
-    status: "stub",
-    readyPhase: 0,
-  };
-}
+export { WALK_CONFIG, type WalkCameraMode } from "@/features/walkMode/walkConfig";
+export {
+  buildWalkCollisionWorld,
+  intersectRayObb3D,
+  isWallOverlappingVerticalSpan,
+  resolveCircleVsObb2D,
+  sampleWalkSurface,
+  SpatialHashGrid,
+  type WalkColliderBox,
+  type WalkColliderKind,
+  type WalkCollisionWorld,
+  type WalkDoorInteractable,
+  type WalkFloorPolygon,
+  type WalkStairSpan,
+  type WalkSurfaceSample,
+} from "@/features/walkMode/collisionBuilder";
+export { WalkController, type WalkInputState, type WalkSnapshotState } from "@/features/walkMode/WalkController";
+export { WalkAvatar } from "@/features/walkMode/WalkAvatar";
+export { WalkDebugOverlay } from "@/features/walkMode/WalkDebugOverlay";
+export { WalkScene, type WalkHudTelemetry, type WalkSceneActions } from "@/features/walkMode/WalkScene";
