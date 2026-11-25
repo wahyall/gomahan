@@ -124,6 +124,7 @@ export class HouseScene {
   private airParticleStates: { x: number; y: number; z: number; lv: 0 | 1; life: number }[] = [];
   private lastAirflow: AirflowSimulationResult | null = null;
   private rainPoints: THREE.Points | null = null;
+  private rainTex: THREE.CanvasTexture | null = null;
   private rainArray: Float32Array | null = null;
   private rainBaseCount = 0;
   private rainActiveCount = 0;
@@ -397,12 +398,30 @@ export class HouseScene {
     attr.setUsage(THREE.DynamicDrawUsage);
     geo.setAttribute("position", attr);
     this.rainArray = attr.array as Float32Array;
+
+    const rCan = document.createElement("canvas");
+    rCan.width = 16;
+    rCan.height = 64;
+    const rCtx = rCan.getContext("2d");
+    if (rCtx) {
+      const grad = rCtx.createLinearGradient(0, 0, 0, 64);
+      grad.addColorStop(0, "rgba(210, 234, 252, 0)");
+      grad.addColorStop(0.25, "rgba(218, 238, 255, 0.72)");
+      grad.addColorStop(0.7, "rgba(232, 244, 255, 0.92)");
+      grad.addColorStop(1, "rgba(232, 244, 255, 0)");
+      rCtx.fillStyle = grad;
+      rCtx.fillRect(6, 2, 3, 60);
+    }
+    this.rainTex = new THREE.CanvasTexture(rCan);
+
     const mat = new THREE.PointsMaterial({
-      color: 0xcbe4f5,
-      size: 0.1,
+      color: 0xd9ecfb,
+      map: this.rainTex,
+      size: 0.24,
       transparent: true,
-      opacity: 0.7,
+      opacity: 0.62,
       depthWrite: false,
+      alphaTest: 0.02,
     });
     this.rainPoints = new THREE.Points(geo, mat);
     this.rainPoints.frustumCulled = false;
@@ -1250,6 +1269,7 @@ export class HouseScene {
     this.skyMesh.geometry.dispose();
     this.rainPoints?.geometry.dispose();
     (this.rainPoints?.material as THREE.Material)?.dispose();
+    this.rainTex?.dispose();
     this.palette.dispose();
     this.renderer.dispose();
   }

@@ -431,7 +431,7 @@ export function buildProjectHouse(
         "Tangga Masuk Teras",
         createChamferBox(1.12, lt1Y - trH, 0.34, 0.01, 1),
         1.58,
-        (lt1Y + trH) * 0.25,
+        (lt1Y + trH) * 0.5,
         3.85,
       );
     }
@@ -650,6 +650,11 @@ export function buildProjectHouse(
       const matKey = slab.isOverhang ? "woodDeck" : showTileFloor ? "tileFloor" : "concrete";
       const mat = slab.isOverhang ? palette.woodDeck : showTileFloor ? palette.tileFloor : palette.concrete;
       batchLt2.addGeo(`slab:${matKey}`, mat, "pelat", slab.name, geo, 0, lt2Y - slab.thickness, 0, 0, [0, 1.5, 0]);
+      if (opts.showFinishing && !slab.isOverhang) {
+        const soffitGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.014, bevelEnabled: false });
+        soffitGeo.rotateX(-Math.PI / 2);
+        batchLt2.addGeo("slab:ceiling", palette.ceiling, "plafon", "Plafon Gypsum LT1", soffitGeo, 0, lt2Y - slab.thickness - 0.014, 0, 0, [0, 1.5, 0]);
+      }
     }
   }
 
@@ -693,8 +698,7 @@ export function buildProjectHouse(
               ? palette.tileWood
               : palette.tileFloor;
         if (customTint) {
-          mat = new THREE.MeshStandardMaterial({ color: customTint.hex, roughness: customTint.roughness });
-          resources.push(mat);
+          mat = palette.getCachedMaterial(customTint.hex, customTint.roughness);
         }
         const yOff = lvIdx === 0 && rm.room.program === "circulation" ? peil.terracePeilM + 0.005 : baseFloorY;
         bTarget.addGeo(`floor${lvIdx}:${rm.room.id}`, mat, "lantai", rm.room.name, geo, 0, yOff, 0, 0, undefined, false, true);
@@ -721,10 +725,10 @@ export function buildProjectHouse(
       const merged = mergeGeometryBatch(geos);
       if (!merged) continue;
       const spec = CUSTOM_TILE_HEX[matId ?? ""] ?? { hex: "#dbd4c8", roughness: 0.45 };
-      const mat = new THREE.MeshStandardMaterial({ color: spec.hex, roughness: spec.roughness });
+      const mat = palette.getCachedMaterial(spec.hex, spec.roughness);
       const mesh = new THREE.Mesh(merged, mat);
       mesh.receiveShadow = true;
-      resources.push(merged, mat);
+      resources.push(merged);
       levelRoots[Number(lvStr) === 1 ? 1 : 0].add(mesh);
     }
   }
@@ -866,8 +870,7 @@ export function buildProjectHouse(
   }
 
   // 7. Plaster & Paint Walls + Openings (with full + cutaway + down representations when Build Mode cutaway enabled!)
-  const cutawayCapMat = new THREE.MeshStandardMaterial({ color: 0x262b33, roughness: 0.85 });
-  if (opts.supportWallCutaway) resources.push(cutawayCapMat);
+  const cutawayCapMat = palette.getCachedMaterial("#262b33", 0.85);
 
   for (const lv of project.levels) {
     if (lv.index === 1 && opts.activeLevelView === "lt1") continue;
@@ -893,8 +896,7 @@ export function buildProjectHouse(
       const customMat = CUSTOM_PAINT_HEX[w.materialId];
       let wallMat: THREE.Material = w.exterior ? palette.plasterExt : palette.plasterInt;
       if (customMat) {
-        wallMat = new THREE.MeshStandardMaterial({ color: customMat.hex, roughness: customMat.roughness });
-        resources.push(wallMat);
+        wallMat = palette.getCachedMaterial(customMat.hex, customMat.roughness);
       }
 
       if (showPlasterPaint) {
@@ -1051,20 +1053,50 @@ export function buildProjectHouse(
           const grp = new THREE.Group();
           const effH = Math.min(w.height, stubH);
           const skinT = w.thickness + 0.022;
-          const bodyG = new THREE.BoxGeometry(len + w.thickness * 0.5, effH, skinT);
-          const bodyM = new THREE.Mesh(bodyG, wallMat);
-          bodyM.position.set((w.start.x + w.end.x) * 0.5, baseLvY + effH * 0.5, (w.start.z + w.end.z) * 0.5);
-          bodyM.rotation.y = ang;
-          bodyM.castShadow = true;
-          bodyM.receiveShadow = true;
-          tagPickable(bodyM, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
+          const cuts = w.openings
+            .filter((op) => op.sill < effH - 0.03)
+            .map((op) => ({
+              lo: Math.max(0.02, op.offset - op.width * 0.5),
+              hi: Math.min(len - 0.02, op.offset + op.width * 0.5),
+            }))
+            .filter((c) => c.hi > c.lo + 0.02)
+            .sort((a, b) => a.lo - b.lo);
 
-          const capG = new THREE.BoxGeometry(len + w.thickness * 0.5, 0.024, skinT + 0.01);
-          const capM = new THREE.Mesh(capG, cutawayCapMat);
-          capM.position.set((w.start.x + w.end.x) * 0.5, baseLvY + effH + 0.012, (w.start.z + w.end.z) * 0.5);
-          capM.rotation.y = ang;
-          grp.add(bodyM, capM);
-          resources.push(bodyG, capG);
+          const spans: [number, number][] = [];
+          let cursor = 0;
+          for (const c of cuts) {
+            if (c.lo > cursor + 0.03) spans.push([cursor, c.lo]);
+            cursor = Math.max(cursor, c.hi);
+          }
+          if (len > cursor + 0.03) spans.push([cursor, len]);
+
+          for (const [s0, s1] of spans) {
+            const extL = s0 <= 0.005 ? w.thickness * 0.25 : 0;
+            const extR = s1 >= len - 0.005 ? w.thickness * 0.25 : 0;
+            const segLo = s0 - extL;
+            const segHi = s1 + extR;
+            const segLen = segHi - segLo;
+            if (segLen < 0.03) continue;
+            const midAlong = (segLo + segHi) * 0.5;
+            const cx = w.start.x + ux * midAlong;
+            const cz = w.start.z + uz * midAlong;
+
+            const bodyG = new THREE.BoxGeometry(segLen, effH, skinT);
+            const bodyM = new THREE.Mesh(bodyG, wallMat);
+            bodyM.position.set(cx, baseLvY + effH * 0.5, cz);
+            bodyM.rotation.y = ang;
+            bodyM.castShadow = true;
+            bodyM.receiveShadow = true;
+
+            const capG = new THREE.BoxGeometry(segLen, 0.024, skinT + 0.01);
+            const capM = new THREE.Mesh(capG, cutawayCapMat);
+            capM.position.set(cx, baseLvY + effH + 0.012, cz);
+            capM.rotation.y = ang;
+
+            grp.add(bodyM, capM);
+            resources.push(bodyG, capG);
+          }
+          tagPickable(grp, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
           return grp;
         };
 

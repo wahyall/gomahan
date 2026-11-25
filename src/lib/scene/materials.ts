@@ -465,6 +465,7 @@ export interface MaterialPalette {
   setTileSize: (tileCm: number) => void;
   setAnisotropy: (maxAniso: number) => void;
   bindEnvMap: (env: THREE.Texture | null) => void;
+  getCachedMaterial: (hex: string, roughness: number) => THREE.MeshStandardMaterial;
   dispose: () => void;
 }
 
@@ -663,9 +664,9 @@ export function createMaterialPalette(): MaterialPalette {
     normalMap: roofTex.normal,
     normalScale: new THREE.Vector2(0.75, 0.75),
     roughnessMap: brushedRough,
-    roughness: 0.42,
-    metalness: 0.82,
-    envMapIntensity: 0.85,
+    roughness: 0.56,
+    metalness: 0.26,
+    envMapIntensity: 0.65,
   });
 
   const lisplank = new THREE.MeshStandardMaterial({ color: 0xe6dac5, roughness: 0.68, envMapIntensity: 0.35 });
@@ -831,6 +832,8 @@ export function createMaterialPalette(): MaterialPalette {
     floodWater,
   ];
 
+  const customCache = new Map<string, THREE.MeshStandardMaterial>();
+
   return {
     brickOuter,
     brickInner,
@@ -882,9 +885,29 @@ export function createMaterialPalette(): MaterialPalette {
       for (const m of envBoundMats) {
         m.envMap = env;
       }
+      for (const m of customCache.values()) {
+        m.envMap = env;
+      }
+    },
+    getCachedMaterial: (hex: string, roughness: number) => {
+      const key = `${hex.toLowerCase()}|${roughness.toFixed(2)}`;
+      let mat = customCache.get(key);
+      if (!mat) {
+        mat = new THREE.MeshStandardMaterial({
+          color: hex,
+          roughness,
+          envMapIntensity: 0.42,
+          envMap: plasterInt.envMap,
+          clippingPlanes: plasterInt.clippingPlanes,
+        });
+        customCache.set(key, mat);
+      }
+      return mat;
     },
     dispose: () => {
       allMats.forEach((m) => m.dispose());
+      customCache.forEach((m) => m.dispose());
+      customCache.clear();
       textures.forEach((t) => t.dispose());
     },
   };
