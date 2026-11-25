@@ -6,16 +6,23 @@ import { temporal } from "zundo";
 import type {
   ArchitectureSystemConfig,
   BrickSpec,
+  BuildPoolOverride,
+  BuildTileOverride,
   FloodMitigationConfig,
+  FurnitureItem,
   HvacUnit,
   LightFixture,
+  Opening,
   PeilConfig,
   Project,
   RabSettings,
+  Room,
   SimulationSettings,
   SoilAssumption,
   StageProgress,
+  Stair,
   StructuralParams,
+  Wall,
 } from "@/lib/model/types";
 import { createDefaultProject } from "@/lib/model/defaultProject";
 import { BRICK_PRESETS } from "@/lib/model/priceBook";
@@ -147,11 +154,31 @@ export interface StudioStore {
   toggleSiteChecklist: (key: string) => void;
   completeQuest: (questId: string) => void;
 
-  // Shared simulation workspace controls (Lighting & Airflow)
+  // Build & Design Studio mutations (tracked by Zundo undo/redo & synced across all tabs!)
+  addWall: (levelIndex: 0 | 1, wall: Wall) => void;
+  addRoomAndWalls: (levelIndex: 0 | 1, walls: Wall[], room?: Room) => void;
+  updateWall: (levelIndex: 0 | 1, wallId: string, patch: Partial<Wall>) => void;
+  deleteWall: (levelIndex: 0 | 1, wallId: string) => void;
+  addOpening: (levelIndex: 0 | 1, wallId: string, opening: Opening) => void;
+  updateOpening: (levelIndex: 0 | 1, wallId: string, openingId: string, patch: Partial<Opening>) => void;
+  deleteOpening: (levelIndex: 0 | 1, wallId: string, openingId: string) => void;
+  paintRoomFloor: (levelIndex: 0 | 1, roomId: string, floorMaterialId: string) => void;
+  setFloorTileOverrides: (tiles: BuildTileOverride[]) => void;
+  addStairWithCutout: (levelIndex: 0 | 1, stair: Stair, voidPolygon?: { x: number; z: number }[]) => void;
+  deleteStair: (levelIndex: 0 | 1, stairId: string) => void;
+  addFurniture: (levelIndex: 0 | 1, item: FurnitureItem) => void;
+  updateFurniture: (levelIndex: 0 | 1, id: string, patch: Partial<FurnitureItem>) => void;
+  deleteFurniture: (levelIndex: 0 | 1, id: string) => void;
+  addLight: (levelIndex: 0 | 1, light: LightFixture) => void;
   updateLight: (levelIndex: 0 | 1, id: string, patch: Partial<LightFixture>) => void;
+  deleteLight: (levelIndex: 0 | 1, id: string) => void;
   addHvac: (levelIndex: 0 | 1, item: HvacUnit) => void;
   updateHvac: (levelIndex: 0 | 1, id: string, patch: Partial<HvacUnit>) => void;
   deleteHvac: (levelIndex: 0 | 1, id: string) => void;
+  addPool: (pool: BuildPoolOverride) => void;
+  deletePool: (poolId: string) => void;
+  setTerrainHeights: (heights: number[]) => void;
+  resetLotClean: () => void;
 }
 
 const initialProject = createDefaultProject();
@@ -360,10 +387,187 @@ export const useStudioStore = create<StudioStore>()(
           }
         }),
 
+      addWall: (levelIndex, wall) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.walls.push(wall);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
+      addRoomAndWalls: (levelIndex, walls, room) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          const dup = (a: Wall, b: Wall) =>
+            (Math.hypot(a.start.x - b.start.x, a.start.z - b.start.z) < 0.08 &&
+              Math.hypot(a.end.x - b.end.x, a.end.z - b.end.z) < 0.08) ||
+            (Math.hypot(a.start.x - b.end.x, a.start.z - b.end.z) < 0.08 &&
+              Math.hypot(a.end.x - b.start.x, a.end.z - b.start.z) < 0.08);
+          for (const w of walls) {
+            if (Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) < 0.1) continue;
+            if (!lv.walls.some((existing) => dup(existing, w))) lv.walls.push(w);
+          }
+          if (room) lv.rooms.push(room);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
+      updateWall: (levelIndex, wallId, patch) =>
+        set((state) => {
+          const w = state.project.levels[levelIndex]?.walls.find((x) => x.id === wallId);
+          if (w) {
+            Object.assign(w, patch);
+            state.project.updatedAt = new Date().toISOString();
+            simsAudio.play("paint");
+          }
+        }),
+
+      deleteWall: (levelIndex, wallId) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.walls = lv.walls.filter((w) => w.id !== wallId);
+          if (state.selected?.kind === "wall" && state.selected.id === wallId) state.selected = null;
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      addOpening: (levelIndex, wallId, opening) =>
+        set((state) => {
+          const w = state.project.levels[levelIndex]?.walls.find((x) => x.id === wallId);
+          if (!w) return;
+          w.openings.push(opening);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
+      updateOpening: (levelIndex, wallId, openingId, patch) =>
+        set((state) => {
+          const w = state.project.levels[levelIndex]?.walls.find((x) => x.id === wallId);
+          const op = w?.openings.find((o) => o.id === openingId);
+          if (op) {
+            Object.assign(op, patch);
+            state.project.updatedAt = new Date().toISOString();
+            simsAudio.play("rotate");
+          }
+        }),
+
+      deleteOpening: (levelIndex, wallId, openingId) =>
+        set((state) => {
+          const w = state.project.levels[levelIndex]?.walls.find((x) => x.id === wallId);
+          if (!w) return;
+          w.openings = w.openings.filter((o) => o.id !== openingId);
+          if (state.selected?.kind === "opening" && state.selected.id === openingId) state.selected = null;
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      paintRoomFloor: (levelIndex, roomId, floorMaterialId) =>
+        set((state) => {
+          const r = state.project.levels[levelIndex]?.rooms.find((x) => x.id === roomId);
+          if (r) {
+            r.floorMaterialId = floorMaterialId;
+            state.project.updatedAt = new Date().toISOString();
+            simsAudio.play("paint");
+          }
+        }),
+
+      setFloorTileOverrides: (tiles) =>
+        set((state) => {
+          const curr = state.project.buildExtras ?? { floorTiles: [], pools: [], terrainHeights: [] };
+          const map = new Map(curr.floorTiles.map((t) => [`${t.levelIndex}:${t.gx}:${t.gz}`, t]));
+          for (const t of tiles) map.set(`${t.levelIndex}:${t.gx}:${t.gz}`, t);
+          state.project.buildExtras = { ...curr, floorTiles: [...map.values()] };
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("paint");
+        }),
+
+      addStairWithCutout: (levelIndex, stair, voidPolygon) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.stairs.push(stair);
+          if (voidPolygon && levelIndex === 0 && state.project.levels[1]) {
+            state.project.levels[1].slabs.push({
+              id: `slab-void-${stair.id}`,
+              name: "Lubang Tangga",
+              polygon: voidPolygon,
+              thickness: 0.12,
+              materialId: "void",
+              isVoid: true,
+            });
+          }
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
+      deleteStair: (levelIndex, stairId) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.stairs = lv.stairs.filter((s) => s.id !== stairId);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      addFurniture: (levelIndex, item) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.furniture.push(item);
+          state.selected = { kind: "furniture", id: item.id, levelIndex };
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
+      updateFurniture: (levelIndex, id, patch) =>
+        set((state) => {
+          const item = state.project.levels[levelIndex]?.furniture.find((f) => f.id === id);
+          if (item) {
+            Object.assign(item, patch);
+            state.project.updatedAt = new Date().toISOString();
+          }
+        }),
+
+      deleteFurniture: (levelIndex, id) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.furniture = lv.furniture.filter((f) => f.id !== id);
+          if (state.selected?.kind === "furniture" && state.selected.id === id) state.selected = null;
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      addLight: (levelIndex, light) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.lights.push(light);
+          state.selected = { kind: "light", id: light.id, levelIndex };
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
       updateLight: (levelIndex, id, patch) =>
         set((state) => {
           const item = state.project.levels[levelIndex]?.lights.find((f) => f.id === id);
-          if (item) Object.assign(item, patch);
+          if (item) {
+            Object.assign(item, patch);
+            state.project.updatedAt = new Date().toISOString();
+          }
+        }),
+
+      deleteLight: (levelIndex, id) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          lv.lights = lv.lights.filter((f) => f.id !== id);
+          if (state.selected?.kind === "light" && state.selected.id === id) state.selected = null;
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
         }),
 
       addHvac: (levelIndex, item) =>
@@ -372,13 +576,17 @@ export const useStudioStore = create<StudioStore>()(
           if (!lv) return;
           lv.hvac.push(item);
           state.selected = { kind: "hvac", id: item.id, levelIndex };
+          state.project.updatedAt = new Date().toISOString();
           simsAudio.play("place");
         }),
 
       updateHvac: (levelIndex, id, patch) =>
         set((state) => {
           const item = state.project.levels[levelIndex]?.hvac.find((f) => f.id === id);
-          if (item) Object.assign(item, patch);
+          if (item) {
+            Object.assign(item, patch);
+            state.project.updatedAt = new Date().toISOString();
+          }
         }),
 
       deleteHvac: (levelIndex, id) =>
@@ -387,6 +595,48 @@ export const useStudioStore = create<StudioStore>()(
           if (!lv) return;
           lv.hvac = lv.hvac.filter((f) => f.id !== id);
           if (state.selected?.kind === "hvac" && state.selected.id === id) state.selected = null;
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      addPool: (pool) =>
+        set((state) => {
+          const curr = state.project.buildExtras ?? { floorTiles: [], pools: [], terrainHeights: [] };
+          state.project.buildExtras = { ...curr, pools: [...curr.pools, pool] };
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        }),
+
+      deletePool: (poolId) =>
+        set((state) => {
+          if (!state.project.buildExtras) return;
+          state.project.buildExtras.pools = state.project.buildExtras.pools.filter((p) => p.id !== poolId);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      setTerrainHeights: (heights) =>
+        set((state) => {
+          const curr = state.project.buildExtras ?? { floorTiles: [], pools: [], terrainHeights: [] };
+          state.project.buildExtras = { ...curr, terrainHeights: [...heights] };
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("paint");
+        }),
+
+      resetLotClean: () =>
+        set((state) => {
+          for (const lv of state.project.levels) {
+            lv.walls = [];
+            lv.rooms = [];
+            lv.slabs = [];
+            lv.stairs = [];
+            lv.furniture = [];
+            lv.lights = [];
+            lv.hvac = [];
+          }
+          state.project.buildExtras = { floorTiles: [], pools: [], terrainHeights: [] };
+          state.selected = null;
+          state.project.updatedAt = new Date().toISOString();
           simsAudio.play("demolish");
         }),
     })),

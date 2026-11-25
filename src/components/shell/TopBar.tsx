@@ -30,7 +30,6 @@ import {
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
 import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
-import { useBuildModeStore } from "@/features/buildMode";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 
@@ -67,11 +66,8 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
   const setCommandPaletteOpen = useStudioStore((s) => s.setCommandPaletteOpen);
   const resetProject = useStudioStore((s) => s.resetProject);
 
-  const buildUndoCount = useBuildModeStore((s) => s.undoStack.length);
-  const buildRedoCount = useBuildModeStore((s) => s.redoStack.length);
-  const isBuild = workspace === "build";
-  const canUndo = isBuild ? buildUndoCount > 0 : useStudioStore.temporal.getState().pastStates.length > 0;
-  const canRedo = isBuild ? buildRedoCount > 0 : useStudioStore.temporal.getState().futureStates.length > 0;
+  const canUndo = useStudioStore.temporal.getState().pastStates.length > 0;
+  const canRedo = useStudioStore.temporal.getState().futureStates.length > 0;
 
   return (
     <header className="no-print flex shrink-0 flex-col border-b border-border bg-[#131519]">
@@ -117,7 +113,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
         <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
-            onClick={() => (isBuild ? useBuildModeStore.getState().undo() : useStudioStore.temporal.getState().undo())}
+            onClick={() => useStudioStore.temporal.getState().undo()}
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
             aria-label="Undo (Ctrl+Z)"
@@ -127,7 +123,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
           </button>
           <button
             type="button"
-            onClick={() => (isBuild ? useBuildModeStore.getState().redo() : useStudioStore.temporal.getState().redo())}
+            onClick={() => useStudioStore.temporal.getState().redo()}
             disabled={!canRedo}
             title="Redo (Ctrl+Shift+Z)"
             aria-label="Redo (Ctrl+Shift+Z)"

@@ -1,108 +1,146 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
-  BUILD_FORMAT_VERSION,
-  computeBuildCostSummary,
-  createEmpty5x17Document,
-  createStarter5x17HouseDocument,
-  makeAddWallCommand,
-  makePaintFloorCellsCommand,
-  makeUpdateBudgetCommand,
-  parseBuildDocumentJson,
+  applyTerrainBrushToHeights,
+  computeProjectRoomFloodCells,
+  createOpeningForWall,
+  snapOpeningToProjectWalls,
+  snapWallEndpoint,
+  UNIFIED_BUILD_CATALOG,
   useBuildModeStore,
-  type BuildWall,
+  validateProjectStairPlacement,
 } from "@/features/buildMode";
+import { buildDerivedModel } from "@/lib/geometry/projectModel";
+import { buildRabSummary } from "@/lib/quantities/rabEngine";
+import { useStudioStore } from "@/lib/store/useStudioStore";
+import { computeStructuralReport } from "@/lib/structure/sniEngine";
 
-describe("Build Mode v2 Data Model & Command History", () => {
+describe("Unified Single-Source Build Mode (Project + Zundo Undo/Redo)", () => {
   beforeEach(() => {
-    useBuildModeStore.getState().resetToStarterHouse();
+    useStudioStore.getState().resetProject();
+    useStudioStore.temporal.getState().clear();
+    useBuildModeStore.getState().setActiveLevel(0);
+    useBuildModeStore.getState().setWallVisibility("cutaway");
   });
 
-  it("builds a valid 5x17m 2-storey house document strictly aligned to 0.5m sub-grid", () => {
-    const doc = createStarter5x17HouseDocument(450_000_000);
-    expect(doc.formatVersion).toBe(BUILD_FORMAT_VERSION);
-    expect(doc.lot.cols * doc.lot.cellSize).toBeCloseTo(5.0);
-    expect(doc.lot.rows * doc.lot.cellSize).toBeCloseTo(17.0);
-    expect(doc.levels.length).toBeGreaterThanOrEqual(2);
-    expect(doc.walls.length).toBeGreaterThan(15);
-    expect(doc.openings.some((o) => o.kind === "door")).toBe(true);
-    expect(doc.openings.some((o) => o.kind === "window")).toBe(true);
-    expect(doc.stairs.length).toBeGreaterThanOrEqual(1);
-
-    const summary = computeBuildCostSummary(doc);
-    expect(summary.totalIdr).toBeGreaterThan(100_000_000);
-    expect(summary.builtFloorAreaM2).toBeGreaterThan(80);
+  it("loads the exact original 5x17m house & price-free catalog items", () => {
+    const { project } = useStudioStore.getState();
+    expect(project.site.width).toBe(5);
+    expect(project.site.depth).toBe(17);
+    expect(project.levels[0]!.walls.length).toBeGreaterThan(8);
+    expect(project.levels[0]!.furniture.some((f) => f.category === "vehicle")).toBe(true);
+    expect(UNIFIED_BUILD_CATALOG.length).toBeGreaterThanOrEqual(45);
+    expect(UNIFIED_BUILD_CATALOG.every((c) => !("priceIdr" in c))).toBe(true);
   });
 
-  it("executes, undoes, and redoes Command mutations symmetrically", () => {
-    const store = useBuildModeStore.getState();
-    const startWallCount = store.document.walls.length;
+  it("mutates Project directly via Zundo Undo/Redo and stays 100% synced with RAB & Masonry", () => {
+    const beforeProj = useStudioStore.getState().project;
+    const beforeDerived = buildDerivedModel(beforeProj);
+    const beforeStruct = computeStructuralReport(beforeDerived);
+    const beforeRab = buildRabSummary(beforeDerived, beforeStruct);
 
-    const testWall: BuildWall = {
-      id: "w-unit-1",
-      levelIndex: 0,
-      x1: 2,
-      z1: 2,
-      x2: 6,
-      z2: 2,
-      kind: "wall",
-      thickness: 0.15,
-      height: 3.4,
-      paintInnerId: "plaster_warm",
-      paintOuterId: "plaster_warm",
-    };
+    // Add a new 4m wall on LT1 via Build Mode store action
+    useStudioStore.getState().addWall(0, {
+      id: "w-new-test",
+      name: "Dinding Uji RAB",
+      start: { x: 1.5, z: 10 },
+      end: { x: 4.5, z: 10 },
+      thickness: 0.1,
+      height: 3.6,
+      materialId: "wall_ext_ivory",
+      exterior: false,
+      openings: [],
+    });
 
-    store.executeCommand(makeAddWallCommand(testWall));
-    expect(useBuildModeStore.getState().document.walls.length).toBe(startWallCount + 1);
-    expect(useBuildModeStore.getState().canUndo()).toBe(true);
+    const afterProj = useStudioStore.getState().project;
+    const afterDerived = buildDerivedModel(afterProj);
+    const afterRab = buildRabSummary(afterDerived, computeStructuralReport(afterDerived));
 
-    store.executeCommand(
-      makePaintFloorCellsCommand([
-        { levelIndex: 0, gx: 2, gz: 2, materialId: "wood_oak" },
-        { levelIndex: 0, gx: 3, gz: 2, materialId: "wood_oak" },
-      ]),
+    expect(afterDerived.totalWallLengthM).toBeGreaterThan(beforeDerived.totalWallLengthM + 2.9);
+    expect(afterDerived.masonry.totalBuyBricks).toBeGreaterThan(beforeDerived.masonry.totalBuyBricks);
+    expect(afterRab.grandTotal).toBeGreaterThan(beforeRab.grandTotal);
+
+    // Zundo Undo reverts both Project and derived RAB/bricks identically
+    useStudioStore.temporal.getState().undo();
+    const revertedProj = useStudioStore.getState().project;
+    const revertedDerived = buildDerivedModel(revertedProj);
+    expect(revertedDerived.totalWallLengthM).toBeCloseTo(beforeDerived.totalWallLengthM, 4);
+
+    // Redo restores cleanly
+    useStudioStore.temporal.getState().redo();
+    expect(useStudioStore.getState().project.levels[0]!.walls.some((w) => w.id === "w-new-test")).toBe(true);
+  });
+
+  it("snaps 0.5m grid walls (orthogonal & 45°), openings onto real Project walls, and room flood fill", () => {
+    const orth = snapWallEndpoint({ gx: 2, gz: 4 }, { gx: 8, gz: 5 }, 10, 34, false);
+    expect(orth).toEqual({ gx: 8, gz: 4 });
+    const diag = snapWallEndpoint({ gx: 2, gz: 4 }, { gx: 6, gz: 7 }, 10, 34, true);
+    expect(Math.abs(diag.gx - 2)).toBe(Math.abs(diag.gz - 4));
+
+    // Reset clean lot, draw a closed 3x4m room and flood fill it
+    useStudioStore.getState().resetLotClean();
+    useStudioStore.getState().addRoomAndWalls(0, [
+      { id: "bw-1", name: "N", start: { x: 1, z: 5 }, end: { x: 4, z: 5 }, thickness: 0.1, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+      { id: "bw-2", name: "E", start: { x: 4, z: 5 }, end: { x: 4, z: 9 }, thickness: 0.1, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+      { id: "bw-3", name: "S", start: { x: 4, z: 9 }, end: { x: 1, z: 9 }, thickness: 0.1, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+      { id: "bw-4", name: "W", start: { x: 1, z: 9 }, end: { x: 1, z: 5 }, thickness: 0.1, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+    ]);
+
+    const walls = useStudioStore.getState().project.levels[0]!.walls;
+    // Enclosed room 3x4m at 0.5m cells = 6x8 = 48 cells
+    const floodInside = computeProjectRoomFloodCells(walls, 10, 34, 0.5, 4, 12);
+    expect(floodInside.length).toBe(48);
+
+    // Snap door cleanly onto top wall (z = 5.0m, x: 1..4)
+    const snapValid = snapOpeningToProjectWalls(walls, 2.5, 5.05, 0.9);
+    expect(snapValid?.valid).toBe(true);
+    useStudioStore.getState().addOpening(0, "bw-1", createOpeningForWall("op-d1", "door", snapValid!.offsetM, 0.9, 2.15, 0, "Pintu"));
+
+    // Attempting second overlapping door on same center must report invalid collision
+    const snapOverlap = snapOpeningToProjectWalls(useStudioStore.getState().project.levels[0]!.walls, 2.5, 5.02, 0.9);
+    expect(snapOverlap?.valid).toBe(false);
+  });
+
+  it("supports stairs + LT2 void cutout, HVAC/Furniture/Light CRUD, pools & terrain sculpting", () => {
+    useStudioStore.getState().resetLotClean();
+    const res = validateProjectStairPlacement([], 0, 2, 10, 2, 8, 0, 10, 34, 0.5);
+    expect(res.valid).toBe(true);
+
+    useStudioStore.getState().addStairWithCutout(
+      0,
+      {
+        id: "st-new",
+        name: "Tangga Baru",
+        start: res.start,
+        end: res.end,
+        width: 1.0,
+        floorHeight: 3.6,
+        riserCount: 18,
+        treadDepth: 0.25,
+        shape: "straight",
+        landingDepth: 1.0,
+      },
+      res.voidPoly,
     );
-    expect(useBuildModeStore.getState().document.floorCells["0:2:2"]?.materialId).toBe("wood_oak");
+    expect(useStudioStore.getState().project.levels[0]!.stairs.length).toBe(1);
+    expect(useStudioStore.getState().project.levels[1]!.slabs.some((s) => s.id === "slab-void-st-new")).toBe(true);
 
-    expect(store.undo()).toBe(true);
-    expect(useBuildModeStore.getState().document.floorCells["0:2:2"]?.materialId).toBe("garden_grass");
+    useStudioStore.getState().addPool({ id: "p-1", gx1: 4, gz1: 28, gx2: 8, gz2: 32, depth: 1.25 });
+    expect(useStudioStore.getState().project.buildExtras?.pools.length).toBe(1);
 
-    expect(store.undo()).toBe(true);
-    expect(useBuildModeStore.getState().document.walls.length).toBe(startWallCount);
-    expect(useBuildModeStore.getState().canRedo()).toBe(true);
+    const h = applyTerrainBrushToHeights([], 10, 34, 2, 2, "raise", 0.3);
+    useStudioStore.getState().setTerrainHeights(h);
+    expect(useStudioStore.getState().project.buildExtras?.terrainHeights[2 * 11 + 2]).toBeGreaterThan(0.2);
 
-    expect(store.redo()).toBe(true);
-    expect(useBuildModeStore.getState().document.walls.length).toBe(startWallCount + 1);
-
-    store.executeCommand(makeUpdateBudgetCommand(520_000_000));
-    expect(useBuildModeStore.getState().document.lot.budgetIdr).toBe(520_000_000);
-  });
-
-  it("switches levels and cycles wall visibility modes cleanly without touching data", () => {
-    const store = useBuildModeStore.getState();
-    expect(store.activeLevel).toBe(0);
-    store.stepLevel(1);
-    expect(useBuildModeStore.getState().activeLevel).toBe(1);
-    store.stepLevel(1);
-    expect(useBuildModeStore.getState().activeLevel).toBe(2);
-    store.stepLevel(1); // clamps at roof level
-    expect(useBuildModeStore.getState().activeLevel).toBe(2);
-
-    store.setWallVisibility("up");
-    store.cycleWallVisibility();
-    expect(useBuildModeStore.getState().wallVisibility).toBe("cutaway");
-    store.cycleWallVisibility();
-    expect(useBuildModeStore.getState().wallVisibility).toBe("down");
-  });
-
-  it("parses valid Build Mode v2 saves and safely ignores legacy v1 files", () => {
-    const empty = createEmpty5x17Document();
-    const okRes = parseBuildDocumentJson(empty);
-    expect(okRes.status).toBe("ok");
-
-    const legacyRes = parseBuildDocumentJson({ formatVersion: 1, walls: [] });
-    expect(legacyRes.status).toBe("legacy_ignored");
-
-    const brokenRes = parseBuildDocumentJson({ formatVersion: 2, lot: {} });
-    expect(brokenRes.status).toBe("invalid");
+    useStudioStore.getState().addFurniture(0, {
+      id: "f-sofa",
+      catalogId: "sofa_l",
+      name: "Sofa L",
+      category: "seating",
+      position: { x: 2.5, y: 0, z: 8.5 },
+      size: { x: 2.2, y: 0.78, z: 1.5 },
+      rotationY: 0,
+      colorHex: "#d8d1c5",
+    });
+    expect(useStudioStore.getState().project.levels[0]!.furniture.length).toBe(1);
   });
 });

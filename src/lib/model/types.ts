@@ -360,6 +360,28 @@ export interface GamificationState {
   siteChecklistDone: Record<string, boolean>;
 }
 
+export interface BuildTileOverride {
+  levelIndex: number;
+  gx: number;
+  gz: number;
+  materialId: string;
+}
+
+export interface BuildPoolOverride {
+  id: string;
+  gx1: number;
+  gz1: number;
+  gx2: number;
+  gz2: number;
+  depth: number;
+}
+
+export interface BuildExtras {
+  floorTiles: BuildTileOverride[];
+  pools: BuildPoolOverride[];
+  terrainHeights: number[];
+}
+
 export interface Project {
   id: ID;
   schemaVersion: number;
@@ -376,4 +398,5 @@ export interface Project {
   simulation: SimulationSettings;
   stageProgress: Record<string, StageProgress>;
   gamification: GamificationState;
+  buildExtras?: BuildExtras;
 }

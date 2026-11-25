@@ -137,7 +137,7 @@ export default function HomePage() {
         target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-        if (editingInput || useStudioStore.getState().workspace === "build") return;
+        if (editingInput) return;
         e.preventDefault();
         if (e.shiftKey) {
           useStudioStore.temporal.getState().redo();
@@ -147,7 +147,7 @@ export default function HomePage() {
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
-        if (editingInput || useStudioStore.getState().workspace === "build") return;
+        if (editingInput) return;
         e.preventDefault();
         useStudioStore.temporal.getState().redo();
         return;
@@ -290,8 +290,16 @@ export default function HomePage() {
 
       {/* Main Studio Shell */}
       <main className="relative flex min-h-0 flex-1 overflow-hidden">
-        {/* New Sims 4-inspired Data-Driven Build Mode + Phase 0 Walk Stub */}
-        {isBuildStub && <BuildWorkspace />}
+        {/* New Sims 4-inspired Unified Single-Source Build Mode + Phase 0 Walk Stub */}
+        {isBuildStub && (
+          <BuildWorkspace
+            derived={derived}
+            struct={struct}
+            onExportJson={handleExportJson}
+            onImportJson={handleImportJson}
+            onSaveSnapshot={handleSaveSnapshot}
+          />
+        )}
         {isWalkStub && <WalkModeStub />}
 
         {/* Analytical 3D Viewport + Timeline */}
@@ -321,11 +329,12 @@ export default function HomePage() {
           <button
             type="button"
             onClick={() => setBuildSniOpen((v) => !v)}
-            className="no-print absolute left-2.5 top-14 z-20 hidden items-center gap-1.5 rounded-lg border border-white/15 bg-[#1a1f27]/90 px-2.5 py-1.5 text-[11px] font-semibold text-foreground shadow-lg backdrop-blur-md hover:border-primary/60 lg:flex sm:top-2.5"
-            title="Buka / Tutup Panel Sistem SNI & Ukuran Bata"
+            className="no-print absolute left-2.5 top-[46px] z-20 flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#1a1f27]/92 px-2.5 py-1.5 text-[11px] font-semibold text-foreground shadow-lg backdrop-blur-md hover:border-primary/60 sm:top-2"
+            title="Buka / Tutup Panel Sistem Arsitektur SNI & Custom Ukuran Bata"
           >
             <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
-            <span>{buildSniOpen ? "Tutup SNI" : "Data SNI & Bata"}</span>
+            <span className="hidden sm:inline">{buildSniOpen ? "Tutup Panel SNI" : "Data SNI & Bata"}</span>
+            <span className="sm:hidden">SNI</span>
           </button>
         )}
 

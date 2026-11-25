@@ -358,6 +358,29 @@ export const projectSchema = z.object({
     completedQuests: z.array(z.string()),
     siteChecklistDone: z.record(z.string(), z.boolean()),
   }),
+  buildExtras: z
+    .object({
+      floorTiles: z.array(
+        z.object({
+          levelIndex: z.number().int().min(0).max(3),
+          gx: z.number().int(),
+          gz: z.number().int(),
+          materialId: z.string(),
+        }),
+      ),
+      pools: z.array(
+        z.object({
+          id: z.string(),
+          gx1: z.number().int(),
+          gz1: z.number().int(),
+          gx2: z.number().int(),
+          gz2: z.number().int(),
+          depth: z.number().min(0.4).max(3),
+        }),
+      ),
+      terrainHeights: z.array(z.number()),
+    })
+    .optional(),
 });
 
 export type VersionedSaveParseResult =
