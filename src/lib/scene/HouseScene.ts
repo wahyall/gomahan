@@ -109,6 +109,7 @@ export class HouseScene {
   private lightningLight!: THREE.DirectionalLight;
   private gridHelper!: THREE.GridHelper;
   private contactShadowTex: THREE.CanvasTexture | null = null;
+  private contactShadowMat!: THREE.MeshBasicMaterial;
 
   private houseRoot = new THREE.Group();
   private envGroup = new THREE.Group();
@@ -251,7 +252,15 @@ export class HouseScene {
     this.palette = createMaterialPalette();
     this.palette.setAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
     this.contactShadowTex = createContactShadowTexture();
-    this.staticDisposables.push(this.contactShadowTex);
+    this.contactShadowMat = new THREE.MeshBasicMaterial({
+      map: this.contactShadowTex,
+      transparent: true,
+      opacity: 0.68,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+    });
+    this.staticDisposables.push(this.contactShadowTex, this.contactShadowMat);
 
     this.setupClippingMaterials();
     this.setupLightingAndSky();
@@ -1105,6 +1114,20 @@ export class HouseScene {
     }
 
     if (showTileFloor) {
+      // Lush rear courtyard lawn (Taman Belakang X: 1.72..4.92, Z: 15.38..16.92) + teak garden pavers
+      batch.addBox("site:grass", this.palette.grass, "lantai", "Taman Belakang", 3.32, lt1Y - 0.015, 16.15, 3.16, 0.04, 1.52);
+      for (const px of [2.15, 2.75, 3.35, 3.95]) {
+        batch.addGeo(
+          "floor1:woodDeck",
+          this.palette.woodDeck,
+          "lantai",
+          "Pijakan Taman Belakang",
+          createChamferBox(0.46, 0.03, 0.42, 0.008, 1),
+          px,
+          lt1Y + 0.01,
+          15.85,
+        );
+      }
       for (const rm of derived.floors[0]!.rooms) {
         if (rm.room.program === "garden" || rm.room.program === "carport" || rm.room.program === "void") continue;
         const shape = new THREE.Shape();
@@ -1628,7 +1651,20 @@ export class HouseScene {
         lvGrp.position.y = baseY;
 
         for (const f of lv.furniture) {
-          const mesh = buildFurnitureMesh(f, this.palette, this.dynResources);
+          const mesh = buildFurnitureMesh(f, this.palette, this.dynResources, this.contactShadowMat);
+          // Ground exterior vehicles physically on Carport peil & front yard greenery on garden soil bed
+          if (lv.index === 0) {
+            if (f.category === "vehicle" && f.position.z < 4.5) {
+              mesh.position.y += Math.max(0.08, peil.carportPeilM) - lt1Y;
+            } else if (f.position.x < 1.5 && f.position.z < 3.0) {
+              mesh.position.y += 0.08 - lt1Y;
+            } else if (f.position.z >= 3.0 && f.position.z <= 4.0 && f.position.x < 2.25) {
+              mesh.position.y += Math.max(0.12, peil.terracePeilM) - lt1Y;
+            } else if (f.position.x > 1.7 && f.position.z > 15.35) {
+              // Rear Taman Belakang grass level sits right on plinth
+              mesh.position.y += 0;
+            }
+          }
           lvGrp.add(mesh);
           this.tagPickable(mesh, { kind: "furniture", id: f.id, levelIndex: lv.index }, f.name);
         }
