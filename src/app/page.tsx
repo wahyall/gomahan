@@ -20,7 +20,7 @@ import { Viewport3D } from "@/components/viewport/Viewport3D";
 import { OutlinerPanel } from "@/components/panels/OutlinerPanel";
 import { InspectorPanel } from "@/components/panels/InspectorPanel";
 import { StageTimelineBar } from "@/components/panels/StageTimelineBar";
-import { BuildModeStub } from "@/components/build/BuildModeStub";
+import { BuildWorkspace } from "@/components/build/BuildWorkspace";
 import { WalkModeStub } from "@/components/walk/WalkModeStub";
 import { StructureWorkspace } from "@/components/workspaces/StructureWorkspace";
 import { LightingWorkspace } from "@/components/workspaces/LightingWorkspace";
@@ -54,6 +54,7 @@ export default function HomePage() {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [toast, setToast] = useState<string | null>(null);
   const [mobileSimTab, setMobileSimTab] = useState<"panel" | "3d">("panel");
+  const [buildSniOpen, setBuildSniOpen] = useState(false);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -136,7 +137,7 @@ export default function HomePage() {
         target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-        if (editingInput) return;
+        if (editingInput || useStudioStore.getState().workspace === "build") return;
         e.preventDefault();
         if (e.shiftKey) {
           useStudioStore.temporal.getState().redo();
@@ -146,7 +147,7 @@ export default function HomePage() {
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
-        if (editingInput) return;
+        if (editingInput || useStudioStore.getState().workspace === "build") return;
         e.preventDefault();
         useStudioStore.temporal.getState().redo();
         return;
@@ -288,9 +289,9 @@ export default function HomePage() {
       )}
 
       {/* Main Studio Shell */}
-      <main className="flex min-h-0 flex-1 overflow-hidden">
-        {/* New Phase 0 Stubs for Build Mode & Walk Mode */}
-        {isBuildStub && <BuildModeStub />}
+      <main className="relative flex min-h-0 flex-1 overflow-hidden">
+        {/* New Sims 4-inspired Data-Driven Build Mode + Phase 0 Walk Stub */}
+        {isBuildStub && <BuildWorkspace />}
         {isWalkStub && <WalkModeStub />}
 
         {/* Analytical 3D Viewport + Timeline */}
@@ -315,8 +316,21 @@ export default function HomePage() {
           </section>
         )}
 
-        {/* Right Dock: Outliner + Inspector on Build Stub (keeps Brick/System/Check controls accessible!) */}
-        {isBuildStub && dockOpen && (
+        {/* Optional SNI / Brick Inspector Drawer Toggle inside Build Mode */}
+        {isBuildStub && (
+          <button
+            type="button"
+            onClick={() => setBuildSniOpen((v) => !v)}
+            className="no-print absolute left-2.5 top-14 z-20 hidden items-center gap-1.5 rounded-lg border border-white/15 bg-[#1a1f27]/90 px-2.5 py-1.5 text-[11px] font-semibold text-foreground shadow-lg backdrop-blur-md hover:border-primary/60 lg:flex sm:top-2.5"
+            title="Buka / Tutup Panel Sistem SNI & Ukuran Bata"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+            <span>{buildSniOpen ? "Tutup SNI" : "Data SNI & Bata"}</span>
+          </button>
+        )}
+
+        {/* Right Dock: Outliner + Inspector only when explicitly opened by user */}
+        {isBuildStub && dockOpen && buildSniOpen && (
           <aside className="no-print hidden w-[320px] shrink-0 flex-col border-l border-border bg-[#181a1f] lg:flex xl:w-[348px]">
             <div className="flex h-[38%] min-h-[180px] flex-col">
               <OutlinerPanel derived={derived} struct={struct} />
