@@ -286,9 +286,9 @@ export default function HomePage() {
 
       {/* Main Studio Shell */}
       <main className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Left Sims 4 Build/Buy Drawer (Build & Furnish workspaces on md+) */}
+        {/* Left Sims 4 Build/Buy Drawer (Build & Furnish workspaces on tablet/desktop height >=500px) */}
         {isBuildOrFurnish && (
-          <div className="hidden min-h-0 md:flex">
+          <div className="hidden min-h-0 [@media(min-width:768px)_and_(min-height:500px)]:flex">
             <BuildFurnishDrawer />
           </div>
         )}

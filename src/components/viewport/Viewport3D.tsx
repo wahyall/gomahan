@@ -371,7 +371,7 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
           <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2 sm:inset-x-2.5 sm:top-2.5">
             <div className="flex min-w-0 max-w-[calc(100%-70px)] flex-col gap-1.5 sm:max-w-[350px]">
               {isSimpleMode && (
-                <div className="pointer-events-auto rounded-md border border-white/12 bg-[#14171c]/90 p-2 shadow-xl backdrop-blur-md sm:p-2.5">
+                <div className="pointer-events-auto rounded-md border border-white/12 bg-[#14171c]/90 p-2 shadow-xl backdrop-blur-md sm:p-2.5 [@media(max-height:480px)]:hidden">
                   <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[10px] sm:text-[10.5px]">
                     <span className="truncate font-bold text-primary">Target {fmtRp(rab.budgetCapIdr)}</span>
                     <span className={cn("font-mono font-bold tabular-nums", rab.overBudget ? "text-red-400" : "text-emerald-400")}>
@@ -514,7 +514,7 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
 
           {/* Dismissible Control Hint Pill (desktop/tablet onboarding) */}
           {showControlHint && !selected && !view.beforeAfterEnabled && (
-            <div className="pointer-events-auto absolute bottom-2.5 right-2.5 hidden items-center gap-2 rounded border border-white/10 bg-black/65 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm lg:flex">
+            <div className="pointer-events-auto absolute bottom-2.5 right-2.5 hidden items-center gap-2 rounded border border-white/10 bg-black/65 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm [@media(min-width:1024px)_and_(min-height:520px)]:flex">
               <span>Seret: Putar · Shift/Kanan: Geser · Scroll: Zoom · Klik furnitur: Geser Sims 4</span>
               <button
                 type="button"
@@ -585,7 +585,7 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
           )}
 
           {/* Legend Bottom Left + Pro Performance Telemetry */}
-          <div className="pointer-events-none absolute bottom-2.5 left-2.5 hidden flex-wrap items-center gap-2 rounded border border-white/10 bg-black/60 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm md:flex">
+          <div className="pointer-events-none absolute bottom-2.5 left-2.5 hidden flex-wrap items-center gap-2 rounded border border-white/10 bg-black/60 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm [@media(min-width:768px)_and_(min-height:520px)]:flex">
             <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#efede6]" /> Bata / Plester</span>
             <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#8f9295]" /> Beton SNI</span>
             <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#363b40]" /> Atap Shed 10°</span>
