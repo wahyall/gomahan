@@ -756,7 +756,7 @@ export function BuildWorkspace({
                     }}
                     title={`Pindah ke ${label} (PgUp/PgDn)`}
                     className={cn(
-                      "flex-1 rounded-md px-1.5 py-1 text-[10.5px] font-semibold transition sm:px-2 sm:text-[11px]",
+                      "flex-1 whitespace-nowrap rounded-md px-2 py-1 text-[10.5px] font-semibold transition sm:text-[11px]",
                       activeLevel === lvl
                         ? "bg-[#f2efe8] text-[#14171c] shadow-sm"
                         : "text-muted-foreground hover:text-foreground",

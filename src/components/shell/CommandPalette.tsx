@@ -27,11 +27,22 @@ export function CommandPalette() {
   const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (open && !wasOpenRef.current) {
-      previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    } else if (!open && wasOpenRef.current) {
-      previousFocusRef.current?.focus?.();
+    const onFocusIn = (e: FocusEvent) => {
+      if (useStudioStore.getState().commandPaletteOpen) return;
+      const target = e.target;
+      if (target instanceof HTMLElement && !target.closest('[role="dialog"]')) {
+        previousFocusRef.current = target;
+      }
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, []);
+
+  useEffect(() => {
+    if (!open && wasOpenRef.current) {
+      const toRestore = previousFocusRef.current;
       previousFocusRef.current = null;
+      queueMicrotask(() => toRestore?.focus?.());
     }
     wasOpenRef.current = open;
   }, [open]);

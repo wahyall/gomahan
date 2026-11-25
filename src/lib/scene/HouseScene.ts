@@ -502,18 +502,18 @@ export class HouseScene {
       this.envTex?.dispose();
       this.envTex = env;
       this.scene.environment = env;
-      this.scene.environmentIntensity = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5 ? 0.35 : 0.72;
+      const isNight = !lighting.solar.isDaylight;
+      const isStorm = sim.rainIntensityMmH > 20;
+      this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.92 : 0.72;
       this.palette.bindEnvMap(env);
 
       const [sx, sy, sz] = lighting.solar.sunDir;
       this.sunLight.position.set(2.5 + sx * 24, Math.max(2.5, sy * 24), 8.5 + sz * 24);
-      const isNight = !lighting.solar.isDaylight;
-      const isStorm = sim.rainIntensityMmH > 20;
-      this.sunLight.intensity = isNight ? 0.16 : isStorm ? 0.85 : 2.35;
+      this.sunLight.intensity = isNight ? 0.16 : isStorm ? 1.15 : 2.35;
       this.sunLight.color.set(
         isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff5e0,
       );
-      this.hemiLight.intensity = isNight ? 0.28 : isStorm ? 0.55 : 0.76;
+      this.hemiLight.intensity = isNight ? 0.28 : isStorm ? 0.85 : 0.76;
       if (this.scene.fog instanceof THREE.FogExp2) {
         this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x6f7c89 : 0xd2e1ec);
         this.scene.fog.density = isStorm ? 0.013 : 0.0055;

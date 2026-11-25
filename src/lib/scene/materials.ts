@@ -664,9 +664,9 @@ export function createMaterialPalette(): MaterialPalette {
     normalMap: roofTex.normal,
     normalScale: new THREE.Vector2(0.75, 0.75),
     roughnessMap: brushedRough,
-    roughness: 0.56,
-    metalness: 0.26,
-    envMapIntensity: 0.65,
+    roughness: 0.48,
+    metalness: 0.18,
+    envMapIntensity: 0.95,
   });
 
   const lisplank = new THREE.MeshStandardMaterial({ color: 0xe6dac5, roughness: 0.68, envMapIntensity: 0.35 });
