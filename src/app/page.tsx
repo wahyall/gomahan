@@ -9,7 +9,7 @@ import { runLightingSimulation } from "@/lib/simulation/lightingEngine";
 import { runAirflowSimulation } from "@/lib/simulation/airflowEngine";
 import { runFloodSimulation } from "@/lib/simulation/floodEngine";
 import { evaluateGamification } from "@/lib/gamification/simsEngine";
-import { validateProjectImport } from "@/lib/model/schema";
+import { parseVersionedProjectSave } from "@/lib/model/schema";
 import { loadLatestProject, saveAutosaveProject, saveProjectSnapshot } from "@/lib/store/db";
 import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
 import type { HouseScene } from "@/lib/scene/HouseScene";
@@ -20,7 +20,8 @@ import { Viewport3D } from "@/components/viewport/Viewport3D";
 import { OutlinerPanel } from "@/components/panels/OutlinerPanel";
 import { InspectorPanel } from "@/components/panels/InspectorPanel";
 import { StageTimelineBar } from "@/components/panels/StageTimelineBar";
-import { BuildFurnishDrawer } from "@/components/workspaces/BuildFurnishDrawer";
+import { BuildModeStub } from "@/components/build/BuildModeStub";
+import { WalkModeStub } from "@/components/walk/WalkModeStub";
 import { StructureWorkspace } from "@/components/workspaces/StructureWorkspace";
 import { LightingWorkspace } from "@/components/workspaces/LightingWorkspace";
 import { AirflowWorkspace } from "@/components/workspaces/AirflowWorkspace";
@@ -42,10 +43,8 @@ export default function HomePage() {
   const dockOpen = useStudioStore((s) => s.dockOpen);
   const scheduleScenario = useStudioStore((s) => s.scheduleScenario);
   const loadProject = useStudioStore((s) => s.loadProject);
-  const deleteSelected = useStudioStore((s) => s.deleteSelected);
-  const rotateSelected = useStudioStore((s) => s.rotateSelected);
   const setSelected = useStudioStore((s) => s.setSelected);
-  const setActiveTool = useStudioStore((s) => s.setActiveTool);
+  const setWorkspace = useStudioStore((s) => s.setWorkspace);
 
   const sceneRef = useRef<HouseScene | null>(null);
   const lastSnapshotRef = useRef<string | null>(null);
@@ -66,16 +65,18 @@ export default function HomePage() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Load latest IndexedDB autosave post-mount (hydration safe)
+  // Load latest IndexedDB autosave post-mount (handles v1 legacy saves safely without crashing or corrupting data)
   useEffect(() => {
     let active = true;
     loadLatestProject()
       .then((saved) => {
         if (!active) return;
         if (saved) {
-          const check = validateProjectImport(saved);
-          if (check.success) {
+          const check = parseVersionedProjectSave(saved);
+          if (check.status === "ok") {
             loadProject(check.data);
+          } else if (check.status === "legacy_ignored") {
+            showToast(check.message);
           }
         }
         setHydrated(true);
@@ -87,7 +88,7 @@ export default function HomePage() {
     return () => {
       active = false;
     };
-  }, [loadProject]);
+  }, [loadProject, showToast]);
 
   const handleSceneReady = useCallback((sc: HouseScene | null) => {
     sceneRef.current = sc;
@@ -127,7 +128,7 @@ export default function HomePage() {
     return () => clearInterval(id);
   }, [captureSnapshot]);
 
-  // Global studio keyboard shortcuts (Ctrl+Z, Ctrl+Shift+Z, Del, R, Esc)
+  // Global studio keyboard shortcuts (Ctrl+Z, Ctrl+Shift+Z, Shift+B Build Stub, Shift+V Walk Stub, Esc)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -152,25 +153,22 @@ export default function HomePage() {
       }
       if (editingInput) return;
 
-      if (e.key === "Delete" || e.key === "Backspace") {
-        const sel = useStudioStore.getState().selected;
-        if (sel && sel.kind !== "part") {
-          e.preventDefault();
-          deleteSelected();
-        }
-      } else if (e.key.toLowerCase() === "r" && !e.ctrlKey && !e.metaKey) {
-        const ws = useStudioStore.getState().workspace;
-        if (ws === "build" || ws === "furnish") {
-          rotateSelected(Math.PI / 4);
-        }
+      if (e.shiftKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setWorkspace("build");
+      } else if (e.shiftKey && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        setWorkspace("walk");
       } else if (e.key === "Escape") {
         setSelected(null);
-        setActiveTool("select");
+        if (useStudioStore.getState().workspace === "walk") {
+          setWorkspace("build");
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteSelected, rotateSelected, setActiveTool, setSelected]);
+  }, [setSelected, setWorkspace]);
 
   // Core reactive computation pipeline
   const derived = useMemo(() => buildDerivedModel(project), [project]);
@@ -211,9 +209,13 @@ export default function HomePage() {
       try {
         const text = await file.text();
         const parsed = JSON.parse(text);
-        const res = validateProjectImport(parsed);
-        if (!res.success) {
-          showToast(`Format JSON tidak valid: ${res.error.issues[0]?.message ?? "schema error"}`);
+        const res = parseVersionedProjectSave(parsed);
+        if (res.status === "legacy_ignored") {
+          showToast(res.message);
+          return;
+        }
+        if (res.status === "invalid") {
+          showToast(res.message);
           return;
         }
         loadProject(res.data);
@@ -237,7 +239,8 @@ export default function HomePage() {
     }
   }, [project, showToast]);
 
-  const isBuildOrFurnish = workspace === "build" || workspace === "furnish";
+  const isBuildStub = workspace === "build";
+  const isWalkStub = workspace === "walk";
   const isSimSplit = SIM_SPLIT_WORKSPACES.includes(workspace);
 
   return (
@@ -286,19 +289,16 @@ export default function HomePage() {
 
       {/* Main Studio Shell */}
       <main className="flex min-h-0 flex-1 overflow-hidden">
-        {/* Left Sims 4 Build/Buy Drawer (Build & Furnish workspaces on tablet/desktop height >=500px) */}
-        {isBuildOrFurnish && (
-          <div className="hidden min-h-0 [@media(min-width:768px)_and_(min-height:500px)]:flex">
-            <BuildFurnishDrawer />
-          </div>
-        )}
+        {/* New Phase 0 Stubs for Build Mode & Walk Mode */}
+        {isBuildStub && <BuildModeStub />}
+        {isWalkStub && <WalkModeStub />}
 
-        {/* Center Viewport + Stage Timeline */}
-        {(isBuildOrFurnish || isSimSplit) && (
+        {/* Analytical 3D Viewport + Timeline */}
+        {isSimSplit && (
           <section
             className={cn(
               "min-h-0 flex-1 flex-col overflow-hidden",
-              isSimSplit && mobileSimTab === "panel" ? "hidden lg:flex" : "flex",
+              mobileSimTab === "panel" ? "hidden lg:flex" : "flex",
             )}
           >
             <Viewport3D
@@ -311,12 +311,12 @@ export default function HomePage() {
               gamification={gamification}
               onSceneReady={handleSceneReady}
             />
-            {isBuildOrFurnish && <StageTimelineBar />}
+            <StageTimelineBar />
           </section>
         )}
 
-        {/* Right Dock: Outliner + Inspector on Build/Furnish */}
-        {isBuildOrFurnish && dockOpen && (
+        {/* Right Dock: Outliner + Inspector on Build Stub (keeps Brick/System/Check controls accessible!) */}
+        {isBuildStub && dockOpen && (
           <aside className="no-print hidden w-[320px] shrink-0 flex-col border-l border-border bg-[#181a1f] lg:flex xl:w-[348px]">
             <div className="flex h-[38%] min-h-[180px] flex-col">
               <OutlinerPanel derived={derived} struct={struct} />

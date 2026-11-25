@@ -9,6 +9,7 @@ import {
   Download,
   FileSpreadsheet,
   FolderOpen,
+  Footprints,
   Hammer,
   HardHat,
   RotateCcw,
@@ -16,7 +17,6 @@ import {
   Search,
   ShieldCheck,
   SlidersHorizontal,
-  Sofa,
   Sparkles,
   Sun,
   Undo2,
@@ -34,8 +34,8 @@ import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 
 const WORKSPACES: { id: WorkspaceId; label: string; short: string; icon: React.ElementType }[] = [
-  { id: "build", label: "Build", short: "Build", icon: Hammer },
-  { id: "furnish", label: "Furnish", short: "Furnish", icon: Sofa },
+  { id: "build", label: "Build Mode", short: "Build", icon: Hammer },
+  { id: "walk", label: "Walk Mode", short: "Walk", icon: Footprints },
   { id: "structure", label: "Struktur", short: "Struktur", icon: ShieldCheck },
   { id: "lighting", label: "Cahaya", short: "Cahaya", icon: Sun },
   { id: "airflow", label: "Udara", short: "Udara", icon: Wind },
@@ -151,9 +151,9 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
                 "flex min-h-7 items-center gap-1 rounded-sm px-2 py-0.5 transition",
                 mode === "simple" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
               )}
-              title="Mode Simpel / Sims 4 (Gamifikasi Aktif)"
+              title="Mode Simpel (Skor & Anggaran Aktif)"
             >
-              <Sparkles className="h-3 w-3" /> Sims
+              <Sparkles className="h-3 w-3" /> Ringkas
             </button>
             <button
               type="button"

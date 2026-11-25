@@ -35,8 +35,8 @@ export function CommandPalette() {
 
   const actions = useMemo<ActionItem[]>(() => {
     const ws: [WorkspaceId, string][] = [
-      ["build", "Buka Workspace Build (Model 3D)"],
-      ["furnish", "Buka Katalog Furnitur, Lampu & Kipas/AC"],
+      ["build", "Buka Build Mode Baru (Stub Fase 0)"],
+      ["walk", "Buka Walk Mode Realistis (Stub Fase 0)"],
       ["structure", "Buka Analisis Struktur SNI & Besi BBS"],
       ["lighting", "Buka Simulasi Pencahayaan & Matahari"],
       ["airflow", "Buka Simulasi Sirkulasi Udara & AC"],
@@ -61,7 +61,6 @@ export function CommandPalette() {
       { id: "brick-custom", label: "Gunakan Ukuran Bata Custom", category: "Material", run: () => setBrickPreset("custom") },
       { id: "explode", label: "Toggle Exploded View (Bongkar Granular)", category: "Viewport", run: () => patchView({ explode: useStudioStore.getState().view.explode > 0.1 ? 0 : 1 }) },
       { id: "xray-rebar", label: "Toggle X-Ray Tulangan Besi Struktur", category: "Viewport", run: () => patchView({ xrayRebar: !useStudioStore.getState().view.xrayRebar }) },
-      { id: "walk", label: "Masuk Mode Jalan Orang Pertama (Walkthrough)", category: "Kamera", run: () => patchView({ cameraPreset: "walkthrough" }) },
       { id: "flood-60", label: "Uji Simulasi Banjir 60 cm + Hujan Lebat", category: "Simulasi", run: () => { setWorkspace("flood"); patchSimulation({ floodDepthCm: 60, rainIntensityMmH: 85 }); } },
       { id: "night-lights", label: "Pratinjau Suasana Malam Hari (19:30)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 19.5 }) },
       { id: "noon-sun", label: "Pratinjau Matahari Siang Hari (12:00)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 12 }) },

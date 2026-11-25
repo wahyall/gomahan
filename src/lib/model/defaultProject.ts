@@ -526,7 +526,7 @@ export function createDefaultProject(): Project {
 
   return {
     id: "rumah-5x17-surabaya",
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "Rumah Tropis Modern 5×17 m (2 Lantai, 3 KT) — Surabaya",
     createdAt: now,
     updatedAt: now,

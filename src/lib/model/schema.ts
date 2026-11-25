@@ -230,9 +230,11 @@ export const levelSchema = z.object({
   mepRoutes: z.array(mepRouteSchema),
 });
 
+export const CURRENT_PROJECT_SCHEMA_VERSION = 2 as const;
+
 export const projectSchema = z.object({
   id: z.string().min(1),
-  schemaVersion: z.number().int().min(1),
+  schemaVersion: z.literal(CURRENT_PROJECT_SCHEMA_VERSION),
   name: z.string().min(1),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -357,6 +359,34 @@ export const projectSchema = z.object({
     siteChecklistDone: z.record(z.string(), z.boolean()),
   }),
 });
+
+export type VersionedSaveParseResult =
+  | { status: "ok"; data: z.infer<typeof projectSchema> }
+  | { status: "legacy_ignored"; legacyVersion: number; message: string }
+  | { status: "invalid"; message: string };
+
+export function parseVersionedProjectSave(raw: unknown): VersionedSaveParseResult {
+  if (!raw || typeof raw !== "object") {
+    return { status: "invalid", message: "Data JSON bukan objek proyek yang valid." };
+  }
+  const obj = raw as Record<string, unknown>;
+  const ver = typeof obj.schemaVersion === "number" ? obj.schemaVersion : 1;
+  if (ver < CURRENT_PROJECT_SCHEMA_VERSION) {
+    return {
+      status: "legacy_ignored",
+      legacyVersion: ver,
+      message: `Data save versi lama (v${ver}) tidak kompatibel dengan sistem grid Build Mode & Walk Mode baru. Data lama diabaikan dengan aman dan lot standar v${CURRENT_PROJECT_SCHEMA_VERSION} dimuat.`,
+    };
+  }
+  const res = projectSchema.safeParse(raw);
+  if (!res.success) {
+    return {
+      status: "invalid",
+      message: `Format JSON v${ver} tidak valid: ${res.error.issues[0]?.message ?? "schema error"}`,
+    };
+  }
+  return { status: "ok", data: res.data };
+}
 
 export function validateProjectImport(raw: unknown) {
   return projectSchema.safeParse(raw);

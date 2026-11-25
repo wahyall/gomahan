@@ -16,7 +16,7 @@ const jetbrains = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "Rumah Studio 3D — Arsitektur 5×17 m, Struktur SNI, Simulasi & RAB",
   description:
-    "Aplikasi 3D arsitektur lokal-first bergaya The Sims 4 & Blender untuk merancang, menguji struktur SNI, simulasi pencahayaan/udara/banjir, menghitung RAB bata & adukan, dan mengekspor paket kontraktor.",
+    "Aplikasi 3D arsitektur lokal-first berbasis data grid untuk merancang rumah 5×17 m, menguji struktur SNI, simulasi pencahayaan/udara/banjir, menghitung RAB bata & adukan, serta mengekspor paket kontraktor.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

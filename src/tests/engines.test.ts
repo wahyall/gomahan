@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultProject } from "@/lib/model/defaultProject";
-import { validateProjectImport } from "@/lib/model/schema";
+import { parseVersionedProjectSave, validateProjectImport } from "@/lib/model/schema";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
 import { computeStructuralReport } from "@/lib/structure/sniEngine";
 import { buildRabSummary } from "@/lib/quantities/rabEngine";
@@ -204,5 +204,19 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     expect(useStudioStore.getState().project.levels[0]!.hvac.some((h) => h.id === "hvac-test-fan")).toBe(true);
 
     store.resetProject();
+  });
+
+  it("ignores legacy v1 save data safely with a clear message and accepts v2", () => {
+    const legacyV1 = { ...createDefaultProject(), schemaVersion: 1 };
+    const resV1 = parseVersionedProjectSave(legacyV1);
+    expect(resV1.status).toBe("legacy_ignored");
+    if (resV1.status === "legacy_ignored") {
+      expect(resV1.legacyVersion).toBe(1);
+      expect(resV1.message).toContain("v1");
+    }
+
+    const v2 = createDefaultProject();
+    const resV2 = parseVersionedProjectSave(v2);
+    expect(resV2.status).toBe("ok");
   });
 });

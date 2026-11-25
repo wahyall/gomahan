@@ -59,9 +59,6 @@ interface ExplodeInstanced {
 export interface SceneCallbacks {
   onSelect: (sel: SelectionTarget) => void;
   onHover: (label: string | null, x: number, y: number) => void;
-  onMoveEntity: (sel: NonNullable<SelectionTarget>, x: number, z: number) => void;
-  onPlaceAt: (x: number, z: number, levelIndex: 0 | 1) => void;
-  onWalkthroughExit?: () => void;
   onWebGLStatus?: (status: WebGLStatus) => void;
   onStats?: (stats: SceneStatsSnapshot) => void;
 }
@@ -130,12 +127,9 @@ export class HouseScene {
   private explodeCurrent = 0;
   private explodeTarget = 0;
 
-  // Picking & Dragging
+  // Picking
   private raycaster = new THREE.Raycaster();
   private pickables: THREE.Object3D[] = [];
-  private dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  private draggingEntity: NonNullable<SelectionTarget> | null = null;
-  private dragOffset = new THREE.Vector3();
   private selectedTarget: SelectionTarget = null;
   private selectedRing!: THREE.Mesh;
 
@@ -152,26 +146,18 @@ export class HouseScene {
   private lightningEnergy = 0;
   private lastRainMmH = 0;
 
-  // Orbit & Walkthrough Camera (current + smoothed targets)
+  // Orbit Camera (current + smoothed targets)
   private target = new THREE.Vector3(2.5, 2.5, 8.5);
   private targetDesired = new THREE.Vector3(2.5, 2.5, 8.5);
   private sph = { radius: 19, theta: Math.PI * 0.82, phi: 1.05 };
   private sphDesired = { radius: 19, theta: Math.PI * 0.82, phi: 1.05 };
   private cameraDirty = true;
 
-  private walkthroughActive = false;
-  private walkPos = new THREE.Vector3(1.1, 2.15, 2.5);
-  private walkYaw = 0;
-  private walkPitch = 0;
-  private keysPressed = new Set<string>();
-
   private pointers = new Map<number, { x: number; y: number }>();
   private downInfo: { x: number; y: number; button: number; time: number } | null = null;
   private panMode = false;
   private pinchDist = 0;
   private activeFloorElevation = 0.5;
-  private activeLevelIdx: 0 | 1 = 0;
-  private activeTool = "select";
 
   private callbacks: SceneCallbacks;
   private ro: ResizeObserver | null = null;
@@ -199,8 +185,6 @@ export class HouseScene {
   private readonly _ndc = new THREE.Vector2();
   private readonly _fwd = new THREE.Vector3();
   private readonly _right = new THREE.Vector3();
-  private readonly _look = new THREE.Vector3();
-  private readonly _hitPt = new THREE.Vector3();
 
   constructor(canvas: HTMLCanvasElement, callbacks: SceneCallbacks) {
     this.canvas = canvas;
@@ -615,16 +599,6 @@ export class HouseScene {
 
   setCameraPreset(preset: ViewState["cameraPreset"]) {
     if (!this.webglReady) return;
-    this.walkthroughActive = preset === "walkthrough";
-    if (this.walkthroughActive) {
-      this.walkPos.set(1.1, this.activeFloorElevation + 1.65, 2.0);
-      this.walkYaw = 0;
-      this.walkPitch = -0.04;
-      this.cameraDirty = true;
-      this.updateCameraTransform();
-      return;
-    }
-
     this.targetDesired.set(2.5, 2.75, 8.5);
     switch (preset) {
       case "front":
@@ -660,14 +634,10 @@ export class HouseScene {
     flood: FloodSimulationResult,
     view: ViewState,
     selected: SelectionTarget,
-    activeLevelIdx: 0 | 1,
-    activeTool: string,
   ) {
     if (!this.webglReady || this.disposed) return;
 
     this.activeFloorElevation = derived.project.site.peil.floor1PeilM;
-    this.activeLevelIdx = activeLevelIdx;
-    this.activeTool = activeTool;
     this.selectedTarget = selected;
     this.useOrtho = view.ortho;
     this.explodeTarget = view.explode;
@@ -2028,16 +1998,6 @@ export class HouseScene {
 
   private updateCameraTransform() {
     if (!this.webglReady) return;
-    if (this.walkthroughActive) {
-      this.cameraPersp.position.copy(this.walkPos);
-      this._look.set(
-        this.walkPos.x + Math.sin(this.walkYaw) * Math.cos(this.walkPitch),
-        this.walkPos.y + Math.sin(this.walkPitch),
-        this.walkPos.z + Math.cos(this.walkYaw) * Math.cos(this.walkPitch),
-      );
-      this.cameraPersp.lookAt(this._look);
-      return;
-    }
 
     const { radius, theta, phi } = this.sph;
     const x = this.target.x + radius * Math.sin(phi) * Math.sin(theta);
@@ -2101,49 +2061,16 @@ export class HouseScene {
     return null;
   }
 
-  private intersectFloorPlane(e: PointerEvent): THREE.Vector3 | null {
-    const ndc = this.getPointerNdc(e);
-    const cam = this.useOrtho ? this.cameraOrtho : this.cameraPersp;
-    this.raycaster.setFromCamera(ndc, cam);
-    const yFloor = this.activeFloorElevation + (this.activeLevelIdx === 1 ? 3.6 : 0);
-    this.dragPlane.set(this._up, -yFloor);
-    return this.raycaster.ray.intersectPlane(this.dragPlane, this._hitPt);
-  }
-
   private onPointerDown = (e: PointerEvent) => {
     this.canvas.setPointerCapture(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.downInfo = { x: e.clientX, y: e.clientY, button: e.button, time: performance.now() };
     this.panMode = e.button === 1 || e.button === 2 || e.shiftKey;
-
-    if (e.button === 0 && !this.panMode) {
-      const picked = this.pickAt(e);
-      if (
-        picked?.sel &&
-        (picked.sel.kind === "furniture" || picked.sel.kind === "hvac" || picked.sel.kind === "light") &&
-        this.selectedTarget &&
-        picked.sel.id === this.selectedTarget.id
-      ) {
-        this.draggingEntity = picked.sel;
-        const floorPt = this.intersectFloorPlane(e);
-        if (floorPt) this.dragOffset.copy(floorPt);
-      }
-    }
   };
 
   private onPointerMove = (e: PointerEvent) => {
     const prev = this.pointers.get(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-    if (this.draggingEntity) {
-      const pt = this.intersectFloorPlane(e);
-      if (pt) {
-        const clampedX = Math.max(0.25, Math.min(4.75, Math.round(pt.x * 10) / 10));
-        const clampedZ = Math.max(0.25, Math.min(16.75, Math.round(pt.z * 10) / 10));
-        this.callbacks.onMoveEntity(this.draggingEntity, clampedX, clampedZ);
-      }
-      return;
-    }
 
     if (this.pointers.size === 2) {
       const pts = [...this.pointers.values()];
@@ -2159,13 +2086,6 @@ export class HouseScene {
     if (prev && this.downInfo) {
       const dx = e.clientX - prev.x;
       const dy = e.clientY - prev.y;
-
-      if (this.walkthroughActive) {
-        this.walkYaw -= dx * 0.005;
-        this.walkPitch = THREE.MathUtils.clamp(this.walkPitch - dy * 0.004, -0.9, 0.9);
-        this.updateCameraTransform();
-        return;
-      }
 
       if (this.panMode) {
         this.cameraPersp.getWorldDirection(this._fwd);
@@ -2196,28 +2116,11 @@ export class HouseScene {
     this.pointers.delete(e.pointerId);
     this.pinchDist = 0;
 
-    if (this.draggingEntity) {
-      this.draggingEntity = null;
-      this.downInfo = null;
-      return;
-    }
-
     if (this.downInfo && e.button === 0) {
       const moved = Math.hypot(e.clientX - this.downInfo.x, e.clientY - this.downInfo.y);
       if (moved < 6) {
-        if (this.activeTool !== "select" && this.activeTool !== "demolish" && this.activeTool !== "paint") {
-          const floorPt = this.intersectFloorPlane(e);
-          if (floorPt) {
-            this.callbacks.onPlaceAt(
-              Math.max(0.2, Math.min(4.8, Math.round(floorPt.x * 10) / 10)),
-              Math.max(0.2, Math.min(16.8, Math.round(floorPt.z * 10) / 10)),
-              this.activeLevelIdx,
-            );
-          }
-        } else {
-          const picked = this.pickAt(e);
-          this.callbacks.onSelect(picked ? picked.sel : null);
-        }
+        const picked = this.pickAt(e);
+        this.callbacks.onSelect(picked ? picked.sel : null);
       }
     }
     this.downInfo = null;
@@ -2230,19 +2133,6 @@ export class HouseScene {
   };
 
   private onContextMenu = (e: MouseEvent) => e.preventDefault();
-
-  private onKeyDown = (e: KeyboardEvent) => {
-    this.keysPressed.add(e.key.toLowerCase());
-    if (e.key === "Escape" && this.walkthroughActive) {
-      this.walkthroughActive = false;
-      this.callbacks.onWalkthroughExit?.();
-      this.setCameraPreset("3d");
-    }
-  };
-
-  private onKeyUp = (e: KeyboardEvent) => {
-    this.keysPressed.delete(e.key.toLowerCase());
-  };
 
   private onVisibilityChange = () => {
     this.isHidden = typeof document !== "undefined" ? document.hidden : false;
@@ -2276,8 +2166,6 @@ export class HouseScene {
     this.canvas.addEventListener("contextmenu", this.onContextMenu);
     this.canvas.addEventListener("webglcontextlost", this.onWebGLContextLost);
     this.canvas.addEventListener("webglcontextrestored", this.onWebGLContextRestored);
-    window.addEventListener("keydown", this.onKeyDown);
-    window.addEventListener("keyup", this.onKeyUp);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
     this.reducedMotionMq?.addEventListener("change", this.onReducedMotionChange);
   }
@@ -2327,7 +2215,7 @@ export class HouseScene {
     }
 
     // Smooth Camera Damping
-    if (this.cameraDirty && !this.walkthroughActive) {
+    if (this.cameraDirty) {
       const k = this.reducedMotion ? 1 : 1 - Math.exp(-16 * dt);
       this.sph.radius += (this.sphDesired.radius - this.sph.radius) * k;
       this.sph.theta += (this.sphDesired.theta - this.sph.theta) * k;
@@ -2349,34 +2237,6 @@ export class HouseScene {
       if (this.reducedMotion) this.explodeCurrent = this.explodeTarget;
       else this.explodeCurrent += (this.explodeTarget - this.explodeCurrent) * Math.min(1, dt * 8);
       this.applyExplode(this.explodeCurrent);
-    }
-
-    // Walkthrough WASD movement
-    if (this.walkthroughActive) {
-      const spd = 3.2 * dt;
-      const fx = Math.sin(this.walkYaw);
-      const fz = Math.cos(this.walkYaw);
-      const rx = Math.cos(this.walkYaw);
-      const rz = -Math.sin(this.walkYaw);
-      if (this.keysPressed.has("w") || this.keysPressed.has("arrowup")) {
-        this.walkPos.x += fx * spd;
-        this.walkPos.z += fz * spd;
-      }
-      if (this.keysPressed.has("s") || this.keysPressed.has("arrowdown")) {
-        this.walkPos.x -= fx * spd;
-        this.walkPos.z -= fz * spd;
-      }
-      if (this.keysPressed.has("a") || this.keysPressed.has("arrowleft")) {
-        this.walkPos.x += rx * spd;
-        this.walkPos.z += rz * spd;
-      }
-      if (this.keysPressed.has("d") || this.keysPressed.has("arrowright")) {
-        this.walkPos.x -= rx * spd;
-        this.walkPos.z -= rz * spd;
-      }
-      if (this.keysPressed.has("e")) this.walkPos.y = Math.min(8, this.walkPos.y + spd);
-      if (this.keysPressed.has("q")) this.walkPos.y = Math.max(1.2, this.walkPos.y - spd);
-      this.updateCameraTransform();
     }
 
     // Spin fans
@@ -2487,8 +2347,6 @@ export class HouseScene {
     this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     this.canvas.removeEventListener("webglcontextlost", this.onWebGLContextLost);
     this.canvas.removeEventListener("webglcontextrestored", this.onWebGLContextRestored);
-    window.removeEventListener("keydown", this.onKeyDown);
-    window.removeEventListener("keyup", this.onKeyUp);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.reducedMotionMq?.removeEventListener("change", this.onReducedMotionChange);
 

@@ -9,30 +9,20 @@ import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { GamificationEvaluation } from "@/lib/gamification/simsEngine";
 import { HouseScene, type QualityTier, type SceneStatsSnapshot, type WebGLStatus } from "@/lib/scene/HouseScene";
-import { FURNITURE_CATALOG, HVAC_CATALOG, LIGHT_CATALOG } from "@/lib/model/catalog";
-import { useStudioStore, type BuildTool, type CameraPreset } from "@/lib/store/useStudioStore";
+import { useStudioStore, type CameraPreset } from "@/lib/store/useStudioStore";
 import { PartInfoPanel } from "@/components/panels/PartInfoPanel";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 import {
   Award,
   Boxes,
-  BrickWall,
   CloudRain,
-  DoorOpen,
   Droplets,
-  Fan,
-  Footprints,
   GitCompare,
   Grid3x3,
-  Hammer,
-  Layers,
-  Lightbulb,
-  MousePointer,
   PanelRight,
   Ruler,
   ShieldAlert,
-  Sofa,
   Sun,
   Tag,
   Wind,
@@ -50,17 +40,6 @@ interface Props {
   onSceneReady?: (scene: HouseScene | null) => void;
 }
 
-const TOOLS: { id: BuildTool; label: string; icon: React.ElementType }[] = [
-  { id: "select", label: "Pilih / Geser", icon: MousePointer },
-  { id: "wall", label: "Sekat Dinding", icon: BrickWall },
-  { id: "door", label: "Tambah Pintu", icon: DoorOpen },
-  { id: "window", label: "Tambah Jendela", icon: Layers },
-  { id: "furniture", label: "Taruh Furnitur", icon: Sofa },
-  { id: "hvac", label: "Taruh AC / Kipas", icon: Fan },
-  { id: "light", label: "Taruh Lampu", icon: Lightbulb },
-  { id: "demolish", label: "Palu Hapus", icon: Hammer },
-];
-
 export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gamification, onSceneReady }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<HouseScene | null>(null);
@@ -73,154 +52,19 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
 
   const view = useStudioStore((s) => s.view);
   const patchView = useStudioStore((s) => s.patchView);
-  const activeTool = useStudioStore((s) => s.activeTool);
-  const setActiveTool = useStudioStore((s) => s.setActiveTool);
-  const activeLevelIndex = useStudioStore((s) => s.activeLevelIndex);
   const setActiveLevelIndex = useStudioStore((s) => s.setActiveLevelIndex);
   const selected = useStudioStore((s) => s.selected);
-  const setSelected = useStudioStore((s) => s.setSelected);
   const dockOpen = useStudioStore((s) => s.dockOpen);
   const setDockOpen = useStudioStore((s) => s.setDockOpen);
-  const updateFurniture = useStudioStore((s) => s.updateFurniture);
-  const updateHvac = useStudioStore((s) => s.updateHvac);
-  const updateLight = useStudioStore((s) => s.updateLight);
-  const addFurniture = useStudioStore((s) => s.addFurniture);
-  const addHvac = useStudioStore((s) => s.addHvac);
-  const addLight = useStudioStore((s) => s.addLight);
-  const addWall = useStudioStore((s) => s.addWall);
-  const addOpening = useStudioStore((s) => s.addOpening);
-  const deleteWall = useStudioStore((s) => s.deleteWall);
-  const deleteFurniture = useStudioStore((s) => s.deleteFurniture);
-  const deleteHvac = useStudioStore((s) => s.deleteHvac);
-  const deleteLight = useStudioStore((s) => s.deleteLight);
   const lockBaseline = useStudioStore((s) => s.lockBaseline);
   const baselineProject = useStudioStore((s) => s.baselineProject);
 
-  // Mount Three.js scene
+  // Mount Three.js analytical viewer
   useEffect(() => {
     if (!canvasRef.current) return;
     const sc = new HouseScene(canvasRef.current, {
-      onSelect: (sel) => {
-        const st = useStudioStore.getState();
-        if (st.activeTool === "demolish" && sel && sel.kind !== "part") {
-          if (sel.kind === "wall") st.deleteWall(sel.levelIndex as 0 | 1, sel.id);
-          else if (sel.kind === "furniture") st.deleteFurniture(sel.levelIndex as 0 | 1, sel.id);
-          else if (sel.kind === "hvac") st.deleteHvac(sel.levelIndex as 0 | 1, sel.id);
-          else if (sel.kind === "light") st.deleteLight(sel.levelIndex as 0 | 1, sel.id);
-          else if (sel.kind === "opening") st.deleteOpening(sel.levelIndex as 0 | 1, sel.wallId, sel.id);
-          return;
-        }
-        st.setSelected(sel);
-      },
+      onSelect: (sel) => useStudioStore.getState().setSelected(sel),
       onHover: (label, x, y) => setHoverInfo(label ? { label, x, y } : null),
-      onMoveEntity: (sel, x, z) => {
-        const st = useStudioStore.getState();
-        if (sel.kind === "furniture") {
-          const cur = st.project.levels[sel.levelIndex]?.furniture.find((f) => f.id === sel.id);
-          if (cur) st.updateFurniture(sel.levelIndex as 0 | 1, sel.id, { position: { ...cur.position, x, z } });
-        } else if (sel.kind === "hvac") {
-          const cur = st.project.levels[sel.levelIndex]?.hvac.find((h) => h.id === sel.id);
-          if (cur) st.updateHvac(sel.levelIndex as 0 | 1, sel.id, { position: { ...cur.position, x, z } });
-        } else if (sel.kind === "light") {
-          const cur = st.project.levels[sel.levelIndex]?.lights.find((l) => l.id === sel.id);
-          if (cur) st.updateLight(sel.levelIndex as 0 | 1, sel.id, { position: { ...cur.position, x, z } });
-        }
-      },
-      onPlaceAt: (x, z, lvIdx) => {
-        const st = useStudioStore.getState();
-        const t = st.activeTool;
-        if (t === "furniture") {
-          const cat = FURNITURE_CATALOG.find((c) => c.catalogId === st.placeTemplate.furnitureCatalogId) ?? FURNITURE_CATALOG[0]!;
-          st.addFurniture(lvIdx, {
-            id: `furn-${Date.now().toString(36)}`,
-            catalogId: cat.catalogId,
-            name: cat.name,
-            category: cat.category,
-            position: { x, y: 0, z },
-            size: { ...cat.defaultSize },
-            rotationY: 0,
-            colorHex: cat.colorHex,
-            accentHex: cat.accentHex,
-          });
-          st.setActiveTool("select");
-        } else if (t === "hvac") {
-          const hCat =
-            HVAC_CATALOG.find(
-              (c) => c.type === st.placeTemplate.hvacType && (c.pkRating === st.placeTemplate.hvacPk || !c.pkRating),
-            ) ?? HVAC_CATALOG[0]!;
-          st.addHvac(lvIdx, {
-            id: `hv-${Date.now().toString(36)}`,
-            name: hCat.name,
-            type: hCat.type,
-            position: { x, y: hCat.defaultElevationM, z },
-            rotationY: 0,
-            pkRating: hCat.pkRating,
-            flowRateM3h: hCat.flowRateM3h,
-            coolingCapacityW: hCat.coolingCapacityW,
-            powerW: hCat.powerW,
-            setpointC: hCat.setpointC,
-            speedLevel: 2,
-            on: true,
-          });
-          st.setActiveTool("select");
-        } else if (t === "light") {
-          const lCat = LIGHT_CATALOG.find((c) => c.type === st.placeTemplate.lightType) ?? LIGHT_CATALOG[0]!;
-          st.addLight(lvIdx, {
-            id: `lgt-${Date.now().toString(36)}`,
-            name: lCat.name,
-            type: lCat.type,
-            position: { x, y: lCat.defaultElevationM, z },
-            lumens: lCat.lumens,
-            colorTempK: lCat.colorTempK,
-            beamAngleDeg: lCat.beamAngleDeg,
-            dimmer: 1,
-            on: true,
-          });
-          st.setActiveTool("select");
-        } else if (t === "wall") {
-          st.addWall(lvIdx, { x: Math.max(0.1, x - 1.0), z }, { x: Math.min(4.9, x + 1.0), z }, false);
-          st.setActiveTool("select");
-        } else if (t === "door" || t === "window") {
-          // Attach to nearest non-party wall
-          const lv = st.project.levels[lvIdx];
-          if (!lv) return;
-          let bestWall = lv.walls.find((w) => !w.partyWallSide);
-          let bestDist = Infinity;
-          let bestOff = 1.0;
-          for (const w of lv.walls) {
-            if (w.partyWallSide) continue;
-            const len = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
-            if (len < 1.1) continue;
-            const ux = (w.end.x - w.start.x) / len;
-            const uz = (w.end.z - w.start.z) / len;
-            const proj = Math.max(0.6, Math.min(len - 0.6, (x - w.start.x) * ux + (z - w.start.z) * uz));
-            const px = w.start.x + ux * proj;
-            const pz = w.start.z + uz * proj;
-            const d = Math.hypot(x - px, z - pz);
-            if (d < bestDist) {
-              bestDist = d;
-              bestWall = w;
-              bestOff = proj;
-            }
-          }
-          if (bestWall) {
-            st.addOpening(lvIdx, bestWall.id, {
-              id: `op-${Date.now().toString(36)}`,
-              kind: t,
-              width: t === "door" ? 0.85 : 1.0,
-              height: t === "door" ? 2.15 : 1.35,
-              sill: t === "door" ? 0 : 0.85,
-              offset: Number(bestOff.toFixed(2)),
-              swing: 1,
-              openPct: 50,
-              frameMaterialId: t === "door" ? "wood_teak" : "alu_dark",
-              label: t === "door" ? "Pintu Baru" : "Jendela Baru",
-            });
-          }
-          st.setActiveTool("select");
-        }
-      },
-      onWalkthroughExit: () => useStudioStore.getState().patchView({ cameraPreset: "3d" }),
       onWebGLStatus: (status) => setWebglStatus(status),
       onStats: (stats) => setSceneStats(stats),
     });
@@ -232,11 +76,11 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
       sceneRef.current = null;
       onSceneReady?.(null);
     };
-  }, [onSceneReady, addFurniture, addHvac, addLight, addOpening, addWall, deleteFurniture, deleteHvac, deleteLight, deleteWall, setSelected, updateFurniture, updateHvac, updateLight]);
+  }, [onSceneReady]);
 
   useEffect(() => {
-    sceneRef.current?.update(derived, struct, lighting, airflow, flood, view, selected, activeLevelIndex, activeTool);
-  }, [derived, struct, lighting, airflow, flood, view, selected, activeLevelIndex, activeTool]);
+    sceneRef.current?.update(derived, struct, lighting, airflow, flood, view, selected);
+  }, [derived, struct, lighting, airflow, flood, view, selected]);
 
   const setPreset = (p: CameraPreset) => {
     patchView({ cameraPreset: p });
@@ -262,9 +106,6 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
               {lbl}
             </ToolbarBtn>
           ))}
-          <ToolbarBtn active={view.cameraPreset === "walkthrough"} onClick={() => setPreset("walkthrough")} title="Jalan Orang Pertama (WASD + Mouse)">
-            <Footprints className="h-3 w-3" /> <span className="hidden lg:inline">Jalan</span>
-          </ToolbarBtn>
         </div>
 
         <Sep />
@@ -329,42 +170,13 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
         </div>
       </div>
 
-      {/* Main Canvas + Left Sims Tool Rail */}
+      {/* Main 3D Canvas */}
       <div className="relative flex min-h-0 flex-1">
-        {/* Left Tool Rail (Sims 4 Build/Buy Tools — touch friendly >=44px on mobile) */}
-        <div className="flex w-12 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-border bg-[#1a1d22] py-1.5 sm:w-11 sm:py-2">
-          {TOOLS.map((t) => {
-            const Icon = t.icon;
-            const active = activeTool === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTool(t.id)}
-                title={t.label}
-                aria-label={t.label}
-                aria-pressed={active}
-                className={cn(
-                  "flex h-10 w-10 shrink-0 items-center justify-center rounded border transition sm:h-8 sm:w-8",
-                  active
-                    ? "border-primary bg-primary text-primary-foreground shadow"
-                    : "border-transparent text-muted-foreground hover:border-border hover:bg-card hover:text-foreground",
-                )}
-              >
-                <Icon className="h-4 w-4" aria-hidden />
-              </button>
-            );
-          })}
-        </div>
-
         {/* 3D Canvas Container */}
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <canvas
             ref={canvasRef}
-            className={cn(
-              "viewport-canvas h-full w-full",
-              activeTool === "select" ? "cursor-grab active:cursor-grabbing" : "cursor-crosshair",
-            )}
+            className="viewport-canvas h-full w-full cursor-grab active:cursor-grabbing"
           />
 
           {/* Top Overlay Row: Responsive Left HUD + Right ViewCube (zero overlap at 390px!) */}
@@ -445,17 +257,6 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
                 )}
               </div>
 
-              {activeTool !== "select" && (
-                <div className="pointer-events-auto rounded border border-primary/50 bg-primary/20 px-2.5 py-1 text-[11px] font-semibold text-primary backdrop-blur-sm">
-                  Mode: {TOOLS.find((t) => t.id === activeTool)?.label} — Klik lantai / elemen pada LT{activeLevelIndex + 1} (Esc batal)
-                </div>
-              )}
-
-              {view.cameraPreset === "walkthrough" && (
-                <div className="pointer-events-auto rounded border border-teal-400/40 bg-teal-950/85 px-2.5 py-1 text-[11px] text-teal-200">
-                  Walkthrough: <b>W A S D</b> / Panah jalan, <b>Q/E</b> naik-turun, <b>Geser Mouse</b> lihat sekitar, <b>Esc</b> keluar.
-                </div>
-              )}
             </div>
 
             {/* Top-Right Interactive View Cube (never overlaps left HUD!) */}
@@ -515,7 +316,7 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
           {/* Dismissible Control Hint Pill (desktop/tablet onboarding) */}
           {showControlHint && !selected && !view.beforeAfterEnabled && (
             <div className="pointer-events-auto absolute bottom-2.5 right-2.5 hidden items-center gap-2 rounded border border-white/10 bg-black/65 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm [@media(min-width:1024px)_and_(min-height:520px)]:flex">
-              <span>Seret: Putar · Shift/Kanan: Geser · Scroll: Zoom · Klik furnitur: Geser Sims 4</span>
+              <span>Seret: Putar · Shift/Kanan: Geser · Scroll: Zoom · Klik elemen: Info SNI &amp; RAB</span>
               <button
                 type="button"
                 aria-label="Tutup panduan kontrol"
