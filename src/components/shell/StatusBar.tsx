@@ -57,9 +57,9 @@ export function StatusBar({
           Tapak {derived.totalLotAreaM2} m² · Bersih {fmtNum(derived.totalNetFloorM2, 1)} m²
           <span className="text-muted-foreground">(-{fmtNum(derived.totalWallDeductionM2, 2)} m² bata)</span>
         </span>
-        <span className="hidden items-center gap-1 md:flex">
+        <span className="hidden items-center gap-1 md:flex" title="Kebutuhan beli bata utuh (+waste) dan jumlah keping terpasang termasuk potongan">
           <BrickWall className="h-3 w-3 text-amber-400" />
-          {fmtNum(derived.masonry.totalBuyBricks)} bata ({derived.project.systems.brick.lengthMm}×{derived.project.systems.brick.heightMm}×{derived.project.systems.brick.depthMm} mm)
+          Beli {fmtNum(derived.masonry.totalBuyBricks)} bata (pasang {fmtNum(derived.masonry.totalPiecesPlaced)} kpg · {derived.project.systems.brick.lengthMm}×{derived.project.systems.brick.heightMm}×{derived.project.systems.brick.depthMm} mm)
         </span>
         <span className="hidden items-center gap-1 lg:flex">
           <Layers className="h-3 w-3 text-sky-400" />

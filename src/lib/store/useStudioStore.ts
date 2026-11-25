@@ -563,8 +563,8 @@ export const useStudioStore = create<StudioStore>()(
           if (!sel || sel.kind === "part") return;
           const lv = state.project.levels[sel.levelIndex];
           if (!lv) return;
-          const clampX = (x: number) => Math.max(0.15, Math.min(state.project.site.width - 0.15, Math.round(x * 10) / 10));
-          const clampZ = (z: number) => Math.max(0.15, Math.min(state.project.site.depth - 0.15, Math.round(z * 10) / 10));
+          const clampX = (x: number) => Math.max(0.35, Math.min(state.project.site.width - 0.35, Math.round(x * 20) / 20));
+          const clampZ = (z: number) => Math.max(0.35, Math.min(state.project.site.depth - 0.35, Math.round(z * 20) / 20));
 
           if (sel.kind === "furniture") {
             const it = lv.furniture.find((f) => f.id === sel.id);

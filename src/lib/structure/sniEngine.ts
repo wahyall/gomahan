@@ -127,18 +127,23 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     }
   };
 
-  // Standard 5×17 structural frame grid lines aligned with architectural walls
-  const gridX = [0.05, 2.25, 4.95];
-  const gridZ = [4.0, 7.5, 10.5, 12.5, 15.35, 16.95];
-  for (const gx of gridX) {
-    for (const gz of gridZ) {
-      // Skip 2.25 on rear void/garden if clear, keep exterior frame + central spine
-      if (gx === 2.25 && gz === 16.95) continue;
-      addNode(gx, gz, true);
-    }
+  // Standard 5×17 single-bay clear-span portal frame at perimeter walls + wall-aligned partition nodes
+  // (Prevents any structural column from obstructing doorways or open living areas!)
+  const perimeterZ = [4.0, 7.5, 10.5, 12.5, 15.35, 16.95];
+  for (const gz of perimeterZ) {
+    addNode(0.05, gz, true);
+    if (gz !== 4.0) addNode(4.95, gz, true);
   }
-  // Also add Carport front portal columns at Z=0.05
-  addNode(0.05, 0.05, true);
+  addNode(4.95, 4.5, true); // KT1 right facade portal corner
+  addNode(2.25, 4.0, true); // Front vestibule transition
+  addNode(2.25, 4.5, false); // Partition front corner
+  addNode(2.25, 7.5, false); // Partition rear corner (clear of doors)
+  addNode(1.35, 7.5, false); // Stair/Powder shaft column
+  addNode(1.35, 12.5, false); // Stair/Hallway shaft column (clear of KT Utama door at X=2.15)
+  addNode(1.7, 15.35, false); // Void/Toilet corner column
+  addNode(1.7, 16.95, false); // Rear toilet boundary column
+  // Carport front portal columns at Z=0.05
+  addNode(1.5, 0.05, true);
   addNode(4.95, 0.05, true);
 
   // Add practical column nodes at wall endpoints / openings if distant from main nodes
@@ -268,19 +273,20 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     });
   };
 
-  // Longitudinal perimeter + central spine beams + transverse frame beams
-  for (let i = 0; i < gridZ.length - 1; i++) {
-    const zA = gridZ[i]!;
-    const zB = gridZ[i + 1]!;
+  // Longitudinal perimeter + transverse 5.0m clear-span frame beams
+  const beamGridZ = [4.0, 7.5, 10.5, 12.5, 15.35, 16.95];
+  for (let i = 0; i < beamGridZ.length - 1; i++) {
+    const zA = beamGridZ[i]!;
+    const zB = beamGridZ[i + 1]!;
     addBeam(`SL-L-${i}`, 0, "sloof", 0.05, zA, 0.05, zB, 0.2, 0.3);
-    addBeam(`SL-R-${i}`, 0, "sloof", 4.95, zA, 4.95, zB, 0.2, 0.3);
+    addBeam(`SL-R-${i}`, 0, "sloof", 4.95, Math.max(4.5, zA), 4.95, zB, 0.2, 0.3);
     addBeam(`BI-L-${i}`, 1, "balok_induk", 0.05, zA, 0.05, zB, 0.2, 0.35);
     addBeam(`BI-R-${i}`, 1, "balok_induk", 4.95, zA, 4.95, zB, 0.2, 0.35);
     addBeam(`RB-L-${i}`, 2, "ring_balk", 0.05, zA, 0.05, zB, 0.15, 0.2);
     addBeam(`RB-R-${i}`, 2, "ring_balk", 4.95, zA, 4.95, zB, 0.15, 0.2);
   }
-  for (let i = 0; i < gridZ.length; i++) {
-    const gz = gridZ[i]!;
+  for (let i = 0; i < beamGridZ.length; i++) {
+    const gz = beamGridZ[i]!;
     addBeam(`SL-T-${i}`, 0, "sloof", 0.05, gz, 4.95, gz, 0.2, 0.3);
     if (gz !== 16.95) {
       addBeam(`BI-T-${i}`, 1, "balok_induk", 0.05, gz, 4.95, gz, 0.2, 0.35);

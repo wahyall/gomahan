@@ -421,7 +421,8 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
             {/* Quick Masonry & Area Summary Pill */}
             <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded border border-white/10 bg-black/60 px-2.5 py-1 text-[10.5px] text-stone-200 backdrop-blur-sm">
               <span>
-                Bata: <b className="font-mono text-primary">{fmtNum(derived.masonry.totalPiecesPlaced)}</b> bh ({derived.project.systems.brick.lengthMm}×{derived.project.systems.brick.heightMm}×{derived.project.systems.brick.depthMm} mm)
+                Bata Beli: <b className="font-mono text-primary">{fmtNum(derived.masonry.totalBuyBricks)}</b> bh
+                <span className="hidden sm:inline text-stone-400"> (pasang {fmtNum(derived.masonry.totalPiecesPlaced)} keping, {derived.project.systems.brick.lengthMm}×{derived.project.systems.brick.heightMm}×{derived.project.systems.brick.depthMm} mm)</span>
               </span>
               <span className="text-stone-500">|</span>
               <span>
