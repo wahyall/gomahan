@@ -147,19 +147,32 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
 }
 
 function GateItem({ pass, label, action }: { pass: boolean; label: string; action?: () => void }) {
+  if (action) {
+    return (
+      <button
+        type="button"
+        onClick={action}
+        className="flex min-h-11 w-full items-center justify-between rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left text-xs text-amber-200 transition hover:bg-amber-500/20"
+      >
+        <span className="flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+          {label}
+        </span>
+        <span className="text-[10px] font-bold underline">Perbaiki</span>
+      </button>
+    );
+  }
   return (
     <div
-      onClick={action}
       className={cn(
-        "flex items-center justify-between rounded border px-3 py-2 text-xs",
-        pass ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "cursor-pointer border-amber-500/40 bg-amber-500/10 text-amber-200",
+        "flex min-h-11 items-center justify-between rounded border px-3 py-2 text-xs",
+        pass ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200",
       )}
     >
       <span className="flex items-center gap-2">
-        {pass ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <AlertTriangle className="h-4 w-4 text-amber-400" />}
+        {pass ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" /> : <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />}
         {label}
       </span>
-      {action && <span className="text-[10px] font-bold underline">Perbaiki</span>}
     </div>
   );
 }

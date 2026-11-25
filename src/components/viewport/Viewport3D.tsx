@@ -325,8 +325,8 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
 
       {/* Main Canvas + Left Sims Tool Rail */}
       <div className="relative flex min-h-0 flex-1">
-        {/* Left Tool Rail (Sims 4 Build/Buy Tools) */}
-        <div className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-[#1a1d22] py-2">
+        {/* Left Tool Rail (Sims 4 Build/Buy Tools — touch friendly >=44px on mobile) */}
+        <div className="flex w-12 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-border bg-[#1a1d22] py-1.5 sm:w-11 sm:py-2">
           {TOOLS.map((t) => {
             const Icon = t.icon;
             const active = activeTool === t.id;
@@ -336,14 +336,16 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
                 type="button"
                 onClick={() => setActiveTool(t.id)}
                 title={t.label}
+                aria-label={t.label}
+                aria-pressed={active}
                 className={cn(
-                  "flex h-8 w-8 items-center justify-center rounded border transition",
+                  "flex h-10 w-10 shrink-0 items-center justify-center rounded border transition sm:h-8 sm:w-8",
                   active
                     ? "border-primary bg-primary text-primary-foreground shadow"
                     : "border-transparent text-muted-foreground hover:border-border hover:bg-card hover:text-foreground",
                 )}
               >
-                <Icon className="h-4 w-4" />
+                <Icon className="h-4 w-4" aria-hidden />
               </button>
             );
           })}
@@ -359,146 +361,130 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
             )}
           />
 
-          {/* Top-Left Sims 4 Gamification & Engineering HUD */}
-          <div className="pointer-events-none absolute left-2.5 top-2.5 flex max-w-[340px] flex-col gap-1.5">
-            {isSimpleMode && (
-              <div className="pointer-events-auto rounded-md border border-white/10 bg-[#14171c]/88 p-2.5 shadow-xl backdrop-blur-md">
-                <div className="flex items-center justify-between gap-2 text-[10.5px]">
-                  <span className="font-bold text-primary">Budget Meter (Target {fmtRp(rab.budgetCapIdr)})</span>
-                  <span className={cn("font-mono font-bold", rab.overBudget ? "text-red-400" : "text-emerald-400")}>
-                    {budgetPct}%
-                  </span>
-                </div>
-                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
-                  <div
-                    className={cn("h-full transition-all", rab.overBudget ? "bg-red-500" : "bg-emerald-500")}
-                    style={{ width: `${Math.min(100, budgetPct)}%` }}
-                  />
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2 text-[10.5px]">
-                  <span className="text-muted-foreground">
-                    Skor Kenyamanan: <b className="font-mono text-teal-300">{gamification.overallComfortScore}/100</b>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowQuests(!showQuests)}
-                    className="flex items-center gap-1 rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/30"
-                  >
-                    <Award className="h-3 w-3" /> Misi & Lencana ({gamification.badges.filter((b) => b.unlocked).length}/5)
-                  </button>
-                </div>
-
-                {showQuests && (
-                  <div className="mt-2 space-y-2 border-t border-white/10 pt-2 text-[10.5px]">
-                    <div className="flex flex-wrap gap-1">
-                      {gamification.badges.map((b) => (
-                        <span
-                          key={b.id}
-                          title={b.subtitle}
-                          className={cn(
-                            "rounded border px-1.5 py-0.5 text-[9.5px] font-semibold",
-                            b.unlocked ? "border-amber-400/40 bg-amber-400/15 text-amber-200" : "border-white/10 bg-white/5 text-muted-foreground",
-                          )}
-                        >
-                          {b.unlocked ? "★ " : ""}
-                          {b.title}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="space-y-1">
-                      {gamification.quests.map((q) => (
-                        <div key={q.id} className={cn("flex items-start gap-1.5", q.done ? "text-emerald-300 line-through opacity-75" : "text-foreground/90")}>
-                          <span>{q.done ? "✓" : "○"}</span>
-                          <span>{q.title}</span>
-                        </div>
-                      ))}
-                    </div>
+          {/* Top Overlay Row: Responsive Left HUD + Right ViewCube (zero overlap at 390px!) */}
+          <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2 sm:inset-x-2.5 sm:top-2.5">
+            <div className="flex min-w-0 max-w-[calc(100%-70px)] flex-col gap-1.5 sm:max-w-[350px]">
+              {isSimpleMode && (
+                <div className="pointer-events-auto rounded-md border border-white/12 bg-[#14171c]/90 p-2 shadow-xl backdrop-blur-md sm:p-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[10px] sm:text-[10.5px]">
+                    <span className="truncate font-bold text-primary">Target {fmtRp(rab.budgetCapIdr)}</span>
+                    <span className={cn("font-mono font-bold tabular-nums", rab.overBudget ? "text-red-400" : "text-emerald-400")}>
+                      {fmtRp(rab.grandTotal)} ({budgetPct}%)
+                    </span>
                   </div>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                    <div
+                      className={cn("h-full transition-all", rab.overBudget ? "bg-red-500" : "bg-emerald-500")}
+                      style={{ width: `${Math.min(100, budgetPct)}%` }}
+                    />
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1.5 text-[10px] sm:mt-2 sm:text-[10.5px]">
+                    <span className="text-muted-foreground">
+                      Skor: <b className="font-mono text-teal-300">{gamification.overallComfortScore}/100</b>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowQuests(!showQuests)}
+                      className="flex min-h-7 items-center gap-1 rounded bg-primary/20 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/30"
+                    >
+                      <Award className="h-3 w-3 shrink-0" />
+                      <span>Misi ({gamification.badges.filter((b) => b.unlocked).length}/5)</span>
+                    </button>
+                  </div>
+
+                  {showQuests && (
+                    <div className="mt-2 max-h-48 space-y-2 overflow-y-auto border-t border-white/10 pt-2 text-[10.5px]">
+                      <div className="flex flex-wrap gap-1">
+                        {gamification.badges.map((b) => (
+                          <span
+                            key={b.id}
+                            title={b.subtitle}
+                            className={cn(
+                              "rounded border px-1.5 py-0.5 text-[9.5px] font-semibold",
+                              b.unlocked ? "border-amber-400/40 bg-amber-400/15 text-amber-200" : "border-white/10 bg-white/5 text-muted-foreground",
+                            )}
+                          >
+                            {b.unlocked ? "★ " : ""}
+                            {b.title}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="space-y-1">
+                        {gamification.quests.map((q) => (
+                          <div key={q.id} className={cn("flex items-start gap-1.5", q.done ? "text-emerald-300 line-through opacity-75" : "text-foreground/90")}>
+                            <span>{q.done ? "✓" : "○"}</span>
+                            <span>{q.title}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Quick Masonry & Area Summary Pill */}
+              <div className="pointer-events-auto flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded border border-white/12 bg-black/70 px-2 py-1 text-[10px] text-stone-200 backdrop-blur-sm sm:px-2.5 sm:text-[10.5px]">
+                <span>
+                  Bata Beli: <b className="font-mono text-primary">{fmtNum(derived.masonry.totalBuyBricks)}</b> bh
+                  <span className="hidden sm:inline text-stone-400"> (pasang {fmtNum(derived.masonry.totalPiecesPlaced)} keping, {derived.project.systems.brick.lengthMm}×{derived.project.systems.brick.heightMm}×{derived.project.systems.brick.depthMm} mm)</span>
+                </span>
+                <span className="text-stone-500">|</span>
+                <span>
+                  Bersih: <b className="font-mono">{fmtNum(derived.totalNetFloorM2, 1)} m²</b>
+                </span>
+                {derived.validation.some((v) => v.severity === "critical") && (
+                  <span className="flex items-center gap-1 font-semibold text-red-400">
+                    <ShieldAlert className="h-3 w-3" /> {derived.validation.filter((v) => v.severity === "critical").length} Kritis
+                  </span>
                 )}
               </div>
-            )}
 
-            {/* Quick Masonry & Area Summary Pill */}
-            <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded border border-white/10 bg-black/60 px-2.5 py-1 text-[10.5px] text-stone-200 backdrop-blur-sm">
-              <span>
-                Bata Beli: <b className="font-mono text-primary">{fmtNum(derived.masonry.totalBuyBricks)}</b> bh
-                <span className="hidden sm:inline text-stone-400"> (pasang {fmtNum(derived.masonry.totalPiecesPlaced)} keping, {derived.project.systems.brick.lengthMm}×{derived.project.systems.brick.heightMm}×{derived.project.systems.brick.depthMm} mm)</span>
-              </span>
-              <span className="text-stone-500">|</span>
-              <span>
-                Bersih: <b className="font-mono">{fmtNum(derived.totalNetFloorM2, 1)} m²</b>
-              </span>
-              {derived.validation.some((v) => v.severity === "critical") && (
-                <span className="flex items-center gap-1 text-red-400 font-semibold">
-                  <ShieldAlert className="h-3 w-3" /> {derived.validation.filter((v) => v.severity === "critical").length} Peringatan
-                </span>
+              {activeTool !== "select" && (
+                <div className="pointer-events-auto rounded border border-primary/50 bg-primary/20 px-2.5 py-1 text-[11px] font-semibold text-primary backdrop-blur-sm">
+                  Mode: {TOOLS.find((t) => t.id === activeTool)?.label} — Klik lantai / elemen pada LT{activeLevelIndex + 1} (Esc batal)
+                </div>
+              )}
+
+              {view.cameraPreset === "walkthrough" && (
+                <div className="pointer-events-auto rounded border border-teal-400/40 bg-teal-950/85 px-2.5 py-1 text-[11px] text-teal-200">
+                  Walkthrough: <b>W A S D</b> / Panah jalan, <b>Q/E</b> naik-turun, <b>Geser Mouse</b> lihat sekitar, <b>Esc</b> keluar.
+                </div>
               )}
             </div>
 
-            {activeTool !== "select" && (
-              <div className="pointer-events-auto rounded border border-primary/50 bg-primary/20 px-2.5 py-1 text-[11px] font-semibold text-primary backdrop-blur-sm">
-                Mode: {TOOLS.find((t) => t.id === activeTool)?.label} — Klik lantai / elemen pada LT{activeLevelIndex + 1} (Esc batal)
+            {/* Top-Right Interactive View Cube (never overlaps left HUD!) */}
+            <div className="pointer-events-auto flex shrink-0 flex-col items-center gap-1">
+              <div className="rounded border border-white/12 bg-black/65 p-1 backdrop-blur-sm">
+                <svg width="52" height="52" viewBox="0 0 62 62" className="sm:h-[58px] sm:w-[58px]">
+                  <polygon
+                    points="31,7 52,17.5 31,28 10,17.5"
+                    onClick={() => setPreset("top")}
+                    className="cursor-pointer fill-stone-600/60 stroke-stone-300/60 hover:fill-primary/70"
+                  />
+                  <text x="31" y="21" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">ATAS</text>
+                  <polygon
+                    points="10,17.5 31,28 31,53 10,42.5"
+                    onClick={() => setPreset("front")}
+                    className="cursor-pointer fill-stone-700/70 stroke-stone-300/60 hover:fill-primary/70"
+                  />
+                  <text x="20.5" y="39" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">DEPAN</text>
+                  <polygon
+                    points="52,17.5 52,42.5 31,53 31,28"
+                    onClick={() => setPreset("side")}
+                    className="cursor-pointer fill-stone-800/80 stroke-stone-300/60 hover:fill-primary/70"
+                  />
+                  <text x="41.5" y="39" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">SAMP</text>
+                </svg>
               </div>
-            )}
-
-            {view.cameraPreset === "walkthrough" && (
-              <div className="pointer-events-auto rounded border border-teal-400/40 bg-teal-950/80 px-2.5 py-1 text-[11px] text-teal-200">
-                Walkthrough Aktif: Gunakan <b>W A S D</b> / Panah untuk jalan, <b>Q/E</b> naik-turun, <b>Geser Mouse</b> lihat sekitar, <b>Esc</b> keluar.
-              </div>
-            )}
-          </div>
-
-          {/* Before / After Baseline Comparison Overlay */}
-          {view.beforeAfterEnabled && (
-            <div className="pointer-events-auto absolute bottom-12 left-1/2 z-20 flex -translate-x-1/2 items-center gap-3 rounded-md border border-primary/40 bg-card/95 px-3 py-1.5 text-[11px] shadow-xl backdrop-blur">
-              <span>
-                Baseline Awal: <b className="font-mono">{baselineProject.systems.brick.name.split("(")[0]}</b> · {baselineProject.systems.foundation}
-              </span>
-              <span className="text-muted-foreground">→</span>
-              <span>
-                Sekarang: <b className="font-mono text-primary">{fmtRp(rab.grandTotal)}</b> ({fmtNum(derived.masonry.totalBuyBricks)} bata)
-              </span>
               <button
                 type="button"
-                onClick={lockBaseline}
-                className="rounded bg-primary/20 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/30"
+                onClick={() => setPreset("3d")}
+                aria-label="Reset kamera 3/4 isometrik"
+                className="min-h-7 rounded border border-white/12 bg-black/65 px-2.5 py-0.5 text-[10px] font-semibold text-stone-200 hover:border-primary hover:text-primary"
               >
-                Kunci Sebagai Baseline
+                3/4
               </button>
             </div>
-          )}
-
-          {/* Top-Right Interactive View Cube */}
-          <div className="absolute right-2.5 top-2.5 flex flex-col items-center gap-1">
-            <div className="rounded border border-white/10 bg-black/55 p-1 backdrop-blur-sm">
-              <svg width="58" height="58" viewBox="0 0 62 62">
-                <polygon
-                  points="31,7 52,17.5 31,28 10,17.5"
-                  onClick={() => setPreset("top")}
-                  className="cursor-pointer fill-stone-600/60 stroke-stone-300/60 hover:fill-primary/70"
-                />
-                <text x="31" y="21" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">ATAS</text>
-                <polygon
-                  points="10,17.5 31,28 31,53 10,42.5"
-                  onClick={() => setPreset("front")}
-                  className="cursor-pointer fill-stone-700/70 stroke-stone-300/60 hover:fill-primary/70"
-                />
-                <text x="20.5" y="39" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">DEPAN</text>
-                <polygon
-                  points="52,17.5 52,42.5 31,53 31,28"
-                  onClick={() => setPreset("side")}
-                  className="cursor-pointer fill-stone-800/80 stroke-stone-300/60 hover:fill-primary/70"
-                />
-                <text x="41.5" y="39" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">SAMP</text>
-              </svg>
-            </div>
-            <button
-              type="button"
-              onClick={() => setPreset("3d")}
-              className="rounded border border-white/10 bg-black/55 px-2 py-0.5 text-[10px] text-stone-200 hover:border-primary hover:text-primary"
-            >
-              3/4
-            </button>
           </div>
 
           {/* Hover Tooltip */}
@@ -548,7 +534,7 @@ function ToolbarBtn({
       onClick={onClick}
       title={title}
       className={cn(
-        "flex h-6 shrink-0 items-center gap-1 rounded px-2 text-[10.5px] font-medium transition",
+        "flex h-8 shrink-0 items-center gap-1 rounded px-2 text-[11px] font-medium transition sm:h-6 sm:text-[10.5px]",
         active ? "bg-primary text-primary-foreground" : "text-stone-300 hover:bg-white/10 hover:text-white",
       )}
     >

@@ -61,6 +61,14 @@ export function OutlinerPanel({ derived, struct }: Props) {
             <div
               key={r.id}
               onClick={() => r.partId && setSelected(isSelected ? null : { kind: "part", id: r.partId })}
+              role={r.partId ? "button" : undefined}
+              tabIndex={r.partId ? 0 : undefined}
+              onKeyDown={(e) => {
+                if (r.partId && (e.key === "Enter" || e.key === " ")) {
+                  e.preventDefault();
+                  setSelected(isSelected ? null : { kind: "part", id: r.partId });
+                }
+              }}
               className={cn(
                 "group flex h-7 items-center gap-1 rounded px-1.5 text-[11.5px]",
                 r.partId ? "cursor-pointer hover:bg-accent/60" : "hover:bg-accent/30",

@@ -23,7 +23,7 @@ export function StageTimelineBar() {
   }, [playing, stage, patchView]);
 
   return (
-    <div className="no-print shrink-0 border-t border-border bg-card px-2.5 py-1.5">
+    <div className="no-print safe-pb shrink-0 border-t border-border bg-card px-2.5 py-1.5">
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-0.5">
           <button
