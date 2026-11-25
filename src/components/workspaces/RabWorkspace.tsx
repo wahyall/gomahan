@@ -124,6 +124,9 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
               value={rab.budgetCapIdr}
               onChange={(v) => setBudgetCap(v || 450_000_000)}
             />
+            <div className="text-[10.5px] font-mono text-muted-foreground">
+              Pagu aktif: <span className="font-semibold text-foreground">{fmtRp(rab.budgetCapIdr)}</span>
+            </div>
           </StudioCard>
 
           <StudioCard className="space-y-3 text-xs">
@@ -246,25 +249,29 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
                   const collapsed = Boolean(collapsedDivs[div.id]) && !qLower;
                   return (
                     <Fragment key={div.id}>
-                      <tr
-                        onClick={() => toggleDiv(div.id)}
-                        className="cursor-pointer bg-white/[0.04] hover:bg-white/[0.07]"
-                      >
-                        <td colSpan={5} className="px-3.5 py-2.5 font-semibold text-foreground">
-                          <span className="inline-flex items-center gap-1.5">
-                            {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-primary" /> : <ChevronDown className="h-3.5 w-3.5 text-primary" />}
-                            <span>Divisi {div.kode} — {div.nama}</span>
-                            <span className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                              {div.rows.length} item
+                      <tr className="bg-white/[0.04] hover:bg-white/[0.07]">
+                        <td colSpan={6} className="p-0">
+                          <button
+                            type="button"
+                            onClick={() => toggleDiv(div.id)}
+                            aria-expanded={!collapsed}
+                            className="flex w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left font-semibold text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                          >
+                            <span className="inline-flex items-center gap-1.5">
+                              {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-primary" /> : <ChevronDown className="h-3.5 w-3.5 text-primary" />}
+                              <span>Divisi {div.kode} — {div.nama}</span>
+                              <span className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                                {div.rows.length} item
+                              </span>
                             </span>
-                          </span>
+                            <span className="font-mono font-bold text-primary">{fmtRp(div.subtotal)}</span>
+                          </button>
                         </td>
-                        <td className="px-3.5 py-2.5 text-right font-mono font-bold text-primary">{fmtRp(div.subtotal)}</td>
                       </tr>
                       {!collapsed &&
                         div.rows.map((r) => (
                           <tr key={r.id} className="hover:bg-white/[0.02]">
-                            <td className="px-3.5 py-2 font-mono text-[10.5px] text-muted-foreground">{r.ahspCode}</td>
+                            <td className="whitespace-nowrap px-3.5 py-2 font-mono text-[10.5px] text-muted-foreground">{r.ahspCode}</td>
                             <td className="px-3.5 py-2">
                               <div className="font-semibold text-foreground">{r.uraian}</div>
                               <div className="text-[10.5px] text-muted-foreground">

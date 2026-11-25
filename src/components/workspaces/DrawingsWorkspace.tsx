@@ -181,7 +181,7 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
                     fl.rooms.map((r) => (
                       <tr key={r.room.id}>
                         <td className="px-2.5 py-1.5">LT{fl.levelIndex + 1} · {r.room.name}</td>
-                        <td className="px-2.5 py-1.5 text-right font-mono font-semibold">{fmtNum(r.netAreaM2, 2)} m²</td>
+                        <td className="whitespace-nowrap px-2.5 py-1.5 text-right font-mono font-semibold">{fmtNum(r.netAreaM2, 2)} m²</td>
                       </tr>
                     )),
                   )}
@@ -287,17 +287,38 @@ function DenahFloorSvg({
         );
       })}
 
-      {derived.project.levels[0]!.stairs.map((st) => (
-        <g key={st.id} stroke={SOFT} strokeWidth={0.8}>
-          {Array.from({ length: st.riserCount }, (_, i) => {
-            const z = st.start.z + ((st.end.z - st.start.z) * i) / st.riserCount;
-            return <line key={i} x1={px(z)} y1={py(0.15)} x2={px(z)} y2={py(1.25)} />;
-          })}
-          <text x={px(10.0)} y={py(0.75)} textAnchor="middle" fontSize={7.5} fontWeight={700} fill={DIM}>
-            {levelIndex === 0 ? "← NAIK" : "TURUN →"}
-          </text>
-        </g>
-      ))}
+      {derived.project.levels[0]!.stairs.map((st) => {
+        const dx = st.end.x - st.start.x;
+        const dz = st.end.z - st.start.z;
+        const sLen = Math.hypot(dx, dz) || 1;
+        const nx = (-dz / sLen) * (st.width * 0.48);
+        const nz = (dx / sLen) * (st.width * 0.48);
+        const midX = (st.start.x + st.end.x) * 0.5;
+        const midZ = (st.start.z + st.end.z) * 0.5;
+        return (
+          <g key={st.id} stroke={SOFT} strokeWidth={0.85}>
+            {Array.from({ length: st.riserCount }, (_, i) => {
+              const t = i / st.riserCount;
+              const cx = st.start.x + dx * t;
+              const cz = st.start.z + dz * t;
+              return <line key={i} x1={px(cz - nz)} y1={py(cx - nx)} x2={px(cz + nz)} y2={py(cx + nx)} />;
+            })}
+            <text
+              x={px(midZ)}
+              y={py(midX) + 3}
+              textAnchor="middle"
+              fontSize={7.5}
+              fontWeight={700}
+              fill={DIM}
+              paintOrder="stroke"
+              stroke={PAPER}
+              strokeWidth={2.5}
+            >
+              {levelIndex === 0 ? "← NAIK" : "TURUN →"}
+            </text>
+          </g>
+        );
+      })}
 
       {lv.walls.map((w) => (
         <line
@@ -349,7 +370,18 @@ function DenahFloorSvg({
 
       {showMep &&
         lv.mepRoutes.map((rt) => {
-          const pts = rt.pts.map((p) => `${px(p.z)},${py(p.x)}`).join(" ");
+          const ortho: { x: number; z: number }[] = [];
+          for (let i = 0; i < rt.pts.length; i++) {
+            const cur = rt.pts[i]!;
+            if (i > 0) {
+              const prev = rt.pts[i - 1]!;
+              if (Math.abs(cur.x - prev.x) > 0.08 && Math.abs(cur.z - prev.z) > 0.08) {
+                ortho.push({ x: prev.x, z: cur.z });
+              }
+            }
+            ortho.push(cur);
+          }
+          const pts = ortho.map((p) => `${px(p.z)},${py(p.x)}`).join(" ");
           const col =
             rt.kind === "air_bersih"
               ? "#0284c7"
@@ -360,7 +392,20 @@ function DenahFloorSvg({
                   : rt.kind === "listrik_lampu"
                     ? "#d97706"
                     : "#dc2626";
-          return <polyline key={rt.id} points={pts} fill="none" stroke={col} strokeWidth={1.6} strokeDasharray={rt.kind === "air_kotor" ? "5 3" : undefined} />;
+          const last = ortho[ortho.length - 1];
+          return (
+            <g key={rt.id} opacity={0.78}>
+              <polyline
+                points={pts}
+                fill="none"
+                stroke={col}
+                strokeWidth={1.35}
+                strokeLinejoin="round"
+                strokeDasharray={rt.kind === "air_kotor" ? "5 3" : rt.kind === "listrik_lampu" ? "3 2" : undefined}
+              />
+              {last && <circle cx={px(last.z)} cy={py(last.x)} r={2.2} fill={col} />}
+            </g>
+          );
         })}
 
       <text x={px(8.5)} y={py(0) - 10} textAnchor="middle" fontSize={7.5} fontWeight={700} fill={SOFT}>
@@ -393,7 +438,18 @@ function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectMode
   const py = (elevM: number) => baseY - elevM * 30;
   const peil = derived.project.site.peil;
   const lt1Y = peil.floor1PeilM;
-  const lt2Y = lt1Y + 3.6;
+  const lt2Y = lt1Y + (derived.project.levels[0]?.height ?? 3.6);
+  const roofSampleZ = [2.4, 6.2, 9.9, 13.7, 17.4];
+  const roofTopPts = roofSampleZ.map((z) => `${px(z)},${py(derived.roof.heightAt(2.5, z) + lt1Y + 0.2)}`).join(" ");
+  const roofBotPts = [...roofSampleZ].reverse().map((z) => `${px(z)},${py(derived.roof.heightAt(2.5, z) + lt1Y)}`).join(" ");
+  const roofTypeName: Record<string, string> = {
+    shed_front: `ATAP SHED ${derived.roof.slopeDeg}° MIRING DEPAN`,
+    shed_back: `ATAP SHED ${derived.roof.slopeDeg}° MIRING BELAKANG`,
+    gable: `ATAP PELANA ${derived.roof.slopeDeg}°`,
+    hip: `ATAP LIMAS ${derived.roof.slopeDeg}°`,
+    flat_deck: "ATAP DAK BETON DATAR",
+  };
+  const roofLabel = `${roofTypeName[derived.project.systems.roofType] ?? "ATAP"} (${derived.project.systems.roofCover})`;
 
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full">
@@ -414,16 +470,16 @@ function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectMode
       <text x={px(9)} y={py(lt2Y) - 6} fontSize={8} fontWeight={700} fill={INK}>PELAT LT2 +{fmtM(lt2Y)} m</text>
 
       <polygon
-        points={`${px(2.4)},${py(derived.roof.heightAt(2.5, 2.4) + lt1Y)} ${px(17.4)},${py(derived.roof.heightAt(2.5, 17.4) + lt1Y)} ${px(17.4)},${py(derived.roof.heightAt(2.5, 17.4) + lt1Y + 0.2)} ${px(2.4)},${py(derived.roof.heightAt(2.5, 2.4) + lt1Y + 0.2)}`}
+        points={`${roofBotPts} ${roofTopPts}`}
         fill="#363b40"
         stroke={INK}
         strokeWidth={1.2}
       />
-      <text x={px(10.5)} y={py(derived.roof.ridgeElevationM + lt1Y) - 8} fontSize={8} fontWeight={700} fill={DIM}>
-        ATAP SHED {derived.roof.slopeDeg}° MIRING KE DEPAN ({derived.project.systems.roofCover})
+      <text x={px(10.5)} y={py(derived.roof.ridgeElevationM + lt1Y) - 8} textAnchor="middle" fontSize={8} fontWeight={700} fill={DIM}>
+        {roofLabel}
       </text>
 
-      <line x1={px(-0.4)} y1={py(lt2Y - 0.8)} x2={px(4.5)} y2={py(lt2Y - 0.1)} stroke="#363b40" strokeWidth={4} />
+      <line x1={px(-0.3)} y1={py(lt2Y - 0.85)} x2={px(4.45)} y2={py(lt2Y - 0.25)} stroke="#363b40" strokeWidth={4} />
 
       <TitleBlock x={VW - 290} y={VH - 20} judul="POTONGAN MEMANJANG A-A (5×17 M)" kode="A-03" rev={derived.project.structuralParams.drawingRevision} />
     </svg>
