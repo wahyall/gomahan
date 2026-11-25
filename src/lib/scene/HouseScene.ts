@@ -6,13 +6,40 @@ import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { SelectionTarget, ViewState } from "@/lib/store/useStudioStore";
-import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, type MaterialPalette } from "@/lib/scene/materials";
+import {
+  createEnvironmentMap,
+  createMaterialPalette,
+  createSkyGradientTexture,
+  type MaterialPalette,
+} from "@/lib/scene/materials";
 import { buildFurnitureMesh, buildHvacMesh, buildLightFixtureMesh } from "@/lib/scene/propsBuilder";
+import {
+  StaticBatchCollector,
+  createChamferBox,
+  createContactShadowTexture,
+  mergeGeometryBatch,
+} from "@/lib/scene/geometryHelpers";
 
 // Enable BVH accelerated raycasting on BufferGeometry
-(THREE.BufferGeometry.prototype as unknown as { computeBoundsTree: typeof computeBoundsTree }).computeBoundsTree = computeBoundsTree;
-(THREE.BufferGeometry.prototype as unknown as { disposeBoundsTree: typeof disposeBoundsTree }).disposeBoundsTree = disposeBoundsTree;
+(THREE.BufferGeometry.prototype as unknown as { computeBoundsTree: typeof computeBoundsTree }).computeBoundsTree =
+  computeBoundsTree;
+(THREE.BufferGeometry.prototype as unknown as { disposeBoundsTree: typeof disposeBoundsTree }).disposeBoundsTree =
+  disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+export type QualityTier = "high" | "medium" | "low";
+export type WebGLStatus = "ok" | "lost" | "unsupported";
+
+export interface SceneStatsSnapshot {
+  fps: number;
+  avgMs: number;
+  tier: QualityTier;
+  dpr: number;
+  calls: number;
+  triangles: number;
+  geometries: number;
+  textures: number;
+}
 
 interface ExplodePiece {
   obj: THREE.Object3D;
@@ -35,17 +62,45 @@ export interface SceneCallbacks {
   onMoveEntity: (sel: NonNullable<SelectionTarget>, x: number, z: number) => void;
   onPlaceAt: (x: number, z: number, levelIndex: 0 | 1) => void;
   onWalkthroughExit?: () => void;
+  onWebGLStatus?: (status: WebGLStatus) => void;
+  onStats?: (stats: SceneStatsSnapshot) => void;
+}
+
+function attachBvh(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  (geo as unknown as { computeBoundsTree?: () => void }).computeBoundsTree?.();
+  return geo;
+}
+
+function disposeObjectTree(root: THREE.Object3D) {
+  root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh || obj instanceof THREE.Line || obj instanceof THREE.Points || obj instanceof THREE.Sprite) {
+      obj.geometry?.dispose();
+      const mat = obj.material;
+      if (Array.isArray(mat)) {
+        for (const m of mat) m?.dispose();
+      } else if (mat) {
+        if ("map" in mat && mat.map instanceof THREE.Texture) mat.map.dispose();
+        mat.dispose();
+      }
+    }
+  });
 }
 
 export class HouseScene {
   private canvas: HTMLCanvasElement;
-  private renderer: THREE.WebGLRenderer;
-  private scene: THREE.Scene;
-  private cameraPersp: THREE.PerspectiveCamera;
-  private cameraOrtho: THREE.OrthographicCamera;
+  private renderer!: THREE.WebGLRenderer;
+  private scene!: THREE.Scene;
+  private cameraPersp!: THREE.PerspectiveCamera;
+  private cameraOrtho!: THREE.OrthographicCamera;
   private useOrtho = false;
+  private disposed = false;
+  private webglReady = false;
+  private isContextLost = false;
+  private isHidden = false;
+  private reducedMotion = false;
+  private reducedMotionMq: MediaQueryList | null = null;
 
-  private palette: MaterialPalette;
+  private palette!: MaterialPalette;
   private skyMesh!: THREE.Mesh;
   private skyMat!: THREE.MeshBasicMaterial;
   private envTex: THREE.Texture | null = null;
@@ -53,6 +108,7 @@ export class HouseScene {
   private hemiLight!: THREE.HemisphereLight;
   private lightningLight!: THREE.DirectionalLight;
   private gridHelper!: THREE.GridHelper;
+  private contactShadowTex: THREE.CanvasTexture | null = null;
 
   private houseRoot = new THREE.Group();
   private envGroup = new THREE.Group();
@@ -60,9 +116,12 @@ export class HouseScene {
   private dimsGroup = new THREE.Group();
   private ghostGroup = new THREE.Group();
 
+  private staticDisposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private dynResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private simResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private envKey = "";
+  private lastBuildKey = "";
+  private lastSimKey = "";
 
   private clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
   private explodePieces: ExplodePiece[] = [];
@@ -86,14 +145,19 @@ export class HouseScene {
   private lastAirflow: AirflowSimulationResult | null = null;
   private rainPoints: THREE.Points | null = null;
   private rainArray: Float32Array | null = null;
+  private rainBaseCount = 0;
   private rainActiveCount = 0;
-  private floodWaterMesh: THREE.Mesh | null = null;
   private lightningTimer = 0;
   private lightningEnergy = 0;
+  private lastRainMmH = 0;
 
-  // Orbit & Walkthrough Camera
-  private target = new THREE.Vector3(2.5, 2.2, 8.5);
-  private sph = { radius: 19, theta: Math.PI * 0.22, phi: 1.06 };
+  // Orbit & Walkthrough Camera (current + smoothed targets)
+  private target = new THREE.Vector3(2.5, 2.5, 8.5);
+  private targetDesired = new THREE.Vector3(2.5, 2.5, 8.5);
+  private sph = { radius: 19, theta: Math.PI * 0.82, phi: 1.05 };
+  private sphDesired = { radius: 19, theta: Math.PI * 0.82, phi: 1.05 };
+  private cameraDirty = true;
+
   private walkthroughActive = false;
   private walkPos = new THREE.Vector3(1.1, 2.15, 2.5);
   private walkYaw = 0;
@@ -109,30 +173,86 @@ export class HouseScene {
   private activeTool = "select";
 
   private callbacks: SceneCallbacks;
-  private ro: ResizeObserver;
+  private ro: ResizeObserver | null = null;
   private raf = 0;
-  private clock = new THREE.Clock();
-  private lastBuildKey = "";
+
+  // Timing & Adaptive Quality Governor
+  private lastFrameMs = performance.now();
+  private simElapsedS = 0;
+  private qualityOverride: QualityTier | "auto" = "auto";
+  private activeTier: QualityTier = "high";
+  private activeDpr = 1;
+  private frameWindow: number[] = [];
+  private lastStatsMs = 0;
+  private lastHoverMs = 0;
+
+  // Persistent per-frame scratch math objects (zero allocations in animate & handlers)
+  private readonly _m4 = new THREE.Matrix4();
+  private readonly _q = new THREE.Quaternion();
+  private readonly _e = new THREE.Euler();
+  private readonly _v1 = new THREE.Vector3();
+  private readonly _v2 = new THREE.Vector3();
+  private readonly _s1 = new THREE.Vector3(1, 1, 1);
+  private readonly _up = new THREE.Vector3(0, 1, 0);
+  private readonly _col = new THREE.Color();
+  private readonly _ndc = new THREE.Vector2();
+  private readonly _fwd = new THREE.Vector3();
+  private readonly _right = new THREE.Vector3();
+  private readonly _look = new THREE.Vector3();
+  private readonly _hitPt = new THREE.Vector3();
 
   constructor(canvas: HTMLCanvasElement, callbacks: SceneCallbacks) {
     this.canvas = canvas;
     this.callbacks = callbacks;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    if (typeof window !== "undefined" && window.matchMedia) {
+      this.reducedMotionMq = window.matchMedia("(prefers-reduced-motion: reduce)");
+      this.reducedMotion = this.reducedMotionMq.matches;
+    }
+
+    try {
+      this.renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true,
+        powerPreference: "high-performance",
+        preserveDrawingBuffer: true,
+      });
+    } catch {
+      this.callbacks.onWebGLStatus?.("unsupported");
+      return;
+    }
+
+    if (!this.renderer.getContext()) {
+      this.renderer.dispose();
+      this.callbacks.onWebGLStatus?.("unsupported");
+      return;
+    }
+
+    this.webglReady = true;
+    this.callbacks.onWebGLStatus?.("ok");
+
+    // Pick conservative initial tier on mobile viewports (<768px) to avoid initial hitching
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      this.activeTier = "medium";
+    }
+
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.04;
     this.renderer.localClippingEnabled = true;
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0xcbd8e2, 0.008);
+    this.scene.fog = new THREE.FogExp2(0xcbd8e2, 0.006);
 
-    this.cameraPersp = new THREE.PerspectiveCamera(48, 1, 0.1, 300);
-    this.cameraOrtho = new THREE.OrthographicCamera(-12, 12, 12, -12, 0.1, 300);
+    this.cameraPersp = new THREE.PerspectiveCamera(46, 1, 0.12, 260);
+    this.cameraOrtho = new THREE.OrthographicCamera(-12, 12, 12, -12, 0.12, 260);
 
     this.palette = createMaterialPalette();
+    this.palette.setAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
+    this.contactShadowTex = createContactShadowTexture();
+    this.staticDisposables.push(this.contactShadowTex);
+
     this.setupClippingMaterials();
     this.setupLightingAndSky();
     this.setupStaticEnvironment();
@@ -144,20 +264,70 @@ export class HouseScene {
     this.scene.add(this.dimsGroup);
     this.scene.add(this.ghostGroup);
 
-    const ringGeo = new THREE.RingGeometry(0.45, 0.58, 32);
+    const ringGeo = new THREE.RingGeometry(0.42, 0.56, 32);
     ringGeo.rotateX(-Math.PI / 2);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide, transparent: true, opacity: 0.85, depthTest: false });
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+    });
     this.selectedRing = new THREE.Mesh(ringGeo, ringMat);
     this.selectedRing.visible = false;
     this.selectedRing.renderOrder = 998;
     this.scene.add(this.selectedRing);
+    this.staticDisposables.push(ringGeo, ringMat);
 
+    this.applyQualityTier(this.activeTier);
+
+    const observeTarget = canvas.parentElement ?? canvas;
     this.ro = new ResizeObserver(() => this.resize());
-    this.ro.observe(canvas);
+    this.ro.observe(observeTarget);
     this.resize();
     this.bindEvents();
     this.updateCameraTransform();
+
+    this.lastFrameMs = performance.now();
     this.animate();
+  }
+
+  setQualityOverride(tier: QualityTier | "auto") {
+    this.qualityOverride = tier;
+    if (tier !== "auto") {
+      this.applyQualityTier(tier);
+    }
+  }
+
+  private applyQualityTier(tier: QualityTier) {
+    this.activeTier = tier;
+    if (!this.webglReady) return;
+    const rawDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    const maxDpr = tier === "high" ? 2 : tier === "medium" ? 1.5 : 1;
+    const targetDpr = Math.min(rawDpr, maxDpr);
+    if (Math.abs(targetDpr - this.activeDpr) > 0.05) {
+      this.activeDpr = targetDpr;
+      this.renderer.setPixelRatio(targetDpr);
+    }
+
+    if (this.sunLight) {
+      const wantSize = tier === "high" ? 2048 : tier === "medium" ? 1024 : 512;
+      if (this.sunLight.shadow.mapSize.x !== wantSize) {
+        this.sunLight.shadow.mapSize.set(wantSize, wantSize);
+        this.sunLight.shadow.map?.dispose();
+        this.sunLight.shadow.map = null;
+      }
+      this.renderer.shadowMap.enabled = tier !== "low";
+    }
+
+    this.syncRainDrawRange();
+  }
+
+  private syncRainDrawRange() {
+    if (!this.rainPoints) return;
+    const densityMult = this.activeTier === "high" ? 1 : this.activeTier === "medium" ? 0.65 : 0.35;
+    this.rainActiveCount = Math.round(this.rainBaseCount * densityMult);
+    this.rainPoints.geometry.setDrawRange(0, this.rainActiveCount);
   }
 
   private setupClippingMaterials() {
@@ -176,6 +346,7 @@ export class HouseScene {
       this.palette.tileFloor,
       this.palette.tileWet,
       this.palette.tileWood,
+      this.palette.carport,
       this.palette.glass,
       this.palette.aluDark,
       this.palette.roofCover,
@@ -189,21 +360,22 @@ export class HouseScene {
     this.hemiLight = new THREE.HemisphereLight(0xd9ecff, 0x6f6859, 0.72);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff1d6, 2.3);
+    this.sunLight = new THREE.DirectionalLight(0xfff1d6, 2.35);
     this.sunLight.position.set(14, 22, -10);
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.set(2048, 2048);
-    this.sunLight.shadow.camera.near = 2;
-    this.sunLight.shadow.camera.far = 70;
-    this.sunLight.shadow.camera.left = -16;
-    this.sunLight.shadow.camera.right = 16;
-    this.sunLight.shadow.camera.top = 16;
-    this.sunLight.shadow.camera.bottom = -16;
-    this.sunLight.shadow.bias = -0.0005;
-    this.sunLight.shadow.normalBias = 0.02;
+    // Tight shadow frustum around 5x17m lot + adjacent eaves for 2.5x texel sharpness
+    this.sunLight.shadow.camera.near = 1.5;
+    this.sunLight.shadow.camera.far = 56;
+    this.sunLight.shadow.camera.left = -10.5;
+    this.sunLight.shadow.camera.right = 10.5;
+    this.sunLight.shadow.camera.top = 14.5;
+    this.sunLight.shadow.camera.bottom = -14.5;
+    this.sunLight.shadow.bias = -0.0003;
+    this.sunLight.shadow.normalBias = 0.006;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
-    this.sunLight.target.position.set(2.5, 2, 8.5);
+    this.sunLight.target.position.set(2.5, 2.4, 8.5);
 
     this.lightningLight = new THREE.DirectionalLight(0xdce8ff, 0);
     this.lightningLight.position.set(-10, 24, -12);
@@ -216,59 +388,194 @@ export class HouseScene {
   }
 
   private setupStaticEnvironment() {
-    // Lush Sims 4 neighborhood terrain
+    // Lush neighborhood ground plane
     const groundGeo = new THREE.PlaneGeometry(140, 140);
     groundGeo.rotateX(-Math.PI / 2);
     const ground = new THREE.Mesh(groundGeo, this.palette.grass);
-    ground.position.set(2.5, -0.05, 8.5);
+    ground.position.set(2.5, -0.055, 8.5);
     ground.receiveShadow = true;
     this.envGroup.add(ground);
 
-    // Asphalt residential street in front of house (Z = -6.0 .. 0.0)
-    const roadGeo = new THREE.BoxGeometry(90, 0.06, 6.2);
+    // Textured Asphalt residential street in front of house (Z = -6.8 .. -0.55)
+    const roadGeo = new THREE.BoxGeometry(90, 0.06, 6.25);
     const road = new THREE.Mesh(roadGeo, this.palette.road);
-    road.position.set(2.5, -0.03, -3.2);
+    road.position.set(2.5, -0.04, -3.65);
     road.receiveShadow = true;
     this.envGroup.add(road);
 
-    // Drainage gutter (got depan Surabaya) along Z = -0.25
-    const gutterMat = new THREE.MeshStandardMaterial({ color: 0x5c6066, roughness: 0.9 });
-    const gutter = new THREE.Mesh(new THREE.BoxGeometry(20, 0.08, 0.45), gutterMat);
-    gutter.position.set(2.5, -0.02, -0.25);
-    gutter.receiveShadow = true;
-    this.envGroup.add(gutter);
+    // Subtle road lane divider marks (static batched geometry)
+    const stripeMat = new THREE.MeshStandardMaterial({ color: 0xd8d5c9, roughness: 0.85, metalness: 0.0 });
+    const stripeGeos: THREE.BufferGeometry[] = [];
+    for (let sx = -18; sx <= 22; sx += 3.2) {
+      const g = new THREE.BoxGeometry(1.4, 0.008, 0.11);
+      g.translate(sx, -0.006, -3.65);
+      stripeGeos.push(g);
+    }
+    const mergedStripes = mergeGeometryBatch(stripeGeos);
+    if (mergedStripes) {
+      const m = new THREE.Mesh(mergedStripes, stripeMat);
+      m.receiveShadow = true;
+      this.envGroup.add(m);
+    }
+
+    // Surabaya concrete curb (kanstin) & recessed stormwater gutter (got beton) along Z = -0.30
+    const curbMat = new THREE.MeshStandardMaterial({ color: 0x7b8087, roughness: 0.88, metalness: 0.02 });
+    const grateMat = new THREE.MeshStandardMaterial({ color: 0x3b4046, roughness: 0.55, metalness: 0.72 });
+    const drainDarkMat = new THREE.MeshStandardMaterial({ color: 0x1c2128, roughness: 0.95 });
+
+    const gutterFrontWall = new THREE.Mesh(new THREE.BoxGeometry(28, 0.08, 0.12), curbMat);
+    gutterFrontWall.position.set(2.5, -0.015, -0.52);
+    gutterFrontWall.receiveShadow = true;
+    this.envGroup.add(gutterFrontWall);
+
+    const gutterBackWall = new THREE.Mesh(new THREE.BoxGeometry(28, 0.08, 0.12), curbMat);
+    gutterBackWall.position.set(2.5, -0.015, -0.06);
+    gutterBackWall.receiveShadow = true;
+    this.envGroup.add(gutterBackWall);
+
+    const gutterBed = new THREE.Mesh(new THREE.BoxGeometry(28, 0.02, 0.36), drainDarkMat);
+    gutterBed.position.set(2.5, -0.045, -0.29);
+    gutterBed.receiveShadow = true;
+    this.envGroup.add(gutterBed);
+
+    // Driveway bridge slab & slotted steel drain grates over front gutter (Carport entrance)
+    const bridgeGeos: THREE.BufferGeometry[] = [];
+    const bridge = createChamferBox(3.45, 0.075, 0.56, 0.012, 1);
+    bridge.translate(3.25, 0.015, -0.29);
+    bridgeGeos.push(bridge);
+    const frontApron = new THREE.BoxGeometry(3.5, 0.04, 0.25);
+    frontApron.translate(3.25, -0.01, -0.66);
+    bridgeGeos.push(frontApron);
+    const mergedBridge = mergeGeometryBatch(bridgeGeos);
+    if (mergedBridge) {
+      const m = new THREE.Mesh(mergedBridge, curbMat);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      this.envGroup.add(m);
+    }
+
+    const grateGeos: THREE.BufferGeometry[] = [];
+    for (let gx = 0.05; gx <= 1.45; gx += 0.14) {
+      const bar = new THREE.BoxGeometry(0.035, 0.02, 0.34);
+      bar.translate(gx, 0.022, -0.29);
+      grateGeos.push(bar);
+    }
+    const mergedGrate = mergeGeometryBatch(grateGeos);
+    if (mergedGrate) {
+      const gm = new THREE.Mesh(mergedGrate, grateMat);
+      gm.receiveShadow = true;
+      this.envGroup.add(gm);
+    }
 
     // Studio grid
     this.gridHelper = new THREE.GridHelper(30, 30, 0x94a3b8, 0x475569);
     this.gridHelper.position.set(2.5, 0.004, 8.5);
     (this.gridHelper.material as THREE.Material).transparent = true;
-    (this.gridHelper.material as THREE.Material).opacity = 0.28;
+    (this.gridHelper.material as THREE.Material).opacity = 0.25;
     this.envGroup.add(this.gridHelper);
 
-    // Sims 4 stylized neighbor silhouettes (left X < 0, right X > 5)
+    // Contact shadow material shared for environment planters/trees
+    const shadowMat = new THREE.MeshBasicMaterial({
+      map: this.contactShadowTex,
+      transparent: true,
+      opacity: 0.72,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+    });
+    this.staticDisposables.push(shadowMat);
+
+    // Articulated Surabaya 2-storey neighbor townhomes (left X < 0, right X > 5)
     const addNeighborHouse = (cx: number, labelSide: string) => {
       const grp = new THREE.Group();
       grp.name = `neighbor-${labelSide}`;
-      const body = new THREE.Mesh(new THREE.BoxGeometry(5, 7.2, 13), this.palette.neighborWall);
-      body.position.set(cx, 3.6, 10.5);
-      grp.add(body);
-      const roof = new THREE.Mesh(new THREE.BoxGeometry(5, 0.35, 13.8), this.palette.neighborWall);
-      roof.position.set(cx, 7.45, 10.5);
-      roof.rotation.x = -0.14;
-      grp.add(roof);
-      // Trees on street verge
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 2.8, 8), this.palette.woodTeak);
-      trunk.position.set(cx, 1.4, -0.7);
+
+      // Main 2-storey mass + front stepped parapet & porch canopy + window recesses
+      const wallGeos: THREE.BufferGeometry[] = [];
+      const body = createChamferBox(4.92, 6.95, 13.0, 0.03, 1);
+      body.translate(cx, 3.48, 10.5);
+      wallGeos.push(body);
+
+      const canopy = createChamferBox(4.8, 0.14, 1.45, 0.015, 1);
+      canopy.translate(cx, 3.55, 3.35);
+      wallGeos.push(canopy);
+
+      const fence = createChamferBox(4.85, 0.95, 0.16, 0.015, 1);
+      fence.translate(cx, 0.48, 0.12);
+      wallGeos.push(fence);
+
+      const mergedWall = mergeGeometryBatch(wallGeos);
+      if (mergedWall) {
+        const wm = new THREE.Mesh(mergedWall, this.palette.neighborWall);
+        wm.castShadow = true;
+        wm.receiveShadow = true;
+        grp.add(wm);
+      }
+
+      // Sloped terracotta-toned roof + overhanging eave fascia
+      const nRoof = createChamferBox(4.96, 0.24, 13.8, 0.025, 1);
+      nRoof.rotateX(-0.14);
+      nRoof.translate(cx, 7.62, 10.5);
+      const rm = new THREE.Mesh(nRoof, this.palette.neighborRoof);
+      rm.castShadow = true;
+      rm.receiveShadow = true;
+      grp.add(rm);
+
+      // Subtle window frame accents on front facade for realistic neighborhood scale
+      const winMat = new THREE.MeshStandardMaterial({ color: 0x3b444f, roughness: 0.45, metalness: 0.35 });
+      const winGeos: THREE.BufferGeometry[] = [];
+      for (const [wy, wz] of [
+        [2.05, 3.98],
+        [5.25, 3.98],
+      ] as [number, number][]) {
+        const wFrame = createChamferBox(1.5, 1.55, 0.08, 0.01, 1);
+        wFrame.translate(cx + (labelSide === "left" ? -0.4 : 0.4), wy, wz);
+        winGeos.push(wFrame);
+      }
+      const mergedWin = mergeGeometryBatch(winGeos);
+      if (mergedWin) grp.add(new THREE.Mesh(mergedWin, winMat));
+
+      // Multi-part Tropical Street Trees on street verge
+      const treeZ = -0.82;
+      const treeX = cx + (labelSide === "left" ? 1.15 : -1.15);
+      const trunkGeo = new THREE.CylinderGeometry(0.085, 0.14, 2.55, 8);
+      trunkGeo.translate(treeX, 1.25, treeZ);
+      const trunk = new THREE.Mesh(trunkGeo, this.palette.woodTeak);
       trunk.castShadow = true;
       grp.add(trunk);
-      const crown = new THREE.Mesh(new THREE.DodecahedronGeometry(1.15, 1), this.palette.grass);
-      crown.position.set(cx, 3.2, -0.7);
-      crown.castShadow = true;
-      grp.add(crown);
+
+      const foliageMat = new THREE.MeshStandardMaterial({ color: 0x528044, roughness: 0.86, envMapIntensity: 0.25 });
+      const crownGeos: THREE.BufferGeometry[] = [];
+      for (const [ox, oy, oz, rad] of [
+        [0, 2.85, 0, 0.88],
+        [-0.45, 2.58, 0.25, 0.66],
+        [0.44, 2.62, -0.22, 0.64],
+        [0.05, 3.28, 0.08, 0.56],
+      ] as [number, number, number, number][]) {
+        const c = new THREE.IcosahedronGeometry(rad, 1);
+        c.scale(1.05, 0.82, 1.05);
+        c.translate(treeX + ox, oy, treeZ + oz);
+        crownGeos.push(c);
+      }
+      const mergedCrown = mergeGeometryBatch(crownGeos);
+      if (mergedCrown) {
+        const cm = new THREE.Mesh(mergedCrown, foliageMat);
+        cm.castShadow = true;
+        cm.receiveShadow = true;
+        grp.add(cm);
+      }
+
+      // Ground contact shadow under street tree
+      const discGeo = new THREE.PlaneGeometry(2.3, 2.3);
+      discGeo.rotateX(-Math.PI / 2);
+      const disc = new THREE.Mesh(discGeo, shadowMat);
+      disc.position.set(treeX, 0.008, treeZ);
+      grp.add(disc);
+
       this.envGroup.add(grp);
     };
-    addNeighborHouse(-2.6, "left");
-    addNeighborHouse(7.6, "right");
+    addNeighborHouse(-2.58, "left");
+    addNeighborHouse(7.58, "right");
   }
 
   private setupRainSystem() {
@@ -286,9 +593,9 @@ export class HouseScene {
     this.rainArray = attr.array as Float32Array;
     const mat = new THREE.PointsMaterial({
       color: 0xcbe4f5,
-      size: 0.11,
+      size: 0.1,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.7,
       depthWrite: false,
     });
     this.rainPoints = new THREE.Points(geo, mat);
@@ -298,34 +605,42 @@ export class HouseScene {
   }
 
   setCameraPreset(preset: ViewState["cameraPreset"]) {
+    if (!this.webglReady) return;
     this.walkthroughActive = preset === "walkthrough";
     if (this.walkthroughActive) {
       this.walkPos.set(1.1, this.activeFloorElevation + 1.65, 2.0);
       this.walkYaw = 0;
       this.walkPitch = -0.04;
+      this.cameraDirty = true;
       this.updateCameraTransform();
       return;
     }
 
-    this.target.set(2.5, 2.8, 8.5);
+    this.targetDesired.set(2.5, 2.75, 8.5);
     switch (preset) {
       case "front":
-        this.sph = { radius: 18, theta: Math.PI, phi: 1.38 };
+        this.sphDesired = { radius: 18, theta: Math.PI, phi: 1.38 };
         break;
       case "back":
-        this.sph = { radius: 18, theta: 0, phi: 1.38 };
+        this.sphDesired = { radius: 18, theta: 0, phi: 1.38 };
         break;
       case "side":
-        this.sph = { radius: 22, theta: Math.PI * 0.5, phi: 1.32 };
+        this.sphDesired = { radius: 22, theta: Math.PI * 0.5, phi: 1.32 };
         break;
       case "top":
-        this.sph = { radius: 24, theta: Math.PI, phi: 0.08 };
+        this.sphDesired = { radius: 24, theta: Math.PI, phi: 0.08 };
         break;
       default:
-        this.sph = { radius: 19, theta: Math.PI * 0.82, phi: 1.05 };
+        this.sphDesired = { radius: 19, theta: Math.PI * 0.82, phi: 1.05 };
         break;
     }
-    this.updateCameraTransform();
+    if (this.reducedMotion) {
+      this.target.copy(this.targetDesired);
+      this.sph = { ...this.sphDesired };
+      this.updateCameraTransform();
+    } else {
+      this.cameraDirty = true;
+    }
   }
 
   update(
@@ -339,6 +654,8 @@ export class HouseScene {
     activeLevelIdx: 0 | 1,
     activeTool: string,
   ) {
+    if (!this.webglReady || this.disposed) return;
+
     this.activeFloorElevation = derived.project.site.peil.floor1PeilM;
     this.activeLevelIdx = activeLevelIdx;
     this.activeTool = activeTool;
@@ -354,14 +671,14 @@ export class HouseScene {
     }
 
     // Update palette colors & tile scaling
-    this.palette.plasterExt.color.set(derived.project.simulation.paintExtHex);
-    this.palette.plasterInt.color.set(derived.project.simulation.paintIntHex);
-    this.palette.roofCover.color.set(derived.project.simulation.roofColorHex);
-    const tileRepeat = 100 / derived.project.systems.tileSizeCm;
-    this.palette.tileFloor.map?.repeat.set(tileRepeat, tileRepeat);
+    const sim = derived.project.simulation;
+    this.palette.plasterExt.color.set(sim.paintExtHex);
+    this.palette.plasterInt.color.set(sim.paintIntHex);
+    this.palette.roofCover.color.set(sim.roofColorHex);
+    this.palette.setTileSize(derived.project.systems.tileSizeCm);
+    this.lastRainMmH = sim.rainIntensityMmH;
 
     // Update sky, sun, PMREM only when lighting/weather params change
-    const sim = derived.project.simulation;
     const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}`;
     if (nextEnvKey !== this.envKey) {
       this.envKey = nextEnvKey;
@@ -375,19 +692,20 @@ export class HouseScene {
       this.envTex = env;
       this.scene.environment = env;
       this.scene.environmentIntensity = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5 ? 0.35 : 0.72;
+      this.palette.bindEnvMap(env);
 
       const [sx, sy, sz] = lighting.solar.sunDir;
-      this.sunLight.position.set(2.5 + sx * 28, Math.max(2, sy * 28), 8.5 + sz * 28);
+      this.sunLight.position.set(2.5 + sx * 24, Math.max(2.5, sy * 24), 8.5 + sz * 24);
       const isNight = !lighting.solar.isDaylight;
       const isStorm = sim.rainIntensityMmH > 20;
-      this.sunLight.intensity = isNight ? 0.15 : isStorm ? 0.85 : 2.35;
+      this.sunLight.intensity = isNight ? 0.16 : isStorm ? 0.85 : 2.35;
       this.sunLight.color.set(
         isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff5e0,
       );
-      this.hemiLight.intensity = isNight ? 0.25 : isStorm ? 0.55 : 0.78;
+      this.hemiLight.intensity = isNight ? 0.28 : isStorm ? 0.55 : 0.76;
       if (this.scene.fog instanceof THREE.FogExp2) {
-        this.scene.fog.color.set(isNight ? 0x101829 : isStorm ? 0x6f7c89 : 0xd2e1ec);
-        this.scene.fog.density = isStorm ? 0.015 : 0.006;
+        this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x6f7c89 : 0xd2e1ec);
+        this.scene.fog.density = isStorm ? 0.013 : 0.0055;
       }
     }
 
@@ -395,8 +713,8 @@ export class HouseScene {
     if (this.rainPoints) {
       this.rainPoints.visible = view.showRain && sim.rainIntensityMmH > 0;
       const density = Math.min(1, sim.rainIntensityMmH / 120);
-      this.rainActiveCount = Math.round(2400 * density);
-      this.rainPoints.geometry.setDrawRange(0, this.rainActiveCount);
+      this.rainBaseCount = Math.round(2400 * density);
+      this.syncRainDrawRange();
     }
 
     // Cutaway plane
@@ -430,8 +748,26 @@ export class HouseScene {
       this.rebuildHouse(derived, struct, view);
     }
 
-    // Rebuild simulation overlays (Lux heatmap, Airflow particles, Flood water)
-    this.rebuildSimOverlays(derived, lighting, airflow, flood, view);
+    // Rebuild simulation overlays only when simulation state actually changes (prevents churn!)
+    const simKey = JSON.stringify({
+      u: derived.project.updatedAt,
+      lux: view.showLuxHeatmap,
+      airP: view.showAirParticles,
+      fldW: view.showFloodWater,
+      lvV: view.activeLevelView,
+      stFld: flood.streetFloodCm,
+      cpFld: flood.carportFloodCm,
+      inFld: flood.lt1FloorFloodCm,
+      bar: derived.project.floodMitigation.doorFloodBarrier,
+      barH: derived.project.floodMitigation.barrierHeightCm,
+      hr: Math.round(sim.hourOfDay * 4),
+      rn: Math.round(sim.rainIntensityMmH),
+    });
+    if (simKey !== this.lastSimKey) {
+      this.lastSimKey = simKey;
+      this.rebuildSimOverlays(derived, lighting, flood, view);
+    }
+
     this.updateSelectionRing(derived, selected);
     this.applyWireframe(view.wireframe);
   }
@@ -450,7 +786,6 @@ export class HouseScene {
   private clearSim() {
     this.simGroup.clear();
     this.airParticlesMesh = null;
-    this.floodWaterMesh = null;
     for (const r of this.simResources) r.dispose();
     this.simResources = [];
   }
@@ -461,35 +796,85 @@ export class HouseScene {
     this.pickables.push(obj);
   }
 
-  private addBox(
-    parent: THREE.Object3D,
-    x: number,
-    y: number,
-    z: number,
-    sx: number,
-    sy: number,
-    sz: number,
-    mat: THREE.Material,
-    sel?: NonNullable<SelectionTarget>,
-    label?: string,
-    explodeOff?: [number, number, number],
-  ) {
-    const geo = new THREE.BoxGeometry(sx, sy, sz);
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, y, z);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    parent.add(mesh);
-    this.dynResources.push(geo);
-    if (sel) this.tagPickable(mesh, sel, label ?? sel.id);
-    if (explodeOff) {
-      this.explodePieces.push({
-        obj: mesh,
-        base: mesh.position.clone(),
-        off: new THREE.Vector3(...explodeOff),
-      });
+  /**
+   * Builds a sloped ExtrudeGeometry roof slab in world coordinates over [x0..x1, z0..z1],
+   * automatically subtracting the Rear Open Void [1.70..maxX, 15.35..maxZ] and optional
+   * Skylight holes, then lifting vertices to match roof.heightAt(x, z).
+   */
+  private buildCutoutRoofGeometry(
+    x0: number,
+    x1: number,
+    z0: number,
+    z1: number,
+    voidCut: { x0: number; x1: number; z0: number; z1: number } | null,
+    skylightHole: [number, number, number, number] | null,
+    heightAt: (x: number, z: number) => number,
+    thickness = 0.085,
+  ): THREE.BufferGeometry | null {
+    const minW = x1 - x0;
+    const minD = z1 - z0;
+    if (minW < 0.08 || minD < 0.08) return null;
+
+    // Determine polygon vertices clockwise in XZ -> (x, -z) in 2D shape coordinates
+    const pts: [number, number][] = [];
+    const voidHitsX =
+      voidCut && voidCut.x1 > x0 + 0.04 && voidCut.x0 < x1 - 0.04 && voidCut.z0 < z1 - 0.04 && voidCut.z1 > z0 + 0.04;
+
+    let effectiveZ1 = z1;
+    if (voidHitsX && voidCut) {
+      const vx0 = Math.max(x0, voidCut.x0);
+      const vx1 = Math.min(x1, voidCut.x1);
+      const vz0 = Math.max(z0, voidCut.z0);
+      if (vx0 <= x0 + 0.04 && vx1 >= x1 - 0.04) {
+        // Void cuts across entire width of this roof strip -> stop roof before void
+        effectiveZ1 = vz0;
+        if (effectiveZ1 - z0 < 0.08) return null;
+        pts.push([x0, z0], [x1, z0], [x1, effectiveZ1], [x0, effectiveZ1]);
+      } else if (vx1 >= x1 - 0.04) {
+        // Void notches back-right corner (standard Rear Taman Belakang right side X: 1.70..5.00)
+        pts.push([x0, z0], [x1, z0], [x1, vz0], [vx0, vz0], [vx0, z1], [x0, z1]);
+      } else if (vx0 <= x0 + 0.04) {
+        pts.push([x0, z0], [x1, z0], [x1, z1], [vx1, z1], [vx1, vz0], [x0, vz0]);
+      } else {
+        pts.push([x0, z0], [x1, z0], [x1, z1], [x0, z1]);
+      }
+    } else {
+      pts.push([x0, z0], [x1, z0], [x1, z1], [x0, z1]);
     }
-    return mesh;
+
+    const shape = new THREE.Shape();
+    pts.forEach(([px, pz], idx) => {
+      if (idx === 0) shape.moveTo(px, -pz);
+      else shape.lineTo(px, -pz);
+    });
+    shape.closePath();
+
+    if (skylightHole) {
+      const [hx0, hz0, hx1, hz1] = skylightHole;
+      if (hx0 >= x0 + 0.05 && hx1 <= x1 - 0.05 && hz0 >= z0 + 0.05 && hz1 <= effectiveZ1 - 0.05) {
+        const hole = new THREE.Path();
+        hole.moveTo(hx0, -hz0);
+        hole.lineTo(hx1, -hz0);
+        hole.lineTo(hx1, -hz1);
+        hole.lineTo(hx0, -hz1);
+        hole.closePath();
+        shape.holes.push(hole);
+      }
+    }
+
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, curveSegments: 1 });
+    geo.rotateX(-Math.PI / 2);
+
+    const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const vx = pos.getX(i);
+      const vy = pos.getY(i);
+      const vz = pos.getZ(i);
+      pos.setY(i, vy + heightAt(vx, vz));
+    }
+    pos.needsUpdate = true;
+    geo.computeVertexNormals();
+    return attachBvh(geo);
   }
 
   private rebuildHouse(derived: DerivedProjectModel, struct: StructuralReport, view: ViewState) {
@@ -497,12 +882,12 @@ export class HouseScene {
 
     const { project, masonry, roof } = derived;
     const peil = project.site.peil;
-    const lt1Y = peil.floor1PeilM; // e.g. +0.50m above street
+    const lt1Y = peil.floor1PeilM;
     const lt2Y = lt1Y + project.levels[0]!.height;
     const stage = view.stage;
     const hidden = new Set(view.hiddenParts);
 
-    // Stage visibility logic (stage 0 = full house; stage 1..10 = construction sequence!)
+    // Stage visibility logic (stage 0 = full house; stage 1..10 = construction sequence)
     const showFnd = !hidden.has("pondasi") && (stage === 0 || stage >= 2);
     const showSloofCol = !hidden.has("kolom") && view.showStructure && (stage === 0 || stage >= 3);
     const showLt2Slab = !hidden.has("pelat") && view.showStructure && (stage === 0 || stage >= 4);
@@ -515,76 +900,127 @@ export class HouseScene {
     const showTileFloor = !hidden.has("lantai") && (stage === 0 || stage >= 8);
     const showProps = stage === 0 || stage >= 9;
 
+    const batch = new StaticBatchCollector();
+
     // 1. Raised Peil Plinth & Carport / Terrace concrete beds
     if (stage === 0 || stage >= 1) {
       // Front Taman Depan soil bed
-      this.addBox(this.houseRoot, 0.75, 0.04, 1.5, 1.5, 0.08, 3.0, this.palette.grass);
-      // Carport pad at carportPeilM
+      batch.addBox("site:grass", this.palette.grass, "lantai", "Taman Depan", 0.75, 0.04, 1.5, 1.5, 0.08, 3.0);
+      // Carport pad at carportPeilM (chamfered curb edge)
       const cpH = Math.max(0.08, peil.carportPeilM);
-      this.addBox(this.houseRoot, 3.25, cpH * 0.5, 2.25, 3.5, cpH, 4.5, this.palette.carport, { kind: "part", id: "lantai" }, "Carport");
-      // Terrace at terracePeilM
+      batch.addGeo(
+        "site:carport",
+        this.palette.carport,
+        "lantai",
+        "Carport",
+        createChamferBox(3.5, cpH, 4.5, 0.014, 1),
+        3.25,
+        cpH * 0.5,
+        2.25,
+      );
+      // Terrace deck at terracePeilM
       const trH = Math.max(0.12, peil.terracePeilM);
-      this.addBox(this.houseRoot, 1.125, trH * 0.5, 3.5, 2.25, trH, 1.0, this.palette.woodDeck, { kind: "part", id: "lantai" }, "Teras Depan");
-      // Entry steps from Terrace to Front Door
+      batch.addGeo(
+        "site:teras",
+        this.palette.woodDeck,
+        "lantai",
+        "Teras Depan",
+        createChamferBox(2.25, trH, 1.0, 0.012, 1),
+        1.125,
+        trH * 0.5,
+        3.5,
+      );
       if (lt1Y > trH + 0.03) {
-        this.addBox(this.houseRoot, 1.58, (lt1Y + trH) * 0.25, 3.85, 1.1, (lt1Y - trH), 0.3, this.palette.tileFloor);
+        batch.addGeo(
+          "site:entry-step",
+          this.palette.tileFloor,
+          "lantai",
+          "Tangga Masuk Teras",
+          createChamferBox(1.12, lt1Y - trH, 0.34, 0.01, 1),
+          1.58,
+          (lt1Y + trH) * 0.25,
+          3.85,
+        );
       }
       // Earthfill plinth under main LT1 building (X: 0..5, Z: 4..17)
-      this.addBox(this.houseRoot, 2.5, lt1Y * 0.5 - 0.05, 10.5, 4.96, Math.max(0.1, lt1Y - 0.08), 13.0, this.palette.concrete, { kind: "part", id: "pondasi" }, "Urugan Peil Lantai");
+      batch.addBox(
+        "fnd:plinth",
+        this.palette.concrete,
+        "pondasi",
+        "Urugan Peil Lantai",
+        2.5,
+        lt1Y * 0.5 - 0.05,
+        10.5,
+        4.96,
+        Math.max(0.1, lt1Y - 0.08),
+        13.0,
+      );
     }
 
-    // 2. Foundations (Footplates, Strauss Piles, Cakar Ayam, Batu Kali)
+    // 2. Foundations (Footplates, Strauss Piles, Cakar Ayam, Sumur Resapan) — batched into 2 meshes!
     if (showFnd) {
       for (const f of struct.foundations) {
         const fw = project.systems.foundation === "footplate_full" ? 1.2 : 1.0;
-        this.addBox(
-          this.houseRoot,
+        batch.addGeo(
+          "fnd:all",
+          this.palette.concrete,
+          "pondasi",
+          `Pondasi (${project.systems.foundation})`,
+          createChamferBox(fw, 0.32, fw, 0.015, 1),
           f.x,
           -0.65,
           f.z,
-          fw,
-          0.32,
-          fw,
-          this.palette.concrete,
-          { kind: "part", id: "pondasi" },
-          `Pondasi ${f.id}`,
-          [0, -1.6, 0],
+          0,
+          [0, -1.4, 0],
         );
-        // Pedestal neck up to sloof
-        this.addBox(
-          this.houseRoot,
+        batch.addBox(
+          "fnd:all",
+          this.palette.concrete,
+          "pondasi",
+          `Pondasi (${project.systems.foundation})`,
           f.x,
           (lt1Y - 0.65) * 0.5 - 0.1,
           f.z,
           0.26,
           lt1Y + 0.45,
           0.26,
-          this.palette.concrete,
-          { kind: "part", id: "pondasi" },
-          `Pedestal ${f.id}`,
-          [0, -1.2, 0],
+          { explodeOff: [0, -1.4, 0] },
         );
         if (project.systems.foundation === "strauss_pile") {
-          const pileGeo = new THREE.CylinderGeometry(0.15, 0.15, 2.4, 12);
-          const pile = new THREE.Mesh(pileGeo, this.palette.concrete);
-          pile.position.set(f.x, -1.9, f.z);
-          this.houseRoot.add(pile);
-          this.dynResources.push(pileGeo);
-          this.tagPickable(pile, { kind: "part", id: "pondasi" }, `Strauss Pile ${f.id}`);
+          const pileGeo = new THREE.CylinderGeometry(0.15, 0.15, 2.4, 10);
+          batch.addGeo(
+            "fnd:all",
+            this.palette.concrete,
+            "pondasi",
+            "Pondasi Strauss Pile",
+            pileGeo,
+            f.x,
+            -1.9,
+            f.z,
+            0,
+            [0, -1.4, 0],
+          );
         }
       }
       // Sumur Resapan SNI 03-2453 in front garden
       for (let i = 0; i < project.floodMitigation.infiltrationWells; i++) {
-        const wellGeo = new THREE.CylinderGeometry(0.42, 0.42, 1.5, 16);
-        const well = new THREE.Mesh(wellGeo, this.palette.concrete);
-        well.position.set(0.75, -0.7, 1.2 + i * 1.1);
-        this.houseRoot.add(well);
-        this.dynResources.push(wellGeo);
-        this.tagPickable(well, { kind: "part", id: "sumurResapan" }, "Sumur Resapan SNI 03-2453");
+        const wellGeo = new THREE.CylinderGeometry(0.42, 0.42, 1.5, 14);
+        batch.addGeo(
+          "fnd:resapan",
+          this.palette.concrete,
+          "sumurResapan",
+          "Sumur Resapan SNI 03-2453",
+          wellGeo,
+          0.75,
+          -0.7,
+          1.2 + i * 1.1,
+          0,
+          [0, -1.2, 0],
+        );
       }
     }
 
-    // 3. Structural Frame (Sloof, Columns, Main Beams, LT2 Slab, Stairs, Ring Balk)
+    // 3. Structural Frame (Sloof, Columns, Main Beams, Ring Balk) — batched per member role!
     if (showSloofCol) {
       const colMat = project.systems.frame === "steel_wf" ? this.palette.steelWf : this.palette.concrete;
       const maxColLevel = view.activeLevelView === "lt1" ? 1 : 2;
@@ -594,32 +1030,32 @@ export class HouseScene {
       for (const col of struct.columns) {
         const isCanopy = col.z < 1.0;
         const h = isCanopy ? lt2Y - lt1Y + 0.1 : colH;
-        this.addBox(
-          this.houseRoot,
+        batch.addGeo(
+          "struct:col",
+          colMat,
+          "kolom",
+          `Kolom Utama (${struct.columns.length} titik)`,
+          createChamferBox(col.widthM, h, col.depthM, 0.008, 1),
           col.x,
           lt1Y - 0.15 + h * 0.5,
           col.z,
-          col.widthM,
-          h,
-          col.depthM,
-          colMat,
-          { kind: "part", id: "kolom" },
-          `Kolom ${col.id}`,
-          [(col.x - 2.5) * 0.45, 0.5, (col.z - 8.5) * 0.15],
+          0,
+          [0, 0.45, 0],
         );
 
         if (view.xrayRebar && col.isMain) {
-          this.addBox(
-            this.houseRoot,
+          batch.addBox(
+            "struct:rebar",
+            this.palette.rebar,
+            "kolom",
+            `Tulangan Kolom (${col.rebarSpec})`,
             col.x,
             lt1Y - 0.15 + h * 0.5,
             col.z,
             col.widthM * 0.68,
             h + 0.1,
             col.depthM * 0.68,
-            this.palette.rebar,
-            { kind: "part", id: "kolom" },
-            `Tulangan ${col.id} (${col.rebarSpec})`,
+            { explodeOff: [0, 0.45, 0] },
           );
         }
       }
@@ -631,24 +1067,26 @@ export class HouseScene {
         const cx = (bm.start.x + bm.end.x) * 0.5;
         const cz = (bm.start.z + bm.end.z) * 0.5;
         const ang = -Math.atan2(bm.end.z - bm.start.z, bm.end.x - bm.start.x);
-        const geo = new THREE.BoxGeometry(bm.lengthM, bm.heightM, bm.widthM);
-        const mesh = new THREE.Mesh(geo, colMat);
-        mesh.position.set(cx, y, cz);
-        mesh.rotation.y = ang;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        this.houseRoot.add(mesh);
-        this.dynResources.push(geo);
-        this.tagPickable(mesh, { kind: "part", id: bm.kind === "sloof" ? "sloof" : bm.kind === "ring_balk" ? "ringbalk" : "balok" }, bm.kind.toUpperCase());
-        this.explodePieces.push({
-          obj: mesh,
-          base: mesh.position.clone(),
-          off: new THREE.Vector3((cx - 2.5) * 0.4, bm.levelIndex * 1.4, (cz - 8.5) * 0.15),
-        });
+        const partId = bm.kind === "sloof" ? "sloof" : bm.kind === "ring_balk" ? "ringbalk" : "balok";
+        const expY = bm.kind === "sloof" ? -0.45 : bm.kind === "ring_balk" ? 2.35 : 1.35;
+
+        batch.addBox(
+          `struct:${partId}`,
+          colMat,
+          partId,
+          bm.kind.toUpperCase(),
+          cx,
+          y,
+          cz,
+          bm.lengthM,
+          bm.heightM,
+          bm.widthM,
+          { rotY: ang, explodeOff: [0, expY, 0] },
+        );
       }
     }
 
-    // 4. Floor Slabs (LT1 & LT2) with Void & Stair Cutouts
+    // 4. Floor Slabs (LT2) & Room Tile Floors (LT1) — batched by material!
     if (showLt2Slab && view.activeLevelView !== "lt1") {
       for (const slab of project.levels[1]!.slabs) {
         if (slab.isVoid) continue;
@@ -660,19 +1098,12 @@ export class HouseScene {
         shape.closePath();
         const geo = new THREE.ExtrudeGeometry(shape, { depth: slab.thickness, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
+        const matKey = slab.isOverhang ? "woodDeck" : showTileFloor ? "tileFloor" : "concrete";
         const mat = slab.isOverhang ? this.palette.woodDeck : showTileFloor ? this.palette.tileFloor : this.palette.concrete;
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.y = lt2Y - slab.thickness;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        this.houseRoot.add(mesh);
-        this.dynResources.push(geo);
-        this.tagPickable(mesh, { kind: "part", id: "pelat" }, slab.name);
-        this.explodePieces.push({ obj: mesh, base: mesh.position.clone(), off: new THREE.Vector3(0, 1.5, 0) });
+        batch.addGeo(`slab:${matKey}`, mat, "pelat", slab.name, geo, 0, lt2Y - slab.thickness, 0, 0, [0, 1.5, 0]);
       }
     }
 
-    // LT1 Tile Floor per room
     if (showTileFloor) {
       for (const rm of derived.floors[0]!.rooms) {
         if (rm.room.program === "garden" || rm.room.program === "carport" || rm.room.program === "void") continue;
@@ -684,24 +1115,27 @@ export class HouseScene {
         shape.closePath();
         const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.03, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
-        const mat = rm.isWetRoom
-          ? this.palette.tileWet
+        const matKey = rm.isWetRoom
+          ? "tileWet"
           : rm.room.floorMaterialId === "wood_deck"
-            ? this.palette.woodDeck
+            ? "woodDeck"
             : rm.room.floorMaterialId === "tile_wood_warm"
-              ? this.palette.tileWood
-              : this.palette.tileFloor;
+              ? "tileWood"
+              : "tileFloor";
+        const mat =
+          matKey === "tileWet"
+            ? this.palette.tileWet
+            : matKey === "woodDeck"
+              ? this.palette.woodDeck
+              : matKey === "tileWood"
+                ? this.palette.tileWood
+                : this.palette.tileFloor;
         const yOff = rm.room.program === "circulation" ? peil.terracePeilM + 0.005 : lt1Y - 0.025;
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.y = yOff;
-        mesh.receiveShadow = true;
-        this.houseRoot.add(mesh);
-        this.dynResources.push(geo);
-        this.tagPickable(mesh, { kind: "part", id: "lantai" }, `Lantai ${rm.room.name}`);
+        batch.addGeo(`floor1:${matKey}`, mat, "lantai", "Lantai Keramik LT1", geo, 0, yOff, 0, 0, undefined, false, true);
       }
     }
 
-    // 5. Staircase (20 steps LT1 -> LT2) + Safety Glass/Steel Railings (Stair, Balcony, Void)
+    // 5. Staircase (20 beveled treads + carriage stringers) + Railings (batched!)
     for (const st of project.levels[0]!.stairs) {
       const dx = st.end.x - st.start.x;
       const dz = st.end.z - st.start.z;
@@ -714,28 +1148,68 @@ export class HouseScene {
         const sx = st.start.x + dx * t;
         const sz = st.start.z + dz * t;
         const sy = lt1Y + (i + 0.5) * stepRise;
-        const stepGeo = new THREE.BoxGeometry(stepRun + 0.02, stepRise, st.width);
-        const step = new THREE.Mesh(stepGeo, this.palette.woodTeak);
-        step.position.set(sx, sy, sz);
-        step.rotation.y = ang;
-        step.castShadow = true;
-        step.receiveShadow = true;
-        this.houseRoot.add(step);
-        this.dynResources.push(stepGeo);
-        this.tagPickable(step, { kind: "part", id: "tangga" }, st.name);
+        // Chamfered teak stair tread + structural steel riser block
+        batch.addGeo(
+          "stair:tread",
+          this.palette.woodTeak,
+          "tangga",
+          st.name,
+          createChamferBox(stepRun + 0.035, 0.042, st.width, 0.008, 2),
+          sx,
+          sy + stepRise * 0.36,
+          sz,
+          ang,
+        );
+        batch.addBox(
+          "stair:carriage",
+          this.palette.concrete,
+          "tangga",
+          st.name,
+          sx,
+          sy - stepRise * 0.08,
+          sz,
+          stepRun + 0.02,
+          stepRise * 0.72,
+          st.width * 0.92,
+          { rotY: ang },
+        );
       }
     }
     if (view.activeLevelView !== "lt1") {
-      // Stair railing (X = 1.35, Z = 7.5..12.5) + Balcony railing + Rear Void railing
-      this.addBox(this.houseRoot, 1.35, lt2Y + 0.5, 10.0, 0.04, 1.0, 4.9, this.palette.glass, { kind: "part", id: "tangga" }, "Railing Tangga");
-      this.addBox(this.houseRoot, 1.35, lt2Y + 1.0, 10.0, 0.06, 0.05, 4.95, this.palette.aluDark);
-      this.addBox(this.houseRoot, 1.25, lt2Y + 0.5, 3.04, 2.45, 1.0, 0.04, this.palette.glass, { kind: "part", id: "pelat" }, "Railing Balkon");
-      this.addBox(this.houseRoot, 1.25, lt2Y + 1.0, 3.04, 2.5, 0.05, 0.06, this.palette.aluDark);
+      // Stair railing + Balcony glass & dark-aluminum chamfered rails + stanchion posts
+      batch.addBox("rail:glass-stair", this.palette.glass, "tangga", "Railing Tangga", 1.35, lt2Y + 0.5, 10.0, 0.035, 0.98, 4.9);
+      batch.addGeo(
+        "rail:alu",
+        this.palette.aluDark,
+        "tangga",
+        "Handrail Tangga & Balkon",
+        createChamferBox(0.06, 0.045, 4.95, 0.008, 1),
+        1.35,
+        lt2Y + 1.0,
+        10.0,
+      );
+      for (let pz = 7.6; pz <= 12.45; pz += 1.2) {
+        batch.addBox("rail:alu", this.palette.aluDark, "tangga", "Handrail Tangga & Balkon", 1.35, lt2Y + 0.5, pz, 0.04, 1.0, 0.04);
+      }
+      batch.addBox("rail:glass-balc", this.palette.glass, "pelat", "Railing Balkon", 1.25, lt2Y + 0.5, 3.04, 2.45, 0.98, 0.035);
+      batch.addGeo(
+        "rail:alu",
+        this.palette.aluDark,
+        "pelat",
+        "Handrail Balkon",
+        createChamferBox(2.5, 0.045, 0.06, 0.008, 1),
+        1.25,
+        lt2Y + 1.0,
+        3.04,
+      );
+      for (const px of [0.06, 0.85, 1.65, 2.44]) {
+        batch.addBox("rail:alu", this.palette.aluDark, "pelat", "Handrail Balkon", px, lt2Y + 0.5, 3.04, 0.04, 1.0, 0.04);
+      }
     }
 
-    // 6. Brick-by-Brick Masonry InstancedMesh (Supports custom dimensions L x H x T!)
+    // 6. Brick-by-Brick Masonry InstancedMesh (supports custom dimensions L x H x T!)
     if (showBricks && masonry.bricks.length > 0) {
-      const unitGeo = new THREE.BoxGeometry(1, 1, 1);
+      const unitGeo = attachBvh(new THREE.BoxGeometry(1, 1, 1));
       this.dynResources.push(unitGeo);
       const visibleBricks =
         view.activeLevelView === "lt1"
@@ -750,24 +1224,21 @@ export class HouseScene {
         const im = new THREE.InstancedMesh(unitGeo, mat, list.length);
         im.castShadow = true;
         im.receiveShadow = true;
-        const m4 = new THREE.Matrix4();
-        const q = new THREE.Quaternion();
-        const pos = new THREE.Vector3();
-        const scl = new THREE.Vector3();
         const off = new Float32Array(list.length * 3);
 
-        list.forEach((b, i) => {
+        for (let i = 0; i < list.length; i++) {
+          const b = list[i]!;
           const baseY = b.levelIndex === 0 ? lt1Y : lt2Y;
-          pos.set(b.x, baseY + b.y + b.hgt * 0.5, b.z);
-          q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), b.rotY);
-          scl.set(b.len, b.hgt, b.thick);
-          m4.compose(pos, q, scl);
-          im.setMatrixAt(i, m4);
+          this._v1.set(b.x, baseY + b.y + b.hgt * 0.5, b.z);
+          this._q.setFromAxisAngle(this._up, b.rotY);
+          this._s1.set(b.len, b.hgt, b.thick);
+          this._m4.compose(this._v1, this._q, this._s1);
+          im.setMatrixAt(i, this._m4);
 
           off[i * 3] = (b.x - 2.5) * 0.65;
-          off[i * 3 + 1] = b.levelIndex * 1.4 + (b.y * 0.35);
+          off[i * 3 + 1] = b.levelIndex * 1.4 + b.y * 0.35;
           off[i * 3 + 2] = (b.z - 8.5) * 0.25;
-        });
+        }
         im.instanceMatrix.needsUpdate = true;
         this.houseRoot.add(im);
         this.tagPickable(im, { kind: "part", id: "dinding" }, label);
@@ -778,7 +1249,7 @@ export class HouseScene {
       buildBrickIM(innerB, this.palette.brickInner, `Sekat Bata Dalam (${project.systems.brick.name})`);
     }
 
-    // 7. Plaster & Paint Facade Walls + Openings (Doors, Windows, Roster Vents)
+    // 7. Plaster & Paint Walls + Openings (batched frame/glass per opening for high detail & low draw calls!)
     for (const lv of project.levels) {
       if (lv.index === 1 && view.activeLevelView === "lt1") continue;
       const baseLvY = lv.index === 0 ? lt1Y : lt2Y;
@@ -792,10 +1263,11 @@ export class HouseScene {
         const uz = dz / len;
         const ang = -Math.atan2(dz, dx);
 
-        // Plaster/Paint wall skin (using ExtrudeGeometry with opening holes!)
         if (showPlasterPaint) {
-          const extra0 = lv.index === 1 && w.exterior && w.height >= 2.8 ? roof.extraWallHeightAt(1, w.start.x, w.start.z) : 0;
-          const extra1 = lv.index === 1 && w.exterior && w.height >= 2.8 ? roof.extraWallHeightAt(1, w.end.x, w.end.z) : 0;
+          const extra0 =
+            lv.index === 1 && w.exterior && w.height >= 2.8 ? roof.extraWallHeightAt(1, w.start.x, w.start.z) : 0;
+          const extra1 =
+            lv.index === 1 && w.exterior && w.height >= 2.8 ? roof.extraWallHeightAt(1, w.end.x, w.end.z) : 0;
           const wallShape = new THREE.Shape();
           wallShape.moveTo(0, 0);
           wallShape.lineTo(len, 0);
@@ -819,7 +1291,7 @@ export class HouseScene {
           }
 
           const skinThickness = w.thickness + 0.022;
-          const geo = new THREE.ExtrudeGeometry(wallShape, { depth: skinThickness, bevelEnabled: false });
+          const geo = attachBvh(new THREE.ExtrudeGeometry(wallShape, { depth: skinThickness, bevelEnabled: false }));
           geo.translate(0, 0, -skinThickness * 0.5);
           const mat = w.exterior ? this.palette.plasterExt : this.palette.plasterInt;
           const mesh = new THREE.Mesh(geo, mat);
@@ -837,7 +1309,6 @@ export class HouseScene {
           });
         }
 
-        // Openings (Kusen, Door Panels, Window Glass, Roster Vents)
         if (showOpenings) {
           for (const op of w.openings) {
             const cx = w.start.x + ux * op.offset;
@@ -847,38 +1318,100 @@ export class HouseScene {
             opGroup.rotation.y = ang;
 
             if (op.kind === "door") {
-              // Door frame + teak leaf rotated by openPct
               const ft = 0.05;
-              const fd = w.thickness + 0.03;
-              this.addBox(opGroup, -op.width * 0.5 + ft * 0.5, op.height * 0.5, 0, ft, op.height, fd, this.palette.woodTeak);
-              this.addBox(opGroup, op.width * 0.5 - ft * 0.5, op.height * 0.5, 0, ft, op.height, fd, this.palette.woodTeak);
-              this.addBox(opGroup, 0, op.height - ft * 0.5, 0, op.width, ft, fd, this.palette.woodTeak);
+              const fd = w.thickness + 0.036;
+              const jambL = createChamferBox(ft, op.height, fd, 0.007, 1);
+              jambL.translate(-op.width * 0.5 + ft * 0.5, op.height * 0.5, 0);
+              const jambR = createChamferBox(ft, op.height, fd, 0.007, 1);
+              jambR.translate(op.width * 0.5 - ft * 0.5, op.height * 0.5, 0);
+              const head = createChamferBox(op.width, ft, fd, 0.007, 1);
+              head.translate(0, op.height - ft * 0.5, 0);
+
+              const frameGeo = mergeGeometryBatch([jambL, jambR, head]);
+              if (frameGeo) {
+                const fm = new THREE.Mesh(frameGeo, this.palette.woodTeak);
+                fm.castShadow = true;
+                fm.receiveShadow = true;
+                opGroup.add(fm);
+                this.dynResources.push(frameGeo);
+              }
 
               const pivot = new THREE.Group();
               pivot.position.set(-op.width * 0.5 + ft, 0, 0);
               pivot.rotation.y = op.swing * ((op.openPct / 100) * Math.PI * 0.48);
               const leafMat = op.width > 1.3 ? this.palette.glass : this.palette.woodTeak;
-              this.addBox(pivot, (op.width - ft * 2) * 0.5, (op.height - ft) * 0.5, 0, op.width - ft * 2, op.height - ft, 0.04, leafMat);
-              this.addBox(pivot, op.width - ft * 3.5, 1.0, 0.03, 0.03, 0.14, 0.04, this.palette.steelLight);
+              const leafGeo = attachBvh(createChamferBox(op.width - ft * 2, op.height - ft, 0.044, 0.008, 1));
+              leafGeo.translate((op.width - ft * 2) * 0.5, (op.height - ft) * 0.5, 0);
+              const leafMesh = new THREE.Mesh(leafGeo, leafMat);
+              leafMesh.castShadow = true;
+              leafMesh.receiveShadow = true;
+              pivot.add(leafMesh);
+
+              // Brushed steel lever handle + escutcheon
+              const hBase = createChamferBox(0.035, 0.14, 0.02, 0.004, 1);
+              hBase.translate(op.width - ft * 3.5, 1.0, 0.028);
+              const lever = createChamferBox(0.11, 0.02, 0.028, 0.004, 1);
+              lever.translate(op.width - ft * 3.5 - 0.045, 1.03, 0.048);
+              const hGeo = mergeGeometryBatch([hBase, lever]);
+              if (hGeo) {
+                const hMesh = new THREE.Mesh(hGeo, this.palette.steelLight);
+                pivot.add(hMesh);
+                this.dynResources.push(hGeo);
+              }
+              this.dynResources.push(leafGeo);
               opGroup.add(pivot);
               this.tagPickable(opGroup, { kind: "opening", id: op.id, wallId: w.id, levelIndex: lv.index }, op.label);
             } else if (op.kind === "window") {
               const ft = 0.045;
-              const fd = w.thickness + 0.03;
-              this.addBox(opGroup, -op.width * 0.5 + ft * 0.5, op.height * 0.5, 0, ft, op.height, fd, this.palette.aluDark);
-              this.addBox(opGroup, op.width * 0.5 - ft * 0.5, op.height * 0.5, 0, ft, op.height, fd, this.palette.aluDark);
-              this.addBox(opGroup, 0, op.height - ft * 0.5, 0, op.width, ft, fd, this.palette.aluDark);
-              this.addBox(opGroup, 0, ft * 0.5, 0, op.width, ft, fd, this.palette.aluDark);
-              // Mullion & glass pane
-              if (op.width > 1.0) this.addBox(opGroup, 0, op.height * 0.5, 0, 0.035, op.height - ft * 2, 0.04, this.palette.aluDark);
-              this.addBox(opGroup, 0, op.height * 0.5, 0, op.width - ft * 2, op.height - ft * 2, 0.015, this.palette.glass);
+              const fd = w.thickness + 0.036;
+              const fParts: THREE.BufferGeometry[] = [];
+              const l = createChamferBox(ft, op.height, fd, 0.006, 1);
+              l.translate(-op.width * 0.5 + ft * 0.5, op.height * 0.5, 0);
+              const r = createChamferBox(ft, op.height, fd, 0.006, 1);
+              r.translate(op.width * 0.5 - ft * 0.5, op.height * 0.5, 0);
+              const topF = createChamferBox(op.width, ft, fd, 0.006, 1);
+              topF.translate(0, op.height - ft * 0.5, 0);
+              const botF = createChamferBox(op.width + 0.04, ft + 0.01, fd + 0.03, 0.007, 1);
+              botF.translate(0, ft * 0.5, 0);
+              fParts.push(l, r, topF, botF);
+
+              if (op.width > 1.0) {
+                const mul = createChamferBox(0.036, op.height - ft * 2, 0.042, 0.004, 1);
+                mul.translate(0, op.height * 0.5, 0);
+                fParts.push(mul);
+              }
+              const frameGeo = mergeGeometryBatch(fParts);
+              if (frameGeo) {
+                const fm = new THREE.Mesh(frameGeo, this.palette.aluDark);
+                fm.castShadow = true;
+                fm.receiveShadow = true;
+                opGroup.add(fm);
+                this.dynResources.push(frameGeo);
+              }
+
+              const glassGeo = attachBvh(new THREE.BoxGeometry(op.width - ft * 2, op.height - ft * 2, 0.015));
+              glassGeo.translate(0, op.height * 0.5, 0);
+              const gm = new THREE.Mesh(glassGeo, this.palette.glass);
+              opGroup.add(gm);
+              this.dynResources.push(glassGeo);
               this.tagPickable(opGroup, { kind: "opening", id: op.id, wallId: w.id, levelIndex: lv.index }, op.label);
             } else if (op.kind === "vent") {
               const cells = Math.max(1, Math.round(op.width / 0.2));
               const cw = op.width / cells;
+              const vParts: THREE.BufferGeometry[] = [];
               for (let c = 0; c < cells; c++) {
                 const lx = -op.width * 0.5 + (c + 0.5) * cw;
-                this.addBox(opGroup, lx, op.height * 0.5, 0, cw - 0.02, op.height, w.thickness + 0.015, this.palette.concrete);
+                const b = createChamferBox(cw - 0.02, op.height, w.thickness + 0.02, 0.006, 1);
+                b.translate(lx, op.height * 0.5, 0);
+                vParts.push(b);
+              }
+              const ventGeo = mergeGeometryBatch(vParts);
+              if (ventGeo) {
+                const vm = new THREE.Mesh(ventGeo, this.palette.concrete);
+                vm.castShadow = true;
+                vm.receiveShadow = true;
+                opGroup.add(vm);
+                this.dynResources.push(ventGeo);
               }
               this.tagPickable(opGroup, { kind: "opening", id: op.id, wallId: w.id, levelIndex: lv.index }, op.label);
             }
@@ -888,86 +1421,206 @@ export class HouseScene {
       }
     }
 
-    // 8. Roof Structure (Shed 10° Forward / Shed Back / Gable / Hip / Flat Deck) + Carport Canopy + Gutter + Downspouts
+    // 8. Roof Structure (Cutout for Rear Open Void [1.70..5.00, 15.35..maxZ] & Central Stair Skylight)
     if ((showTruss || showRoofCover) && view.activeLevelView !== "lt1") {
       const spanX = roof.maxX - roof.minX;
       const spanZ = roof.maxZ - roof.minZ;
       const midX = (roof.minX + roof.maxX) * 0.5;
-      const midZ = (roof.minZ + roof.maxZ) * 0.5;
-      const slopeRad = (roof.slopeDeg * Math.PI) / 180;
+      const voidCut = { x0: 1.7, x1: roof.maxX + 0.1, z0: 15.35, z1: roof.maxZ + 0.1 };
+      const skylightHole: [number, number, number, number] = [0.14, 8.55, 1.3, 10.95];
 
       if (showTruss) {
         for (let i = 0; i < roof.trussCount; i++) {
           const z = roof.minZ + (i / Math.max(1, roof.trussCount - 1)) * spanZ;
-          const h = roof.heightAt(midX, z);
-          this.addBox(this.houseRoot, midX, h - 0.08, z, spanX - 0.1, 0.06, 0.05, this.palette.steelLight, { kind: "part", id: "rangka" }, "Rangka Baja Ringan C75", [0, 2.2, 0]);
+          // Trusses overlapping rear void only span the roofed WC strip [minX..1.68]
+          const tx0 = roof.minX + 0.05;
+          const tx1 = z >= 15.35 ? Math.min(roof.maxX - 0.05, 1.68) : roof.maxX - 0.05;
+          const tSpan = tx1 - tx0;
+          if (tSpan < 0.25) continue;
+          const tMidX = (tx0 + tx1) * 0.5;
+          const h = roof.heightAt(tMidX, z);
+          batch.addBox(
+            "roof:truss",
+            this.palette.steelLight,
+            "rangka",
+            "Rangka Baja Ringan C75",
+            tMidX,
+            h - 0.08,
+            z,
+            tSpan,
+            0.06,
+            0.05,
+            { explodeOff: [0, 2.6, 0] },
+          );
         }
       }
 
       if (showRoofCover) {
-        // Main upper roof planes (left/main section excluding rear open void 1.7..5.0, 15.35..17.0)
+        const slopeRad = (roof.slopeDeg * Math.PI) / 180;
+        const slopeFactor = 1 / Math.cos(slopeRad);
+        const thickness = 0.085 * slopeFactor;
+        const roofGeos: THREE.BufferGeometry[] = [];
+
         if (roof.roofType === "shed_front" || roof.roofType === "shed_back" || roof.roofType === "flat_deck") {
-          const sign = roof.roofType === "shed_front" ? -1 : 1;
-          const avgY = (roof.heightAt(midX, roof.minZ) + roof.heightAt(midX, roof.maxZ)) * 0.5 + 0.08;
-          const lenSloped = spanZ / Math.cos(slopeRad);
-          const geo = new THREE.BoxGeometry(spanX, 0.07, lenSloped);
-          const roofMesh = new THREE.Mesh(geo, this.palette.roofCover);
-          roofMesh.position.set(midX, avgY, midZ);
-          roofMesh.rotation.x = sign * slopeRad;
+          const g = this.buildCutoutRoofGeometry(
+            roof.minX,
+            roof.maxX,
+            roof.minZ,
+            roof.maxZ,
+            voidCut,
+            skylightHole,
+            roof.heightAt,
+            thickness,
+          );
+          if (g) roofGeos.push(g);
+        } else {
+          // Gable or Hip twin panels (split at midX so both slopes stay piecewise planar around Rear Void & Skylight)
+          const gLeft = this.buildCutoutRoofGeometry(
+            roof.minX,
+            midX,
+            roof.minZ,
+            roof.maxZ,
+            voidCut,
+            skylightHole,
+            roof.heightAt,
+            thickness,
+          );
+          const gRight = this.buildCutoutRoofGeometry(
+            midX,
+            roof.maxX,
+            roof.minZ,
+            roof.maxZ,
+            voidCut,
+            skylightHole,
+            roof.heightAt,
+            thickness,
+          );
+          if (gLeft) roofGeos.push(gLeft);
+          if (gRight) roofGeos.push(gRight);
+        }
+
+        const mergedRoof = mergeGeometryBatch(roofGeos);
+        if (mergedRoof) {
+          const roofMesh = new THREE.Mesh(mergedRoof, this.palette.roofCover);
           roofMesh.castShadow = true;
           roofMesh.receiveShadow = true;
           this.houseRoot.add(roofMesh);
-          this.dynResources.push(geo);
+          this.dynResources.push(mergedRoof);
           this.tagPickable(roofMesh, { kind: "part", id: "genteng" }, `Atap ${roof.roofType} (${roof.slopeDeg}°)`);
-          this.explodePieces.push({ obj: roofMesh, base: roofMesh.position.clone(), off: new THREE.Vector3(0, 3.0, 0) });
-        } else {
-          // Gable / Hip twin slope
-          const halfX = spanX * 0.5;
-          const slopeLen = halfX / Math.cos(slopeRad);
-          for (const sgn of [-1, 1]) {
-            const g = new THREE.BoxGeometry(slopeLen, 0.07, spanZ);
-            const m = new THREE.Mesh(g, this.palette.roofCover);
-            m.position.set(midX + sgn * halfX * 0.5, lt2Y + 3.6 + halfX * 0.5 * roof.pitch + 0.08, midZ);
-            m.rotation.z = -sgn * slopeRad;
-            m.castShadow = true;
-            this.houseRoot.add(m);
-            this.dynResources.push(g);
-            this.tagPickable(m, { kind: "part", id: "genteng" }, `Bidang Atap ${roof.roofType}`);
+          this.explodePieces.push({ obj: roofMesh, base: roofMesh.position.clone(), off: new THREE.Vector3(0, 3.2, 0) });
+        }
+
+        // Fascia / Coping border strips around Void aperture & Stair Skylight Curb
+        const voidEdgeY = roof.heightAt(3.35, 15.35);
+        batch.addGeo(
+          "roof:fascia",
+          this.palette.lisplank,
+          "genteng",
+          "Lisplank Void Belakang",
+          createChamferBox(roof.maxX - 1.7 + 0.08, 0.14, 0.08, 0.01, 1),
+          (1.7 + roof.maxX) * 0.5,
+          voidEdgeY + 0.04,
+          15.35,
+          0,
+          [0, 3.2, 0],
+        );
+
+        // Central Stair Skylight Aluminum Curb + Mullion + Clear Tempered Glass
+        const [hx0, hz0, hx1, hz1] = skylightHole;
+        const hMidX = (hx0 + hx1) * 0.5;
+        const hMidZ = (hz0 + hz1) * 0.5;
+        const hW = hx1 - hx0;
+        const hD = hz1 - hz0;
+        const skyMinY = roof.heightAt(hMidX, hz0);
+        const skyMaxY = roof.heightAt(hMidX, hz1);
+        const skyAvgY = (skyMinY + skyMaxY) * 0.5 + 0.11;
+        const skyRotX = Math.atan2(skyMaxY - skyMinY, hD);
+
+        const curbFront = createChamferBox(hW + 0.08, 0.14, 0.05, 0.008, 1);
+        curbFront.translate(hMidX, skyMinY + 0.07, hz0);
+        const curbBack = createChamferBox(hW + 0.08, 0.14, 0.05, 0.008, 1);
+        curbBack.translate(hMidX, skyMaxY + 0.07, hz1);
+        batch.addGeo("roof:skycurb", this.palette.aluDark, "plafon", "Rangka Skylight Tangga", curbFront, 0, 0, 0, 0, [0, 3.2, 0]);
+        batch.addGeo("roof:skycurb", this.palette.aluDark, "plafon", "Rangka Skylight Tangga", curbBack, 0, 0, 0, 0, [0, 3.2, 0]);
+
+        const skyGlass = new THREE.Mesh(attachBvh(new THREE.BoxGeometry(hW + 0.06, 0.035, hD + 0.06)), this.palette.glass);
+        skyGlass.position.set(hMidX, skyAvgY + 0.04, hMidZ);
+        skyGlass.rotation.x = -skyRotX;
+        skyGlass.castShadow = false;
+        this.houseRoot.add(skyGlass);
+        this.dynResources.push(skyGlass.geometry);
+        this.tagPickable(skyGlass, { kind: "part", id: "plafon" }, "Skylight Tangga Tempered Glass");
+        this.explodePieces.push({ obj: skyGlass, base: skyGlass.position.clone(), off: new THREE.Vector3(0, 3.2, 0) });
+
+        // Front Gutter (Talang Depan) + Curved TubeGeometry Downspouts with gooseneck elbows
+        const eaveY = roof.heightAt(midX, roof.minZ) - 0.03;
+        batch.addGeo(
+          "roof:gutter",
+          this.palette.aluDark,
+          "talang",
+          "Talang Utama Depan",
+          createChamferBox(spanX + 0.04, 0.13, 0.17, 0.012, 1),
+          midX,
+          eaveY,
+          roof.minZ + 0.05,
+        );
+        for (const dx of [0.18, project.site.width - 0.18]) {
+          const curve = new THREE.CatmullRomCurve3([
+            new THREE.Vector3(dx, eaveY - 0.05, roof.minZ + 0.06),
+            new THREE.Vector3(dx, eaveY - 0.34, roof.minZ + 0.18),
+            new THREE.Vector3(dx, eaveY - 0.58, 3.06),
+            new THREE.Vector3(dx, 0.25, 3.06),
+            new THREE.Vector3(dx, 0.09, 2.84),
+          ]);
+          const tubeGeo = attachBvh(new THREE.TubeGeometry(curve, 20, 0.044, 10, false));
+          batch.addGeo("roof:gutter", this.palette.aluDark, "talang", "Pipa Turun Hujan (Downspout)", tubeGeo);
+          // Wall clamp rings along front column
+          for (const cy of [1.2, 3.4, 5.6]) {
+            const collar = new THREE.CylinderGeometry(0.062, 0.062, 0.045, 10);
+            batch.addGeo("roof:gutter", this.palette.aluDark, "talang", "Klem Pipa Talang", collar, dx, cy, 3.06);
           }
         }
 
-        // Central Stair Skylight Glass Box (X: 0.1..1.35, Z: 8.5..11.0)
-        const skyY = roof.heightAt(0.7, 9.8) + 0.16;
-        this.addBox(this.houseRoot, 0.72, skyY, 9.75, 1.15, 0.06, 2.2, this.palette.glass, { kind: "part", id: "plafon" }, "Skylight Tangga");
-
-        // Front Gutter (Talang Depan at minZ) + 2 Downspouts
-        const eaveY = roof.heightAt(midX, roof.minZ) - 0.04;
-        this.addBox(this.houseRoot, midX, eaveY, roof.minZ + 0.05, spanX, 0.14, 0.18, this.palette.aluDark, { kind: "part", id: "talang" }, "Talang Utama Depan");
-        for (const dx of [0.16, project.site.width - 0.16]) {
-          const pipeGeo = new THREE.CylinderGeometry(0.045, 0.045, eaveY, 10);
-          const pipe = new THREE.Mesh(pipeGeo, this.palette.aluDark);
-          pipe.position.set(dx, eaveY * 0.5, roof.minZ + 0.25);
-          this.houseRoot.add(pipe);
-          this.dynResources.push(pipeGeo);
-          this.tagPickable(pipe, { kind: "part", id: "talang" }, "Pipa Turun Hujan (Downspout)");
-        }
-
-        // Carport + Terrace Lower Tropical Shed Canopy (Z: -0.4 .. 4.5, sloping forward)
+        // Carport Canopy (covers Carport X: 1.48..5.00, Z: -0.35..4.45 ONLY — keeps Taman Depan [0..1.48] open to sky!)
+        const cpMinX = 1.48;
+        const cpMaxX = project.site.width;
+        const cpW = cpMaxX - cpMinX;
+        const cpMidX = (cpMinX + cpMaxX) * 0.5;
         const cpAvgY = lt2Y - 0.35;
-        const cpGeo = new THREE.BoxGeometry(project.site.width, 0.07, 4.95);
+        const cpGeo = attachBvh(createChamferBox(cpW, 0.065, 4.82, 0.01, 1));
         const cpRoof = new THREE.Mesh(cpGeo, this.palette.roofCover);
-        cpRoof.position.set(2.5, cpAvgY, 2.05);
-        cpRoof.rotation.x = -0.14;
+        cpRoof.position.set(cpMidX, cpAvgY, 2.05);
+        cpRoof.rotation.x = -0.13;
         cpRoof.castShadow = true;
         cpRoof.receiveShadow = true;
         this.houseRoot.add(cpRoof);
         this.dynResources.push(cpGeo);
-        this.tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport & Teras");
+        this.tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport Depan");
+        this.explodePieces.push({ obj: cpRoof, base: cpRoof.position.clone(), off: new THREE.Vector3(0, 1.8, 0) });
+
+        // Carport perimeter steel fascia frame
+        batch.addBox("roof:cpframe", this.palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpAvgY + 0.25, -0.33, cpW, 0.1, 0.06);
+        batch.addBox("roof:cpframe", this.palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMinX + 0.03, cpAvgY - 0.03, 2.05, 0.06, 0.1, 4.82, {
+          rotX: -0.13,
+        });
       }
     }
 
-    // 9. Furniture, Movable HVAC (AC/Fans), & Lights
+    // Flush batched architecture before dynamic hero props
+    batch.flush(this.houseRoot, this.dynResources, (mesh, partId, label, explodeOff) => {
+      this.tagPickable(mesh, { kind: "part", id: partId as never }, label);
+      if (explodeOff) {
+        this.explodePieces.push({
+          obj: mesh,
+          base: mesh.position.clone(),
+          off: new THREE.Vector3(...explodeOff),
+        });
+      }
+    });
+
+    // 9. Furniture, Movable HVAC (AC/Fans + Outdoor Condensers), & Lights
     if (showProps) {
+      let activePointLights = 0;
       for (const lv of project.levels) {
         if (lv.index === 1 && view.activeLevelView === "lt1") continue;
         const baseY = lv.index === 0 ? lt1Y : lt2Y;
@@ -984,20 +1637,31 @@ export class HouseScene {
           const mesh = buildHvacMesh(hv, this.palette, this.dynResources, this.animatedFans);
           lvGrp.add(mesh);
           this.tagPickable(mesh, { kind: "hvac", id: hv.id, levelIndex: lv.index }, hv.name);
+
+          // Render realistic Outdoor AC Condenser on nearest open facade (Front Z~3.85 or Rear Void/Wall)
+          if (hv.type === "ac_split") {
+            const isFront = hv.position.z < 9.5;
+            const extZ = isFront ? 3.88 : 15.42;
+            const extX = Math.max(0.45, Math.min(4.55, hv.position.x));
+            const outUnit = this.buildAcCondenserUnit(extX, Math.min(2.2, hv.position.y), extZ, isFront ? 0 : Math.PI);
+            lvGrp.add(outUnit);
+            this.tagPickable(outUnit, { kind: "hvac", id: hv.id, levelIndex: lv.index }, `Outdoor ${hv.name}`);
+          }
         }
 
         for (const l of lv.lights) {
           const mesh = buildLightFixtureMesh(l, this.palette, this.dynResources);
           lvGrp.add(mesh);
           this.tagPickable(mesh, { kind: "light", id: l.id, levelIndex: lv.index }, l.name);
-          if (l.on && l.dimmer > 0) {
+          if (l.on && l.dimmer > 0 && activePointLights < 6) {
+            activePointLights++;
             const ptLight = new THREE.PointLight(
               l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de,
-              (l.lumens / 700) * l.dimmer * 1.4,
+              (l.lumens / 650) * l.dimmer * 1.45,
               7.5,
-              1.6,
+              1.8,
             );
-            ptLight.position.set(l.position.x, l.position.y - 0.12, l.position.z);
+            ptLight.position.set(l.position.x, l.position.y - 0.14, l.position.z);
             lvGrp.add(ptLight);
           }
         }
@@ -1005,7 +1669,7 @@ export class HouseScene {
       }
     }
 
-    // 10. MEP X-Ray Overlay (Air Bersih, Air Kotor, Listrik, Septic, Resapan)
+    // 10. MEP X-Ray Overlay (Air Bersih, Air Kotor, Listrik, Septic)
     if (showMep) {
       const mepGrp = new THREE.Group();
       for (const lv of project.levels) {
@@ -1036,14 +1700,9 @@ export class HouseScene {
           mesh.renderOrder = 950;
           mepGrp.add(mesh);
           this.dynResources.push(tubeGeo);
-          this.tagPickable(
-            mesh,
-            { kind: "part", id: isAir ? "pipaAirBersih" : "listrikLampu" },
-            rt.label,
-          );
+          this.tagPickable(mesh, { kind: "part", id: isAir ? "pipaAirBersih" : "listrikLampu" }, rt.label);
         }
       }
-      // Bio Septic Tank under Carport
       const bioGeo = new THREE.CylinderGeometry(0.55, 0.55, 1.35, 16);
       const bio = new THREE.Mesh(bioGeo, this.palette.mepWaterWaste);
       bio.position.set(2.8, -0.75, 1.6);
@@ -1073,10 +1732,27 @@ export class HouseScene {
     this.applyExplode(this.explodeCurrent);
   }
 
+  private buildAcCondenserUnit(x: number, y: number, z: number, rotY: number): THREE.Group {
+    const g = new THREE.Group();
+    g.position.set(x, y, z);
+    g.rotation.y = rotY;
+    const bodyGeo = createChamferBox(0.76, 0.54, 0.28, 0.012, 2);
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe6e7e9, roughness: 0.42, metalness: 0.15 });
+    const grilleGeo = new THREE.CylinderGeometry(0.19, 0.19, 0.03, 16);
+    grilleGeo.rotateX(Math.PI / 2);
+    grilleGeo.translate(-0.1, 0, -0.145);
+    const grilleMat = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.48, metalness: 0.68 });
+    const mBody = new THREE.Mesh(bodyGeo, bodyMat);
+    mBody.castShadow = true;
+    const mGrille = new THREE.Mesh(grilleGeo, grilleMat);
+    g.add(mBody, mGrille);
+    this.dynResources.push(bodyGeo, bodyMat, grilleGeo, grilleMat);
+    return g;
+  }
+
   private rebuildSimOverlays(
     derived: DerivedProjectModel,
     lighting: LightingSimulationResult,
-    airflow: AirflowSimulationResult,
     flood: FloodSimulationResult,
     view: ViewState,
   ) {
@@ -1095,7 +1771,6 @@ export class HouseScene {
         for (let i = 0; i < grid.length; i++) {
           const lux = grid[i] ?? 0;
           const norm = Math.min(1, lux / 800);
-          // dark indigo -> teal -> warm amber -> bright white-yellow
           const r = Math.round(norm < 0.5 ? 25 + norm * 180 : 115 + (norm - 0.5) * 280);
           const g = Math.round(norm < 0.4 ? 40 + norm * 320 : 168 + (norm - 0.4) * 145);
           const b = Math.round(norm < 0.35 ? 120 + norm * 260 : Math.max(40, 210 - (norm - 0.35) * 260));
@@ -1140,38 +1815,32 @@ export class HouseScene {
       this.simResources.push(geo, mat);
     }
 
-    // 3. Realistic 3D Flood Water Surface (street + carport + inside LT1 if breached)
+    // 3. Realistic 3D Flood Water Surface (subdivided grid driven by GLSL wave shader!)
     if (view.showFloodWater && flood.streetFloodCm > 0) {
       const streetWaterY = flood.streetFloodCm / 100;
-      // Exterior street + front yard + carport water plane (Z = -6.5 .. 4.5)
-      const extGeo = new THREE.PlaneGeometry(24, 11.2, 24, 16);
+      const extGeo = new THREE.PlaneGeometry(24, 11.4, 36, 24);
       extGeo.rotateX(-Math.PI / 2);
       const extMesh = new THREE.Mesh(extGeo, this.palette.floodWater);
       extMesh.position.set(2.5, streetWaterY, -1.0);
       extMesh.renderOrder = 600;
-      this.floodWaterMesh = extMesh;
       this.simGroup.add(extMesh);
       this.simResources.push(extGeo);
 
-      // Rear garden water level if drainage backed up
-      if (flood.lt1FloorFloodCm > 0 || flood.carportFloodCm > 5) {
+      if (flood.lt1FloorFloodCm > 0) {
         const insideWaterY = lt1Y + flood.lt1FloorFloodCm / 100;
-        if (flood.lt1FloorFloodCm > 0) {
-          const inGeo = new THREE.PlaneGeometry(4.9, 13.0, 12, 20);
-          inGeo.rotateX(-Math.PI / 2);
-          const inMesh = new THREE.Mesh(inGeo, this.palette.floodWater);
-          inMesh.position.set(2.5, insideWaterY, 10.5);
-          inMesh.renderOrder = 601;
-          this.simGroup.add(inMesh);
-          this.simResources.push(inGeo);
-        }
+        const inGeo = new THREE.PlaneGeometry(4.9, 13.0, 16, 28);
+        inGeo.rotateX(-Math.PI / 2);
+        const inMesh = new THREE.Mesh(inGeo, this.palette.floodWater);
+        inMesh.position.set(2.5, insideWaterY, 10.5);
+        inMesh.renderOrder = 601;
+        this.simGroup.add(inMesh);
+        this.simResources.push(inGeo);
       }
 
-      // Visual door flood barrier board at front door & rear sliding door if active
       if (derived.project.floodMitigation.doorFloodBarrier) {
         const bh = derived.project.floodMitigation.barrierHeightCm / 100;
         const barMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.35, metalness: 0.65 });
-        const barGeo = new THREE.BoxGeometry(1.05, bh, 0.06);
+        const barGeo = createChamferBox(1.05, bh, 0.06, 0.008, 1);
         const b1 = new THREE.Mesh(barGeo, barMat);
         b1.position.set(1.58, lt1Y + bh * 0.5, 4.0);
         this.simGroup.add(b1);
@@ -1235,23 +1904,19 @@ export class HouseScene {
     const pos = new Float32Array(n * 3);
     const quat = new Float32Array(n * 4);
     const scl = new Float32Array(n * 3);
-    const m4 = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const v = new THREE.Vector3();
-    const s = new THREE.Vector3();
     for (let i = 0; i < n; i++) {
-      im.getMatrixAt(i, m4);
-      m4.decompose(v, q, s);
-      pos[i * 3] = v.x;
-      pos[i * 3 + 1] = v.y;
-      pos[i * 3 + 2] = v.z;
-      quat[i * 4] = q.x;
-      quat[i * 4 + 1] = q.y;
-      quat[i * 4 + 2] = q.z;
-      quat[i * 4 + 3] = q.w;
-      scl[i * 3] = s.x;
-      scl[i * 3 + 1] = s.y;
-      scl[i * 3 + 2] = s.z;
+      im.getMatrixAt(i, this._m4);
+      this._m4.decompose(this._v1, this._q, this._v2);
+      pos[i * 3] = this._v1.x;
+      pos[i * 3 + 1] = this._v1.y;
+      pos[i * 3 + 2] = this._v1.z;
+      quat[i * 4] = this._q.x;
+      quat[i * 4 + 1] = this._q.y;
+      quat[i * 4 + 2] = this._q.z;
+      quat[i * 4 + 3] = this._q.w;
+      scl[i * 3] = this._v2.x;
+      scl[i * 3 + 1] = this._v2.y;
+      scl[i * 3 + 2] = this._v2.z;
     }
     this.explodeInstanced.push({ im, n, pos, off, quat, scl });
   }
@@ -1261,17 +1926,17 @@ export class HouseScene {
     for (const p of this.explodePieces) {
       p.obj.position.copy(p.base).addScaledVector(p.off, e);
     }
-    const m4 = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const v = new THREE.Vector3();
-    const s = new THREE.Vector3();
     for (const im of this.explodeInstanced) {
       for (let i = 0; i < im.n; i++) {
-        q.set(im.quat[i * 4]!, im.quat[i * 4 + 1]!, im.quat[i * 4 + 2]!, im.quat[i * 4 + 3]!);
-        v.set(im.pos[i * 3]! + im.off[i * 3]! * e, im.pos[i * 3 + 1]! + im.off[i * 3 + 1]! * e, im.pos[i * 3 + 2]! + im.off[i * 3 + 2]! * e);
-        s.set(im.scl[i * 3]!, im.scl[i * 3 + 1]!, im.scl[i * 3 + 2]!);
-        m4.compose(v, q, s);
-        im.im.setMatrixAt(i, m4);
+        this._q.set(im.quat[i * 4]!, im.quat[i * 4 + 1]!, im.quat[i * 4 + 2]!, im.quat[i * 4 + 3]!);
+        this._v1.set(
+          im.pos[i * 3]! + im.off[i * 3]! * e,
+          im.pos[i * 3 + 1]! + im.off[i * 3 + 1]! * e,
+          im.pos[i * 3 + 2]! + im.off[i * 3 + 2]! * e,
+        );
+        this._v2.set(im.scl[i * 3]!, im.scl[i * 3 + 1]!, im.scl[i * 3 + 2]!);
+        this._m4.compose(this._v1, this._q, this._v2);
+        im.im.setMatrixAt(i, this._m4);
       }
       im.im.instanceMatrix.needsUpdate = true;
     }
@@ -1279,7 +1944,7 @@ export class HouseScene {
 
   private applyWireframe(wf: boolean) {
     this.houseRoot.traverse((o) => {
-      if (o instanceof THREE.Mesh && o.material instanceof THREE.MeshStandardMaterial) {
+      if (o instanceof THREE.Mesh && (o.material instanceof THREE.MeshStandardMaterial || o.material instanceof THREE.MeshPhysicalMaterial)) {
         o.material.wireframe = wf;
       }
     });
@@ -1316,14 +1981,15 @@ export class HouseScene {
   }
 
   private updateCameraTransform() {
+    if (!this.webglReady) return;
     if (this.walkthroughActive) {
       this.cameraPersp.position.copy(this.walkPos);
-      const look = new THREE.Vector3(
+      this._look.set(
         this.walkPos.x + Math.sin(this.walkYaw) * Math.cos(this.walkPitch),
         this.walkPos.y + Math.sin(this.walkPitch),
         this.walkPos.z + Math.cos(this.walkYaw) * Math.cos(this.walkPitch),
       );
-      this.cameraPersp.lookAt(look);
+      this.cameraPersp.lookAt(this._look);
       return;
     }
 
@@ -1347,8 +2013,17 @@ export class HouseScene {
   }
 
   private resize() {
+    if (!this.webglReady || this.disposed) return;
     const w = Math.max(1, this.canvas.clientWidth);
     const h = Math.max(1, this.canvas.clientHeight);
+    if (this.qualityOverride === "auto") {
+      const targetMax = w < 768 ? 1.5 : 2;
+      const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, targetMax);
+      if (Math.abs(dpr - this.activeDpr) > 0.05) {
+        this.activeDpr = dpr;
+        this.renderer.setPixelRatio(dpr);
+      }
+    }
     this.renderer.setSize(w, h, false);
     this.cameraPersp.aspect = w / h;
     this.cameraPersp.updateProjectionMatrix();
@@ -1357,7 +2032,10 @@ export class HouseScene {
 
   private getPointerNdc(e: PointerEvent): THREE.Vector2 {
     const r = this.canvas.getBoundingClientRect();
-    return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    const w = Math.max(1, r.width);
+    const h = Math.max(1, r.height);
+    this._ndc.set(((e.clientX - r.left) / w) * 2 - 1, -((e.clientY - r.top) / h) * 2 + 1);
+    return this._ndc;
   }
 
   private pickAt(e: PointerEvent): { sel: SelectionTarget; label: string } | null {
@@ -1382,9 +2060,8 @@ export class HouseScene {
     const cam = this.useOrtho ? this.cameraOrtho : this.cameraPersp;
     this.raycaster.setFromCamera(ndc, cam);
     const yFloor = this.activeFloorElevation + (this.activeLevelIdx === 1 ? 3.6 : 0);
-    this.dragPlane.set(new THREE.Vector3(0, 1, 0), -yFloor);
-    const pt = new THREE.Vector3();
-    return this.raycaster.ray.intersectPlane(this.dragPlane, pt);
+    this.dragPlane.set(this._up, -yFloor);
+    return this.raycaster.ray.intersectPlane(this.dragPlane, this._hitPt);
   }
 
   private onPointerDown = (e: PointerEvent) => {
@@ -1394,7 +2071,6 @@ export class HouseScene {
     this.panMode = e.button === 1 || e.button === 2 || e.shiftKey;
 
     if (e.button === 0 && !this.panMode) {
-      // Check if clicking an already-selected movable entity (Sims 4 drag-to-move!)
       const picked = this.pickAt(e);
       if (
         picked?.sel &&
@@ -1404,9 +2080,7 @@ export class HouseScene {
       ) {
         this.draggingEntity = picked.sel;
         const floorPt = this.intersectFloorPlane(e);
-        if (floorPt) {
-          this.dragOffset.copy(floorPt);
-        }
+        if (floorPt) this.dragOffset.copy(floorPt);
       }
     }
   };
@@ -1415,7 +2089,6 @@ export class HouseScene {
     const prev = this.pointers.get(e.pointerId);
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
-    // Dragging movable furniture / AC / fan / light in 3D
     if (this.draggingEntity) {
       const pt = this.intersectFloorPlane(e);
       if (pt) {
@@ -1430,8 +2103,8 @@ export class HouseScene {
       const pts = [...this.pointers.values()];
       const d = Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y);
       if (this.pinchDist > 0) {
-        this.sph.radius = THREE.MathUtils.clamp(this.sph.radius * (this.pinchDist / d), 4, 55);
-        this.updateCameraTransform();
+        this.sphDesired.radius = THREE.MathUtils.clamp(this.sphDesired.radius * (this.pinchDist / d), 4, 55);
+        this.cameraDirty = true;
       }
       this.pinchDist = d;
       return;
@@ -1449,23 +2122,25 @@ export class HouseScene {
       }
 
       if (this.panMode) {
-        const forward = new THREE.Vector3();
-        this.cameraPersp.getWorldDirection(forward);
-        forward.y = 0;
-        forward.normalize();
-        const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
-        const scale = this.sph.radius * 0.0014;
-        this.target.addScaledVector(right, -dx * scale);
-        this.target.addScaledVector(forward, dy * scale);
+        this.cameraPersp.getWorldDirection(this._fwd);
+        this._fwd.y = 0;
+        this._fwd.normalize();
+        this._right.crossVectors(this._fwd, this._up).normalize();
+        const scale = this.sphDesired.radius * 0.0014;
+        this.targetDesired.addScaledVector(this._right, -dx * scale);
+        this.targetDesired.addScaledVector(this._fwd, dy * scale);
       } else {
-        this.sph.theta -= dx * 0.007;
-        this.sph.phi = THREE.MathUtils.clamp(this.sph.phi - dy * 0.007, 0.06, Math.PI * 0.48);
+        this.sphDesired.theta -= dx * 0.007;
+        this.sphDesired.phi = THREE.MathUtils.clamp(this.sphDesired.phi - dy * 0.007, 0.06, Math.PI * 0.48);
       }
-      this.updateCameraTransform();
+      this.cameraDirty = true;
       return;
     }
 
-    // Hover feedback
+    // Throttled hover raycast (~45ms) so mouse move never drops frames
+    const now = performance.now();
+    if (now - this.lastHoverMs < 45) return;
+    this.lastHoverMs = now;
     const picked = this.pickAt(e);
     const rect = this.canvas.getBoundingClientRect();
     this.callbacks.onHover(picked ? picked.label : null, e.clientX - rect.left, e.clientY - rect.top);
@@ -1504,9 +2179,11 @@ export class HouseScene {
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    this.sph.radius = THREE.MathUtils.clamp(this.sph.radius * (1 + e.deltaY * 0.001), 4, 58);
-    this.updateCameraTransform();
+    this.sphDesired.radius = THREE.MathUtils.clamp(this.sphDesired.radius * (1 + e.deltaY * 0.001), 4, 58);
+    this.cameraDirty = true;
   };
+
+  private onContextMenu = (e: MouseEvent) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
     this.keysPressed.add(e.key.toLowerCase());
@@ -1521,24 +2198,110 @@ export class HouseScene {
     this.keysPressed.delete(e.key.toLowerCase());
   };
 
+  private onVisibilityChange = () => {
+    this.isHidden = typeof document !== "undefined" ? document.hidden : false;
+    if (!this.isHidden) {
+      this.lastFrameMs = performance.now();
+    }
+  };
+
+  private onWebGLContextLost = (e: Event) => {
+    e.preventDefault();
+    this.isContextLost = true;
+    this.callbacks.onWebGLStatus?.("lost");
+  };
+
+  private onWebGLContextRestored = () => {
+    this.isContextLost = false;
+    this.callbacks.onWebGLStatus?.("ok");
+    this.lastFrameMs = performance.now();
+  };
+
+  private onReducedMotionChange = (e: MediaQueryListEvent) => {
+    this.reducedMotion = e.matches;
+  };
+
   private bindEvents() {
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     this.canvas.addEventListener("pointermove", this.onPointerMove);
     this.canvas.addEventListener("pointerup", this.onPointerUp);
     this.canvas.addEventListener("pointercancel", this.onPointerUp);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
-    this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+    this.canvas.addEventListener("contextmenu", this.onContextMenu);
+    this.canvas.addEventListener("webglcontextlost", this.onWebGLContextLost);
+    this.canvas.addEventListener("webglcontextrestored", this.onWebGLContextRestored);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    this.reducedMotionMq?.addEventListener("change", this.onReducedMotionChange);
   }
 
   private animate = () => {
+    if (this.disposed) return;
     this.raf = requestAnimationFrame(this.animate);
-    const dt = Math.min(0.05, this.clock.getDelta());
 
-    // Smooth Exploded View interpolation
+    if (this.isHidden || this.isContextLost || !this.webglReady) return;
+
+    const nowMs = performance.now();
+    const rawDtMs = nowMs - this.lastFrameMs;
+    this.lastFrameMs = nowMs;
+    const dt = Math.min(1 / 30, Math.max(0.0005, rawDtMs * 0.001));
+    this.simElapsedS += dt;
+
+    // Telemetry + Adaptive Quality Governor
+    if (rawDtMs > 0 && rawDtMs < 250) {
+      this.frameWindow.push(rawDtMs);
+      if (this.frameWindow.length > 45) this.frameWindow.shift();
+    }
+    if (nowMs - this.lastStatsMs > 500 && this.frameWindow.length > 4) {
+      this.lastStatsMs = nowMs;
+      let sum = 0;
+      for (let i = 0; i < this.frameWindow.length; i++) sum += this.frameWindow[i]!;
+      const avgMs = sum / this.frameWindow.length;
+      const fps = Math.min(120, Math.round(1000 / Math.max(1, avgMs)));
+
+      if (this.qualityOverride === "auto" && this.frameWindow.length >= 30) {
+        if (avgMs > 28 && this.activeTier === "high") this.applyQualityTier("medium");
+        else if (avgMs > 34 && this.activeTier === "medium") this.applyQualityTier("low");
+      }
+
+      const info = this.renderer.info;
+      const snap: SceneStatsSnapshot = {
+        fps,
+        avgMs: Number(avgMs.toFixed(1)),
+        tier: this.activeTier,
+        dpr: Number(this.activeDpr.toFixed(2)),
+        calls: info.render.calls,
+        triangles: info.render.triangles,
+        geometries: info.memory.geometries,
+        textures: info.memory.textures,
+      };
+      (window as unknown as { __RUMAH_STATS__?: SceneStatsSnapshot }).__RUMAH_STATS__ = snap;
+      this.callbacks.onStats?.(snap);
+    }
+
+    // Smooth Camera Damping
+    if (this.cameraDirty && !this.walkthroughActive) {
+      const k = this.reducedMotion ? 1 : 1 - Math.exp(-16 * dt);
+      this.sph.radius += (this.sphDesired.radius - this.sph.radius) * k;
+      this.sph.theta += (this.sphDesired.theta - this.sph.theta) * k;
+      this.sph.phi += (this.sphDesired.phi - this.sph.phi) * k;
+      this.target.lerp(this.targetDesired, k);
+      this.updateCameraTransform();
+      if (
+        Math.abs(this.sphDesired.radius - this.sph.radius) < 0.002 &&
+        Math.abs(this.sphDesired.theta - this.sph.theta) < 0.0005 &&
+        Math.abs(this.sphDesired.phi - this.sph.phi) < 0.0005 &&
+        this.target.distanceToSquared(this.targetDesired) < 0.0001
+      ) {
+        this.cameraDirty = false;
+      }
+    }
+
+    // Smooth Exploded View interpolation (snaps immediately when prefers-reduced-motion is set)
     if (Math.abs(this.explodeCurrent - this.explodeTarget) > 0.001) {
-      this.explodeCurrent += (this.explodeTarget - this.explodeCurrent) * Math.min(1, dt * 8);
+      if (this.reducedMotion) this.explodeCurrent = this.explodeTarget;
+      else this.explodeCurrent += (this.explodeTarget - this.explodeCurrent) * Math.min(1, dt * 8);
       this.applyExplode(this.explodeCurrent);
     }
 
@@ -1571,18 +2334,15 @@ export class HouseScene {
     }
 
     // Spin fans
-    for (const rotor of this.animatedFans) {
-      rotor.rotation.y += dt * 7.5;
+    if (!this.reducedMotion) {
+      for (let i = 0; i < this.animatedFans.length; i++) {
+        this.animatedFans[i]!.rotation.y += dt * 7.5;
+      }
     }
 
-    // Advect Airflow Particles
-    if (this.airParticlesMesh && this.lastAirflow && this.airParticleStates.length > 0) {
+    // Zero-allocation Airflow Particle Advection
+    if (this.airParticlesMesh && this.lastAirflow && this.airParticleStates.length > 0 && !this.reducedMotion) {
       const af = this.lastAirflow;
-      const m4 = new THREE.Matrix4();
-      const q = new THREE.Quaternion();
-      const v = new THREE.Vector3();
-      const s = new THREE.Vector3(1, 1, 1);
-      const col = new THREE.Color();
       const lt1Y = this.activeFloorElevation;
       const lt2Y = lt1Y + 3.6;
 
@@ -1597,7 +2357,6 @@ export class HouseScene {
 
         p.x += vx * dt * 1.4;
         p.z += vz * dt * 1.4;
-        // Stack effect lift at rear void & stair
         if ((p.x > 1.7 && p.z > 15.3) || (p.x < 1.35 && p.z > 7.5 && p.z < 12.5)) {
           p.y += dt * 0.9;
         }
@@ -1611,23 +2370,22 @@ export class HouseScene {
           p.life = 0;
         }
 
-        v.set(p.x, p.y, p.z);
+        this._v1.set(p.x, p.y, p.z);
         const yaw = Math.atan2(vx, vz);
-        q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-        m4.compose(v, q, s);
-        this.airParticlesMesh.setMatrixAt(i, m4);
+        this._q.setFromAxisAngle(this._up, yaw);
+        this._m4.compose(this._v1, this._q, this._s1);
+        this.airParticlesMesh.setMatrixAt(i, this._m4);
 
-        // Color by temperature: cool AC blue (#38bdf8) -> fresh cyan (#34d399) -> warm orange (#fb923c)
         const tNorm = Math.max(0, Math.min(1, (temp - 23) / 10));
-        col.setRGB(0.2 + tNorm * 0.78, 0.76 - tNorm * 0.25, 0.96 - tNorm * 0.72);
-        this.airParticlesMesh.setColorAt(i, col);
+        this._col.setRGB(0.2 + tNorm * 0.78, 0.76 - tNorm * 0.25, 0.96 - tNorm * 0.72);
+        this.airParticlesMesh.setColorAt(i, this._col);
       }
       this.airParticlesMesh.instanceMatrix.needsUpdate = true;
       if (this.airParticlesMesh.instanceColor) this.airParticlesMesh.instanceColor.needsUpdate = true;
     }
 
-    // Animate Rain & Lightning
-    if (this.rainPoints && this.rainPoints.visible && this.rainArray) {
+    // Animate Rain & subtle Lightning
+    if (this.rainPoints && this.rainPoints.visible && this.rainArray && !this.reducedMotion) {
       const speed = 13.5 * dt;
       const slant = 2.6 * dt;
       for (let i = 0; i < this.rainActiveCount; i++) {
@@ -1646,22 +2404,20 @@ export class HouseScene {
         this.lightningTimer -= dt;
         if (this.lightningTimer <= 0) {
           this.lightningTimer = 4 + Math.random() * 7;
-          this.lightningEnergy = 3.2;
+          this.lightningEnergy = 2.8;
         }
       }
     }
-    if (this.lightningEnergy > 0.01) {
+    if (this.lightningEnergy > 0.01 && !this.reducedMotion) {
       this.lightningEnergy *= Math.exp(-dt * 10);
       this.lightningLight.intensity = this.lightningEnergy;
     } else {
       this.lightningLight.intensity = 0;
     }
 
-    // Subtle flood water ripple
-    if (this.floodWaterMesh) {
-      const t = this.clock.elapsedTime;
-      this.floodWaterMesh.rotation.z = Math.sin(t * 1.4) * 0.002;
-    }
+    // Live Capillary & Raindrop Wave Uniforms for Flood Water Shader
+    this.palette.floodUniforms.uTime.value = this.reducedMotion ? 0 : this.simElapsedS;
+    this.palette.floodUniforms.uRain.value = Math.min(1, this.lastRainMmH / 100);
 
     const cam = this.useOrtho ? this.cameraOrtho : this.cameraPersp;
     this.renderer.render(this.scene, cam);
@@ -1672,23 +2428,37 @@ export class HouseScene {
   }
 
   dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
     cancelAnimationFrame(this.raf);
-    this.ro.disconnect();
+    this.ro?.disconnect();
+
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
     this.canvas.removeEventListener("pointerup", this.onPointerUp);
     this.canvas.removeEventListener("pointercancel", this.onPointerUp);
     this.canvas.removeEventListener("wheel", this.onWheel);
+    this.canvas.removeEventListener("contextmenu", this.onContextMenu);
+    this.canvas.removeEventListener("webglcontextlost", this.onWebGLContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.onWebGLContextRestored);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.reducedMotionMq?.removeEventListener("change", this.onReducedMotionChange);
+
+    if (!this.webglReady) return;
+
     this.clearDyn();
     this.clearSim();
+    disposeObjectTree(this.envGroup);
+    this.envGroup.clear();
+    for (const r of this.staticDisposables) r.dispose();
+    this.staticDisposables = [];
+
     this.envTex?.dispose();
     this.skyMat.map?.dispose();
     this.skyMat.dispose();
     this.skyMesh.geometry.dispose();
-    this.selectedRing.geometry.dispose();
-    (this.selectedRing.material as THREE.Material).dispose();
     this.rainPoints?.geometry.dispose();
     (this.rainPoints?.material as THREE.Material)?.dispose();
     this.palette.dispose();

@@ -8,7 +8,7 @@ import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { GamificationEvaluation } from "@/lib/gamification/simsEngine";
-import { HouseScene } from "@/lib/scene/HouseScene";
+import { HouseScene, type QualityTier, type SceneStatsSnapshot, type WebGLStatus } from "@/lib/scene/HouseScene";
 import { FURNITURE_CATALOG, HVAC_CATALOG, LIGHT_CATALOG } from "@/lib/model/catalog";
 import { useStudioStore, type BuildTool, type CameraPreset } from "@/lib/store/useStudioStore";
 import { PartInfoPanel } from "@/components/panels/PartInfoPanel";
@@ -66,6 +66,9 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
   const sceneRef = useRef<HouseScene | null>(null);
   const [hoverInfo, setHoverInfo] = useState<{ label: string; x: number; y: number } | null>(null);
   const [showQuests, setShowQuests] = useState(false);
+  const [webglStatus, setWebglStatus] = useState<WebGLStatus>("ok");
+  const [sceneStats, setSceneStats] = useState<SceneStatsSnapshot | null>(null);
+  const [qualityOverride, setQualityOverride] = useState<QualityTier | "auto">("auto");
 
   const view = useStudioStore((s) => s.view);
   const patchView = useStudioStore((s) => s.patchView);
@@ -217,6 +220,8 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
         }
       },
       onWalkthroughExit: () => useStudioStore.getState().patchView({ cameraPreset: "3d" }),
+      onWebGLStatus: (status) => setWebglStatus(status),
+      onStats: (stats) => setSceneStats(stats),
     });
     sceneRef.current = sc;
     onSceneReady?.(sc);
@@ -487,6 +492,26 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
             </div>
           </div>
 
+          {/* Before / After Baseline Comparison Overlay */}
+          {view.beforeAfterEnabled && (
+            <div className="pointer-events-auto absolute bottom-12 left-1/2 z-20 flex max-w-[94%] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-md border border-primary/40 bg-card/95 px-3 py-1.5 text-[11px] shadow-xl backdrop-blur">
+              <span>
+                Baseline: <b className="font-mono">{baselineProject.systems.brick.name.split("(")[0]}</b> · {baselineProject.systems.foundation}
+              </span>
+              <span className="text-muted-foreground">→</span>
+              <span>
+                Sekarang: <b className="font-mono text-primary">{fmtRp(rab.grandTotal)}</b> ({fmtNum(derived.masonry.totalBuyBricks)} bata)
+              </span>
+              <button
+                type="button"
+                onClick={lockBaseline}
+                className="min-h-7 rounded bg-primary/20 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/30"
+              >
+                Kunci Baseline
+              </button>
+            </div>
+          )}
+
           {/* Hover Tooltip */}
           {hoverInfo && (
             <div
@@ -497,8 +522,35 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
             </div>
           )}
 
-          {/* Legend Bottom Left */}
-          <div className="pointer-events-none absolute bottom-2.5 left-2.5 hidden flex-wrap gap-2 rounded border border-white/10 bg-black/55 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm md:flex">
+          {/* WebGL Unavailable / Context Lost Graceful Fallback */}
+          {webglStatus !== "ok" && (
+            <div
+              role="alert"
+              className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-background/95 p-6 text-center"
+            >
+              <ShieldAlert className="h-8 w-8 text-amber-400" />
+              <div className="text-sm font-bold text-foreground">
+                {webglStatus === "unsupported" ? "WebGL Tidak Tersedia di Browser Ini" : "Konteks GPU WebGL Terputus"}
+              </div>
+              <p className="max-w-md text-xs text-muted-foreground">
+                {webglStatus === "unsupported"
+                  ? "Aktifkan akselerasi hardware browser atau gunakan workspace Gambar Kerja 2D, Struktur SNI, dan RAB yang tetap berjalan normal."
+                  : "Driver GPU mereset konteks rendering. Memulihkan otomatis atau klik Muat Ulang Scene."}
+              </p>
+              {webglStatus === "lost" && (
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="mt-1 min-h-9 rounded bg-primary px-4 text-xs font-bold text-primary-foreground"
+                >
+                  Muat Ulang Scene
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Legend Bottom Left + Pro Performance Telemetry */}
+          <div className="pointer-events-none absolute bottom-2.5 left-2.5 hidden flex-wrap items-center gap-2 rounded border border-white/10 bg-black/60 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm md:flex">
             <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#efede6]" /> Bata / Plester</span>
             <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#8f9295]" /> Beton SNI</span>
             <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#363b40]" /> Atap Shed 10°</span>
@@ -506,6 +558,30 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
             {view.showListrik && <span className="inline-flex items-center gap-1"><i className="h-2.5 w-2.5 rounded-xs bg-[#f5c442]" /> Listrik</span>}
             {view.showFloodWater && flood.streetFloodCm > 0 && (
               <span className="inline-flex items-center gap-1 text-cyan-300"><i className="h-2.5 w-2.5 rounded-xs bg-[#5c7c7a]" /> Banjir {flood.streetFloodCm} cm</span>
+            )}
+            {sceneStats && (
+              <span className="pointer-events-auto ml-1 flex items-center gap-1.5 border-l border-white/15 pl-2 font-mono text-[9.5px] text-stone-300">
+                <span>{sceneStats.fps} FPS</span>
+                <span>·</span>
+                <span>{sceneStats.calls} calls</span>
+                <span>·</span>
+                <span>{(sceneStats.triangles / 1000).toFixed(0)}k tris</span>
+                <select
+                  aria-label="Kualitas Grafis 3D"
+                  value={qualityOverride}
+                  onChange={(e) => {
+                    const next = e.target.value as QualityTier | "auto";
+                    setQualityOverride(next);
+                    sceneRef.current?.setQualityOverride(next);
+                  }}
+                  className="ml-1 rounded border border-white/15 bg-black/60 px-1 py-0.5 text-[9.5px] uppercase text-primary outline-none"
+                >
+                  <option value="auto">Auto ({sceneStats.tier})</option>
+                  <option value="high">High</option>
+                  <option value="medium">Med</option>
+                  <option value="low">Low</option>
+                </select>
+              </span>
             )}
           </div>
 
