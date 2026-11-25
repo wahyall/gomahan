@@ -3,10 +3,12 @@
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
-import { Lightbulb, Sun } from "lucide-react";
+import { KpiMetric, SectionHeader, StudioCard, StudioRange } from "@/components/ui/StudioPrimitives";
+import { Eye, Hammer, Lightbulb, Sun } from "lucide-react";
 
 export function LightingWorkspace({ lighting }: { lighting: LightingSimulationResult }) {
   const project = useStudioStore((s) => s.project);
+  const view = useStudioStore((s) => s.view);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
   const patchSiteOrientation = useStudioStore((s) => s.patchSiteOrientation);
   const updateLight = useStudioStore((s) => s.updateLight);
@@ -18,45 +20,68 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto max-w-6xl space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
-          <div>
-            <div className="flex items-center gap-2 text-sm font-bold text-foreground">
-              <Sun className="h-4 w-4 text-amber-400" />
-              Simulasi Pencahayaan Alami & Buatan — Surabaya ({project.site.latitude.toFixed(2)}, {project.site.longitude.toFixed(2)})
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">{lighting.methodologyNote}</p>
+        <StudioCard>
+          <SectionHeader
+            icon={<Sun className="h-4 w-4 text-amber-400" />}
+            title={`Simulasi Pencahayaan Surabaya (${project.site.latitude.toFixed(2)}, ${project.site.longitude.toFixed(2)})`}
+            subtitle={lighting.methodologyNote}
+          />
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => patchView({ showLuxHeatmap: !view.showLuxHeatmap })}
+              className={cn(
+                "flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition",
+                view.showLuxHeatmap
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-secondary text-foreground hover:border-white/25",
+              )}
+            >
+              <Eye className="h-3.5 w-3.5" />
+              {view.showLuxHeatmap ? "Heatmap Lux 3D Aktif" : "Tampilkan Heatmap Lux 3D"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                patchView({ showLuxHeatmap: true });
+                setWorkspace("build");
+              }}
+              className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-black/25 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
+            >
+              <Hammer className="h-3.5 w-3.5" /> Tambah/Geser Lampu di Build
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              patchView({ showLuxHeatmap: true });
-              setWorkspace("build");
-            }}
-            className="rounded border border-primary/50 bg-primary/15 px-3 py-1.5 text-xs font-semibold text-primary hover:bg-primary/25"
-          >
-            Tampilkan Heatmap Lux di 3D
-          </button>
+        </StudioCard>
+
+        {/* Summary KPIs */}
+        <div className="grid grid-cols-2 gap-3 @lg:grid-cols-3">
+          <KpiMetric label="Skor Pencahayaan Alami" value={`${lighting.daylightScore} / 100`} tone="amber" />
+          <KpiMetric
+            label="Rata-rata Intensitas"
+            value={`${lighting.avgHouseLux} lux`}
+            sub={`Kepatuhan SNI ${lighting.sniCompliancePct}%`}
+          />
+          <KpiMetric
+            label="Sudut Matahari"
+            value={`${lighting.solar.altitudeDeg.toFixed(1)}°`}
+            sub={`Langit ${lighting.solar.skyIrradianceLux} lux`}
+            className="col-span-2 @lg:col-span-1"
+          />
         </div>
 
-        {/* Controls */}
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-lg border border-border bg-card p-3.5 space-y-2.5">
-            <div className="flex justify-between text-xs">
-              <span className="font-semibold">Jam Simulasi</span>
-              <span className="font-mono font-bold text-amber-300">
-                {Math.floor(sim.hourOfDay).toString().padStart(2, "0")}:{sim.hourOfDay % 1 >= 0.5 ? "30" : "00"} WIB
-              </span>
-            </div>
-            <input
-              type="range"
+        {/* Solar & Time Controls */}
+        <div className="grid grid-cols-1 gap-3.5 @md:grid-cols-2">
+          <StudioCard className="space-y-3">
+            <StudioRange
+              label="Jam Simulasi (WIB)"
+              display={`${Math.floor(sim.hourOfDay).toString().padStart(2, "0")}:${sim.hourOfDay % 1 >= 0.5 ? "30" : "00"}`}
               min={5}
               max={22}
               step={0.5}
               value={sim.hourOfDay}
-              onChange={(e) => patchSimulation({ hourOfDay: Number(e.target.value) })}
-              className="w-full accent-[#df8949]"
+              onChange={(v) => patchSimulation({ hourOfDay: v })}
             />
-            <div className="grid grid-cols-4 gap-1">
+            <div className="grid grid-cols-4 gap-1.5">
               {[
                 [7, "07:00"],
                 [12, "12:00"],
@@ -68,80 +93,71 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
                   type="button"
                   onClick={() => patchSimulation({ hourOfDay: Number(h) })}
                   className={cn(
-                    "rounded border py-1 text-[10.5px] font-semibold",
-                    Math.abs(sim.hourOfDay - Number(h)) < 0.3 ? "border-primary bg-primary text-primary-foreground" : "border-border bg-secondary text-muted-foreground",
+                    "rounded-lg border py-1.5 text-[11px] font-semibold transition",
+                    Math.abs(sim.hourOfDay - Number(h)) < 0.3
+                      ? "border-[#f2efe8] bg-[#f2efe8] text-[#14171c]"
+                      : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground",
                   )}
                 >
                   {lbl}
                 </button>
               ))}
             </div>
-          </div>
+          </StudioCard>
 
-          <div className="rounded-lg border border-border bg-card p-3.5 space-y-2.5">
-            <div className="flex justify-between text-xs">
-              <span className="font-semibold">Orientasi Hadap Kavling</span>
-              <span className="font-mono font-bold">{project.site.orientationDeg}°</span>
-            </div>
-            <input
-              type="range"
+          <StudioCard className="space-y-3">
+            <StudioRange
+              label="Orientasi Hadap Kavling"
+              display={`${project.site.orientationDeg}°`}
               min={0}
               max={315}
               step={45}
               value={project.site.orientationDeg}
-              onChange={(e) => patchSiteOrientation(Number(e.target.value))}
-              className="w-full accent-[#df8949]"
+              onChange={(v) => patchSiteOrientation(v)}
             />
-            <div className="flex gap-1.5 text-xs">
+            <div className="flex gap-1.5">
               {(["kemarau", "hujan"] as const).map((s) => (
                 <button
                   key={s}
                   type="button"
                   onClick={() => patchSimulation({ season: s })}
                   className={cn(
-                    "flex-1 rounded border py-1 font-semibold capitalize",
-                    sim.season === s ? "border-primary bg-primary/20 text-primary" : "border-border bg-secondary text-muted-foreground",
+                    "flex-1 rounded-lg border py-1.5 text-xs font-semibold capitalize transition",
+                    sim.season === s
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground",
                   )}
                 >
                   Musim {s}
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card p-3.5 space-y-1.5">
-            <div className="text-xs font-semibold text-muted-foreground">Ringkasan Pencahayaan</div>
-            <div className="font-mono text-2xl font-bold text-amber-300">{lighting.daylightScore} / 100</div>
-            <div className="text-xs text-muted-foreground">
-              Rata-rata Ruang: <b className="font-mono text-foreground">{lighting.avgHouseLux} lux</b> · Kepatuhan SNI: <b>{lighting.sniCompliancePct}%</b>
-            </div>
-            <div className="text-[11px] text-muted-foreground">
-              Sudut Matahari: {lighting.solar.altitudeDeg.toFixed(1)}° · Langit: {lighting.solar.skyIrradianceLux} lux
-            </div>
-          </div>
+          </StudioCard>
         </div>
 
         {/* Room Lux Table */}
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-          <div className="border-b border-border px-3 py-2 text-xs font-bold">Intensitas Cahaya per Ruangan (Alami + Lampu vs Target SNI)</div>
+        <div className="studio-surface overflow-hidden rounded-xl">
+          <div className="border-b border-border px-3.5 py-2.5 text-xs font-semibold">
+            Intensitas Cahaya per Ruangan (Alami + Lampu vs Target SNI)
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
-              <thead className="bg-muted text-[10.5px] uppercase text-muted-foreground">
+              <thead className="bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 text-left">Lantai</th>
                   <th className="px-3 py-2 text-left">Ruangan</th>
-                  <th className="px-3 py-2 text-right">Daylight Factor</th>
-                  <th className="px-3 py-2 text-right">Alami (Lux)</th>
-                  <th className="px-3 py-2 text-right">Lampu (Lux)</th>
-                  <th className="px-3 py-2 text-right">Total (Lux)</th>
-                  <th className="px-3 py-2 text-right">Target SNI</th>
+                  <th className="px-3 py-2 text-right">DF</th>
+                  <th className="px-3 py-2 text-right">Alami</th>
+                  <th className="px-3 py-2 text-right">Lampu</th>
+                  <th className="px-3 py-2 text-right">Total</th>
+                  <th className="px-3 py-2 text-right">Target</th>
                   <th className="px-3 py-2 text-right">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border">
+              <tbody className="divide-y divide-border tabular-nums">
                 {lighting.rooms.map((r) => (
-                  <tr key={r.roomId}>
-                    <td className="px-3 py-2 font-mono">LT{r.levelIndex + 1}</td>
+                  <tr key={r.roomId} className="hover:bg-white/[0.02]">
+                    <td className="px-3 py-2 font-mono text-muted-foreground">LT{r.levelIndex + 1}</td>
                     <td className="px-3 py-2 font-medium">{r.roomName}</td>
                     <td className="px-3 py-2 text-right font-mono">{r.daylightFactorPct.toFixed(1)}%</td>
                     <td className="px-3 py-2 text-right font-mono">{r.naturalLux}</td>
@@ -150,8 +166,8 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
                     <td className="px-3 py-2 text-right font-mono text-muted-foreground">{r.targetLux}</td>
                     <td
                       className={cn(
-                        "px-3 py-2 text-right font-bold",
-                        r.status === "TERANG" ? "text-emerald-400" : r.status === "CUKUP" ? "text-amber-300" : "text-red-400",
+                        "px-3 py-2 text-right font-semibold",
+                        r.status === "TERANG" ? "text-emerald-300" : r.status === "CUKUP" ? "text-amber-300" : "text-rose-300",
                       )}
                     >
                       {r.status}
@@ -163,18 +179,19 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
           </div>
         </div>
 
-        {/* Interactive Artificial Lights Switchboard */}
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground">
-            <Lightbulb className="h-3.5 w-3.5 text-amber-400" /> Kontrol Lampu Interior & Eksterior
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Light Fixtures Control Board */}
+        <StudioCard className="space-y-3">
+          <SectionHeader icon={<Lightbulb className="h-4 w-4 text-amber-300" />} title="Saklar Lampu Interior & Eksterior" />
+          <div className="grid grid-cols-1 gap-2 @md:grid-cols-2">
             {project.levels.flatMap((lv) =>
               lv.lights.map((l) => (
-                <div key={l.id} className="flex items-center justify-between rounded border border-border bg-secondary/40 px-2.5 py-2 text-xs">
-                  <div className="min-w-0 pr-2">
-                    <div className="truncate font-semibold">{l.name}</div>
-                    <div className="font-mono text-[10px] text-muted-foreground">
+                <div
+                  key={l.id}
+                  className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2 text-xs"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold text-foreground">{l.name}</div>
+                    <div className="font-mono text-[10.5px] text-muted-foreground tabular-nums">
                       LT{lv.index + 1} · {l.lumens} lm · {l.colorTempK}K
                     </div>
                   </div>
@@ -182,8 +199,8 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
                     type="button"
                     onClick={() => updateLight(lv.index as 0 | 1, l.id, { on: !l.on })}
                     className={cn(
-                      "rounded px-2 py-1 text-[10.5px] font-bold",
-                      l.on ? "bg-amber-400/25 text-amber-200" : "bg-muted text-muted-foreground",
+                      "min-w-12 rounded-lg px-2.5 py-1 text-[11px] font-bold transition",
+                      l.on ? "bg-amber-400/25 text-amber-200 ring-1 ring-amber-400/40" : "bg-white/[0.06] text-muted-foreground hover:text-foreground",
                     )}
                   >
                     {l.on ? "ON" : "OFF"}
@@ -192,7 +209,7 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
               )),
             )}
           </div>
-        </div>
+        </StudioCard>
       </div>
     </div>
   );

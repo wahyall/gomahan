@@ -23,7 +23,6 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
 
   if (!selected) return null;
 
-  // Read-only element summary inside analytical 3D viewports
   if (selected.kind !== "part") {
     const lv = derived.project.levels[selected.levelIndex];
     if (!lv) return null;
@@ -37,12 +36,12 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
       if (!f) return null;
       title = f.name;
       subtitle = `${lv.name} · ${f.size.x.toFixed(2)}×${f.size.z.toFixed(2)} m`;
-      note = `Posisi data: X ${f.position.x.toFixed(2)} m · Z ${f.position.z.toFixed(2)} m`;
+      note = `Posisi: X ${f.position.x.toFixed(2)} m · Z ${f.position.z.toFixed(2)} m`;
     } else if (selected.kind === "hvac") {
       const hv = lv.hvac.find((x) => x.id === selected.id);
       if (!hv) return null;
       title = hv.name;
-      subtitle = `${lv.name} · ${hv.type.toUpperCase()} · ${hv.powerW} W · ${hv.flowRateM3h} m³/jam`;
+      subtitle = `${lv.name} · ${hv.type.toUpperCase()} · ${hv.powerW} W · ${hv.flowRateM3h} m³/j`;
       note = hv.on ? `Aktif (${hv.setpointC}°C, Speed ${hv.speedLevel})` : "Unit mati";
     } else if (selected.kind === "light") {
       const l = lv.lights.find((x) => x.id === selected.id);
@@ -69,27 +68,26 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
     }
 
     return (
-      <div className="pointer-events-auto absolute bottom-3 right-3 z-20 w-[300px] max-w-[calc(100%-1.5rem)] rounded-md border border-border bg-card/95 shadow-2xl backdrop-blur-md">
-        <div className="flex items-center justify-between border-b border-border bg-[#23272e] px-3 py-2">
+      <div className="studio-glass pointer-events-auto absolute bottom-3 right-3 z-20 w-[300px] max-w-[calc(100%-1.5rem)] overflow-hidden rounded-2xl">
+        <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
           <div className="min-w-0">
             <div className="truncate text-xs font-bold text-foreground">{title}</div>
-            <div className="truncate text-[10px] text-muted-foreground">{subtitle}</div>
+            <div className="truncate text-[10.5px] text-muted-foreground">{subtitle}</div>
           </div>
           <button
             type="button"
             aria-label="Tutup ringkasan elemen"
             onClick={() => setSelected(null)}
-            className="flex min-h-7 min-w-7 items-center justify-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/10 hover:text-foreground"
           >
             <X className="h-3.5 w-3.5" aria-hidden />
           </button>
         </div>
-        <div className="p-3 text-[11px] text-muted-foreground">{note}</div>
+        <div className="px-3.5 py-2.5 text-[11px] text-muted-foreground">{note}</div>
       </div>
     );
   }
 
-  // Building Part Inspector (from MVP: specs + live inline RAB unit price editing!)
   const info = getPartInfo(selected.id, derived, struct);
   if (!info) return null;
 
@@ -97,69 +95,69 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
   const isHidden = view.hiddenParts.includes(info.id);
 
   return (
-    <div className="pointer-events-auto absolute bottom-3 right-3 z-20 flex max-h-[82%] w-[345px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-md border border-border bg-card/95 shadow-2xl backdrop-blur-md">
-      <div className="flex items-center justify-between border-b border-border bg-[#23272e] px-3 py-2">
+    <div className="studio-glass pointer-events-auto absolute bottom-3 right-3 z-20 flex max-h-[82%] w-[345px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl">
+      <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
         <div className="min-w-0">
           <div className="truncate text-[13px] font-bold text-foreground">{info.label}</div>
-          <div className="text-[10px] uppercase tracking-wider text-primary">{info.group}</div>
+          <div className="font-mono text-[10px] uppercase tracking-wider text-primary">{info.group}</div>
         </div>
         <button
           type="button"
           aria-label="Tutup panel detail elemen"
           onClick={() => setSelected(null)}
-          className="flex min-h-7 min-w-7 items-center justify-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/10 hover:text-foreground"
         >
           <X className="h-3.5 w-3.5" aria-hidden />
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 text-xs">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5 text-xs">
         <p className="leading-relaxed text-muted-foreground">{info.ringkas}</p>
         <ul className="space-y-1 text-[11px] text-foreground/90">
           {info.specs.map((s, i) => (
-            <li key={i} className="flex gap-1.5">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary" />
+            <li key={i} className="flex gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
               <span>{s}</span>
             </li>
           ))}
         </ul>
 
         {info.praktik && (
-          <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[10.5px] text-amber-200">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10.5px] leading-relaxed text-amber-200">
             {info.praktik}
           </div>
         )}
 
         <div>
-          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            <Wallet className="h-3 w-3 text-primary" /> Biaya & Edit Harga Satuan (RAB Live)
+          <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+            <Wallet className="h-3.5 w-3.5 text-primary" /> Biaya &amp; Harga Satuan Live
           </div>
           {relatedRows.length === 0 ? (
-            <div className="rounded border border-border bg-muted/40 p-2 text-[10.5px] text-muted-foreground">
+            <div className="rounded-xl border border-white/[0.08] bg-black/20 p-2.5 text-[10.5px] text-muted-foreground">
               Tidak ada baris RAB aktif untuk konfigurasi saat ini.
             </div>
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {relatedRows.map((r) => (
-                <div key={r.id} className="rounded border border-border bg-background/60 p-2">
+                <div key={r.id} className="rounded-xl border border-white/[0.08] bg-black/25 p-2.5">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="truncate text-[11px] font-semibold text-foreground">{r.uraian}</div>
-                      <div className="font-mono text-[10px] text-muted-foreground">
+                      <div className="font-mono text-[10px] text-muted-foreground tabular-nums">
                         {fmtNum(r.qty, r.qty % 1 === 0 ? 0 : 2)} {r.unit} · {r.ahspCode}
                       </div>
                     </div>
-                    <div className="shrink-0 font-mono text-[11px] font-bold text-primary">{fmtRp(r.subtotal)}</div>
+                    <div className="shrink-0 font-mono text-[11px] font-bold text-primary tabular-nums">{fmtRp(r.subtotal)}</div>
                   </div>
-                  <label className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-                    <span>Harga Material (Rp/{r.unit})</span>
+                  <label className="mt-2 flex items-center justify-between gap-2 text-[10.5px] text-muted-foreground">
+                    <span>Harga (Rp/{r.unit})</span>
                     <input
                       type="number"
                       min={0}
                       step={500}
                       value={r.materialUnit}
                       onChange={(e) => updatePriceItem(r.priceKey, "materialPrice", Math.max(0, Number(e.target.value) || 0))}
-                      className="h-6 w-28 rounded border border-input bg-card px-2 text-right font-mono text-[11px] text-foreground outline-none focus:border-primary"
+                      className="h-7 w-28 rounded-lg border border-input bg-[#12151b] px-2 text-right font-mono text-[11px] text-foreground tabular-nums outline-none focus:border-primary"
                     />
                   </label>
                 </div>
@@ -169,14 +167,14 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
         </div>
       </div>
 
-      <div className="border-t border-border bg-[#23272e] p-2">
+      <div className="border-t border-white/[0.08] bg-black/20 p-2.5">
         <button
           type="button"
           onClick={() => toggleHiddenPart(info.id)}
-          className="flex h-8 w-full items-center justify-center gap-1.5 rounded border border-border bg-secondary text-[11px] font-semibold hover:border-primary"
+          className="flex h-8 w-full items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] text-[11px] font-semibold transition hover:bg-white/[0.12]"
         >
           {isHidden ? <EyeOff className="h-3.5 w-3.5 text-amber-400" /> : <Eye className="h-3.5 w-3.5 text-primary" />}
-          {isHidden ? "Tampilkan Kembali Bagian Ini" : "Sembunyikan Bagian Ini"}
+          {isHidden ? "Tampilkan Kembali Elemen" : "Sembunyikan di 3D"}
         </button>
       </div>
     </div>

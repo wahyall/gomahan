@@ -1,12 +1,13 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
-import { BrickWall, Layers, RotateCcw, Ruler, Wallet } from "lucide-react";
+import { KpiMetric, SectionHeader, StudioCard, StudioNumberField, StudioRange } from "@/components/ui/StudioPrimitives";
+import { BrickWall, ChevronDown, ChevronRight, Layers, RotateCcw, Ruler, Search, Wallet, X } from "lucide-react";
 
 export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; rab: RabSummary }) {
   const project = useStudioStore((s) => s.project);
@@ -16,219 +17,295 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
   const setBudgetCap = useStudioStore((s) => s.setBudgetCap);
   const setBrickPreset = useStudioStore((s) => s.setBrickPreset);
 
+  const [query, setQuery] = useState("");
+  const [collapsedDivs, setCollapsedDivs] = useState<Record<string, boolean>>({});
+
   const settings = project.rabSettings;
   const masonry = derived.masonry;
   const bSpec = project.systems.brick;
+  const budgetPct = Math.round((rab.grandTotal / Math.max(1, rab.budgetCapIdr)) * 100);
+  const diffRp = rab.budgetCapIdr - rab.grandTotal;
+
+  const qLower = query.trim().toLowerCase();
+  const filteredDivisions = rab.divisions
+    .map((div) => ({
+      ...div,
+      rows: div.rows.filter(
+        (r) =>
+          !qLower ||
+          r.uraian.toLowerCase().includes(qLower) ||
+          r.ahspCode.toLowerCase().includes(qLower) ||
+          r.spek.toLowerCase().includes(qLower) ||
+          div.nama.toLowerCase().includes(qLower),
+      ),
+    }))
+    .filter((d) => d.rows.length > 0);
+
+  const toggleDiv = (id: string) => {
+    setCollapsedDivs((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+    <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
       <div className="mx-auto max-w-6xl space-y-4">
         {/* Top Summary Cards */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatCard
+          <KpiMetric
             icon={<BrickWall className="h-4 w-4 text-primary" />}
-            title="Kebutuhan Bata"
-            val={`${fmtNum(masonry.totalBuyBricks)} buah`}
-            sub={`Terpasang ${fmtNum(masonry.totalPiecesPlaced)} (potongan ${fmtNum(masonry.cutPiecesCount)}) + waste ${bSpec.wastePct}%`}
+            label="Kebutuhan Bata"
+            value={`${fmtNum(masonry.totalBuyBricks)} bh`}
+            sub={`Pasang ${fmtNum(masonry.totalPiecesPlaced)} kpg + ${bSpec.wastePct}% waste`}
           />
-          <StatCard
+          <KpiMetric
             icon={<Layers className="h-4 w-4 text-primary" />}
-            title={bSpec.mortarKind === "thinbed" ? "Perekat Thinbed" : "Semen & Pasir (1:5)"}
-            val={bSpec.mortarKind === "thinbed" ? `${fmtNum(masonry.thinbedZak40kg)} zak 40kg` : `${fmtNum(masonry.cementZak50kg)} zak + ${fmtNum(masonry.sandM3, 1)} m³`}
-            sub={`Nat ${bSpec.mortarMm} mm · Volume mortar ${fmtNum(masonry.mortarWithWasteM3, 2)} m³`}
+            label={bSpec.mortarKind === "thinbed" ? "Perekat Thinbed" : "Semen & Pasir (1:5)"}
+            value={
+              bSpec.mortarKind === "thinbed"
+                ? `${fmtNum(masonry.thinbedZak40kg)} zak`
+                : `${fmtNum(masonry.cementZak50kg)} zak + ${fmtNum(masonry.sandM3, 1)} m³`
+            }
+            sub={`Nat ${bSpec.mortarMm} mm · Mortar ${fmtNum(masonry.mortarWithWasteM3, 2)} m³`}
           />
-          <StatCard
+          <KpiMetric
             icon={<Ruler className="h-4 w-4 text-primary" />}
-            title="Luas Bersih 2 Lantai"
-            val={`${fmtNum(derived.totalNetFloorM2, 2)} m²`}
-            sub={`Tebal bata memakai ${fmtNum(derived.totalWallDeductionM2, 2)} m² (${fmtNum(derived.totalWallDeductionPct, 1)}%) dari tapak`}
+            label="Luas Bersih 2 Lantai"
+            value={`${fmtNum(derived.totalNetFloorM2, 2)} m²`}
+            sub={`Tebal bata memakai ${fmtNum(derived.totalWallDeductionM2, 2)} m²`}
           />
-          <StatCard
+          <KpiMetric
             icon={<Wallet className="h-4 w-4 text-primary" />}
-            title="Grand Total RAB"
-            val={fmtRp(rab.grandTotal)}
-            sub={`${fmtRp(rab.perM2NetFloor)} / m² bersih · ${rab.overBudget ? "Melebihi Target" : "Masuk Target"}`}
+            label="Grand Total RAB"
+            value={fmtRp(rab.grandTotal)}
+            tone={rab.overBudget ? "rose" : "emerald"}
+            sub={`${fmtRp(rab.perM2NetFloor)}/m² bersih`}
           />
         </div>
 
-        {/* Settings & Markups & What-if Quick Toggle */}
+        {/* Settings & Markups & Budget Progress */}
         <div className="grid gap-4 lg:grid-cols-3">
-          <div className="rounded-lg border border-border bg-card p-3.5 space-y-2.5 text-xs">
-            <div className="font-bold uppercase tracking-wider text-muted-foreground">Skema Upah & Target Budget</div>
-            <div className="flex gap-1">
+          <StudioCard className="space-y-3 text-xs">
+            <SectionHeader title="Skema Upah & Target Budget" />
+            <div className="flex gap-1 rounded-lg bg-black/30 p-0.5">
               <button
                 type="button"
                 onClick={() => patchRabSettings({ laborMode: "ahsp_oh" })}
-                className={cn("flex-1 rounded border py-1 font-semibold", settings.laborMode === "ahsp_oh" ? "border-primary bg-primary/20 text-primary" : "border-border text-muted-foreground")}
+                className={cn(
+                  "flex-1 rounded-md py-1.5 text-[11px] font-semibold transition",
+                  settings.laborMode === "ahsp_oh" ? "bg-[#f2efe8] text-[#14171c]" : "text-muted-foreground hover:text-foreground",
+                )}
               >
                 AHSP OH 2023
               </button>
               <button
                 type="button"
                 onClick={() => patchRabSettings({ laborMode: "borongan_pct" })}
-                className={cn("flex-1 rounded border py-1 font-semibold", settings.laborMode === "borongan_pct" ? "border-primary bg-primary/20 text-primary" : "border-border text-muted-foreground")}
+                className={cn(
+                  "flex-1 rounded-md py-1.5 text-[11px] font-semibold transition",
+                  settings.laborMode === "borongan_pct" ? "bg-[#f2efe8] text-[#14171c]" : "text-muted-foreground hover:text-foreground",
+                )}
               >
                 Borongan %
               </button>
             </div>
             {settings.laborMode === "borongan_pct" && (
-              <div className="space-y-1">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Persentase Upah Borongan</span>
-                  <span className="font-mono font-bold">{settings.boronganPct}%</span>
-                </div>
-                <input
-                  type="range"
-                  min={15}
-                  max={45}
-                  value={settings.boronganPct}
-                  onChange={(e) => patchRabSettings({ boronganPct: Number(e.target.value) })}
-                  className="w-full accent-[#df8949]"
+              <StudioRange
+                label="Persentase Upah Borongan"
+                display={`${settings.boronganPct}%`}
+                min={15}
+                max={45}
+                step={1}
+                value={settings.boronganPct}
+                onChange={(v) => patchRabSettings({ boronganPct: v })}
+              />
+            )}
+            <StudioNumberField
+              label="Target Anggaran Maksimal (IDR)"
+              step={10_000_000}
+              value={rab.budgetCapIdr}
+              onChange={(v) => setBudgetCap(v || 450_000_000)}
+            />
+          </StudioCard>
+
+          <StudioCard className="space-y-3 text-xs">
+            <SectionHeader
+              title="Markup & Cadangan (%)"
+              action={
+                <button
+                  type="button"
+                  onClick={resetPriceBook}
+                  className="flex items-center gap-1 rounded-lg border border-border bg-black/25 px-2 py-1 text-[10.5px] font-medium hover:border-primary"
+                >
+                  <RotateCcw className="h-3 w-3" /> Reset Harga
+                </button>
+              }
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <StudioNumberField label="Overhead" unit="%" min={0} max={25} step={0.5} value={settings.overheadPct} onChange={(v) => patchRabSettings({ overheadPct: v })} />
+              <StudioNumberField label="Profit" unit="%" min={0} max={25} step={0.5} value={settings.profitPct} onChange={(v) => patchRabSettings({ profitPct: v })} />
+              <StudioNumberField label="PPN" unit="%" min={0} max={25} step={0.5} value={settings.vatPct} onChange={(v) => patchRabSettings({ vatPct: v })} />
+              <StudioNumberField label="Contingency" unit="%" min={0} max={25} step={0.5} value={settings.contingencyPct} onChange={(v) => patchRabSettings({ contingencyPct: v })} />
+            </div>
+            <div className="text-[10.5px] text-muted-foreground">Basis harga: {project.priceBook.region}</div>
+          </StudioCard>
+
+          <StudioCard highlight className="flex flex-col justify-between space-y-2.5 text-xs">
+            <div className="space-y-1.5">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Material Langsung</span>
+                <span className="font-mono font-medium tabular-nums">{fmtRp(rab.directMaterialTotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Upah Tenaga Kerja</span>
+                <span className="font-mono font-medium tabular-nums">{fmtRp(rab.directLaborTotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Markup &amp; PPN</span>
+                <span className="font-mono font-medium tabular-nums">{fmtRp(rab.overheadAmount + rab.profitAmount + rab.vatAmount + rab.contingencyAmount)}</span>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 border-t border-primary/25 pt-2">
+              <div className="flex items-center justify-between text-xs font-bold">
+                <span>Pagu Anggaran ({budgetPct}%)</span>
+                <span className={cn("font-mono tabular-nums", diffRp >= 0 ? "text-emerald-300" : "text-rose-300")}>
+                  {diffRp >= 0 ? `Sisa ${fmtRp(diffRp)}` : `Over ${fmtRp(Math.abs(diffRp))}`}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-black/40">
+                <div
+                  className={cn("h-full rounded-full transition-all", rab.overBudget ? "bg-rose-400" : "bg-emerald-400")}
+                  style={{ width: `${Math.min(100, budgetPct)}%` }}
                 />
               </div>
-            )}
-            <label className="block space-y-1">
-              <span className="text-[11px] text-muted-foreground">Target Anggaran Maksimal (IDR)</span>
-              <input
-                type="number"
-                step={10_000_000}
-                value={rab.budgetCapIdr}
-                onChange={(e) => setBudgetCap(Number(e.target.value) || 450_000_000)}
-                className="h-8 w-full rounded border border-input bg-secondary px-2 text-right font-mono"
-              />
-            </label>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card p-3.5 space-y-2 text-xs">
-            <div className="font-bold uppercase tracking-wider text-muted-foreground">Markup & Cadangan (%)</div>
-            <div className="grid grid-cols-2 gap-2">
-              <MarkupInput label="Overhead %" val={settings.overheadPct} onChange={(v) => patchRabSettings({ overheadPct: v })} />
-              <MarkupInput label="Profit Kontraktor %" val={settings.profitPct} onChange={(v) => patchRabSettings({ profitPct: v })} />
-              <MarkupInput label="PPN %" val={settings.vatPct} onChange={(v) => patchRabSettings({ vatPct: v })} />
-              <MarkupInput label="Contingency %" val={settings.contingencyPct} onChange={(v) => patchRabSettings({ contingencyPct: v })} />
             </div>
-            <div className="flex items-center justify-between pt-1">
-              <span className="text-[10.5px] text-muted-foreground">{project.priceBook.region}</span>
+
+            <div className="flex gap-1.5 pt-1">
               <button
                 type="button"
-                onClick={resetPriceBook}
-                className="flex items-center gap-1 rounded border border-border bg-secondary px-2 py-1 text-[10.5px] hover:border-primary"
+                onClick={() => setBrickPreset("hebel")}
+                className={cn(
+                  "flex-1 rounded-lg border py-1.5 text-[11px] font-semibold transition",
+                  bSpec.preset === "hebel" ? "border-primary bg-primary text-primary-foreground" : "border-border bg-black/25 hover:border-white/25",
+                )}
               >
-                <RotateCcw className="h-3 w-3" /> Reset Harga Surabaya
+                Simulasi Hebel
               </button>
+              <button
+                type="button"
+                onClick={() => setBrickPreset("merah")}
+                className={cn(
+                  "flex-1 rounded-lg border py-1.5 text-[11px] font-semibold transition",
+                  bSpec.preset === "merah" ? "border-primary bg-primary text-primary-foreground" : "border-border bg-black/25 hover:border-white/25",
+                )}
+              >
+                Simulasi Bata Merah
+              </button>
+            </div>
+          </StudioCard>
+        </div>
+
+        {/* BOQ Filter & Editable Table */}
+        <div className="studio-surface overflow-hidden rounded-xl">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-[#161a21] px-3.5 py-2.5">
+            <div className="text-xs font-semibold text-foreground">Daftar Rincian Pekerjaan (BOQ &amp; Harga Satuan Editable)</div>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Cari uraian atau kode AHSP..."
+                className="h-8 w-56 rounded-lg border border-input bg-[#111418] pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+              />
+              {query && (
+                <button
+                  type="button"
+                  aria-label="Hapus pencarian"
+                  onClick={() => setQuery("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="rounded-lg border border-primary/30 bg-primary/10 p-3.5 text-xs space-y-1.5">
-            <div className="flex justify-between"><span>Material Langsung</span><span className="font-mono">{fmtRp(rab.directMaterialTotal)}</span></div>
-            <div className="flex justify-between"><span>Upah Tenaga Kerja</span><span className="font-mono">{fmtRp(rab.directLaborTotal)}</span></div>
-            <div className="flex justify-between"><span>Overhead + Profit + PPN + Cadangan</span><span className="font-mono">{fmtRp(rab.overheadAmount + rab.profitAmount + rab.vatAmount + rab.contingencyAmount)}</span></div>
-            <div className="flex justify-between border-t border-primary/25 pt-1.5 text-sm font-bold text-foreground">
-              <span>Grand Total RAB</span>
-              <span className="font-mono text-primary">{fmtRp(rab.grandTotal)}</span>
-            </div>
-            <div className="flex gap-1 pt-1">
-              <button type="button" onClick={() => setBrickPreset("hebel")} className="flex-1 rounded border border-border bg-card py-1 text-[10px] font-semibold hover:border-primary">
-                Uji Hebel
-              </button>
-              <button type="button" onClick={() => setBrickPreset("merah")} className="flex-1 rounded border border-border bg-card py-1 text-[10px] font-semibold hover:border-primary">
-                Uji Bata Merah
-              </button>
-            </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-xs">
+              <thead className="bg-[#1b2029] text-left text-[10.5px] font-semibold text-muted-foreground">
+                <tr>
+                  <th className="px-3.5 py-2.5">Kode AHSP</th>
+                  <th className="px-3.5 py-2.5">Uraian Pekerjaan &amp; Rumus Model</th>
+                  <th className="px-3.5 py-2.5 text-right">Qty</th>
+                  <th className="px-3.5 py-2.5 text-right">Harga Material (Rp)</th>
+                  <th className="px-3.5 py-2.5 text-right">Upah (Rp)</th>
+                  <th className="px-3.5 py-2.5 text-right">Subtotal (Rp)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border tabular-nums">
+                {filteredDivisions.map((div) => {
+                  const collapsed = Boolean(collapsedDivs[div.id]) && !qLower;
+                  return (
+                    <Fragment key={div.id}>
+                      <tr
+                        onClick={() => toggleDiv(div.id)}
+                        className="cursor-pointer bg-white/[0.04] hover:bg-white/[0.07]"
+                      >
+                        <td colSpan={5} className="px-3.5 py-2.5 font-semibold text-foreground">
+                          <span className="inline-flex items-center gap-1.5">
+                            {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-primary" /> : <ChevronDown className="h-3.5 w-3.5 text-primary" />}
+                            <span>Divisi {div.kode} — {div.nama}</span>
+                            <span className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                              {div.rows.length} item
+                            </span>
+                          </span>
+                        </td>
+                        <td className="px-3.5 py-2.5 text-right font-mono font-bold text-primary">{fmtRp(div.subtotal)}</td>
+                      </tr>
+                      {!collapsed &&
+                        div.rows.map((r) => (
+                          <tr key={r.id} className="hover:bg-white/[0.02]">
+                            <td className="px-3.5 py-2 font-mono text-[10.5px] text-muted-foreground">{r.ahspCode}</td>
+                            <td className="px-3.5 py-2">
+                              <div className="font-semibold text-foreground">{r.uraian}</div>
+                              <div className="text-[10.5px] text-muted-foreground">
+                                {r.spek} · <span className="text-primary/80">{r.formulaNote}</span>
+                              </div>
+                            </td>
+                            <td className="px-3.5 py-2 text-right font-mono whitespace-nowrap">
+                              {fmtNum(r.qty, r.qty % 1 === 0 ? 0 : 2)} {r.unit}
+                            </td>
+                            <td className="px-3.5 py-1.5 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                step={500}
+                                value={r.materialUnit}
+                                onChange={(e) => updatePriceItem(r.priceKey, "materialPrice", Math.max(0, Number(e.target.value) || 0))}
+                                className="h-7 w-28 rounded-lg border border-input bg-[#111418] px-2 text-right font-mono text-xs outline-none focus:border-primary"
+                              />
+                            </td>
+                            <td className="px-3.5 py-1.5 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                step={500}
+                                disabled={settings.laborMode === "borongan_pct"}
+                                value={r.laborUnit}
+                                onChange={(e) => updatePriceItem(r.priceKey, "laborPrice", Math.max(0, Number(e.target.value) || 0))}
+                                className="h-7 w-24 rounded-lg border border-input bg-[#111418] px-2 text-right font-mono text-xs outline-none focus:border-primary disabled:opacity-40"
+                              />
+                            </td>
+                            <td className="px-3.5 py-2 text-right font-mono font-semibold">{fmtRp(r.subtotal)}</td>
+                          </tr>
+                        ))}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
-
-        {/* Full Editable BOQ Table */}
-        <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <table className="w-full min-w-[900px] text-xs">
-            <thead className="bg-muted text-left text-[10.5px] uppercase text-muted-foreground">
-              <tr>
-                <th className="px-3 py-2">Kode AHSP</th>
-                <th className="px-3 py-2">Uraian Pekerjaan & Rumus Model</th>
-                <th className="px-3 py-2 text-right">Qty</th>
-                <th className="px-3 py-2 text-right">Harga Material (Rp)</th>
-                <th className="px-3 py-2 text-right">Upah (Rp)</th>
-                <th className="px-3 py-2 text-right">Subtotal (Rp)</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {rab.divisions.map((div) => (
-                <Fragment key={div.id}>
-                  <tr className="bg-secondary/70">
-                    <td colSpan={5} className="px-3 py-2 font-bold uppercase tracking-wide text-foreground">
-                      Divisi {div.kode} — {div.nama}
-                    </td>
-                    <td className="px-3 py-2 text-right font-mono font-bold text-primary">{fmtRp(div.subtotal)}</td>
-                  </tr>
-                  {div.rows.map((r) => (
-                    <tr key={r.id} className="hover:bg-accent/30">
-                      <td className="px-3 py-2 font-mono text-[10.5px] text-muted-foreground">{r.ahspCode}</td>
-                      <td className="px-3 py-2">
-                        <div className="font-semibold text-foreground">{r.uraian}</div>
-                        <div className="text-[10.5px] text-muted-foreground">{r.spek} · <i className="text-primary/80">{r.formulaNote}</i></div>
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono whitespace-nowrap">
-                        {fmtNum(r.qty, r.qty % 1 === 0 ? 0 : 2)} {r.unit}
-                      </td>
-                      <td className="px-3 py-1.5 text-right">
-                        <input
-                          type="number"
-                          min={0}
-                          step={500}
-                          value={r.materialUnit}
-                          onChange={(e) => updatePriceItem(r.priceKey, "materialPrice", Math.max(0, Number(e.target.value) || 0))}
-                          className="h-7 w-28 rounded border border-input bg-background px-2 text-right font-mono text-xs outline-none focus:border-primary"
-                        />
-                      </td>
-                      <td className="px-3 py-1.5 text-right">
-                        <input
-                          type="number"
-                          min={0}
-                          step={500}
-                          disabled={settings.laborMode === "borongan_pct"}
-                          value={r.laborUnit}
-                          onChange={(e) => updatePriceItem(r.priceKey, "laborPrice", Math.max(0, Number(e.target.value) || 0))}
-                          className="h-7 w-24 rounded border border-input bg-background px-2 text-right font-mono text-xs outline-none focus:border-primary disabled:opacity-40"
-                        />
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono font-semibold">{fmtRp(r.subtotal)}</td>
-                    </tr>
-                  ))}
-                </Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </div>
     </div>
-  );
-}
-
-function StatCard({ icon, title, val, sub }: { icon: React.ReactNode; title: string; val: string; sub: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-3.5">
-      <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {icon} {title}
-      </div>
-      <div className="mt-1 font-mono text-lg font-bold text-foreground">{val}</div>
-      <div className="mt-0.5 text-[10.5px] text-muted-foreground">{sub}</div>
-    </div>
-  );
-}
-
-function MarkupInput({ label, val, onChange }: { label: string; val: number; onChange: (v: number) => void }) {
-  return (
-    <label className="space-y-0.5">
-      <span className="text-[10.5px] text-muted-foreground">{label}</span>
-      <input
-        type="number"
-        min={0}
-        max={25}
-        step={0.5}
-        value={val}
-        onChange={(e) => onChange(Math.max(0, Math.min(25, Number(e.target.value) || 0)))}
-        className="h-7 w-full rounded border border-input bg-secondary px-2 text-right font-mono"
-      />
-    </label>
   );
 }

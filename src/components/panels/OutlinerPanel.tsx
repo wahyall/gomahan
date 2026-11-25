@@ -5,14 +5,15 @@ import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
-import { BrickWall, Cable, ChevronRight, Eye, EyeOff, Fan, Home, Landmark, Layers, ListTree, PaintBucket, TreePine } from "lucide-react";
+import { BrickWall, Cable, ChevronRight, Eye, EyeOff, Fan, Home, Landmark, Layers, ListTree, PaintBucket, TreePine, X } from "lucide-react";
 
 interface Props {
   derived: DerivedProjectModel;
   struct: StructuralReport;
+  onCloseDrawer?: () => void;
 }
 
-export function OutlinerPanel({ derived, struct }: Props) {
+export function OutlinerPanel({ derived, struct, onCloseDrawer }: Props) {
   const view = useStudioStore((s) => s.view);
   const patchView = useStudioStore((s) => s.patchView);
   const toggleHiddenPart = useStudioStore((s) => s.toggleHiddenPart);
@@ -49,10 +50,23 @@ export function OutlinerPanel({ derived, struct }: Props) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col border-b border-border">
-      <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-border bg-[#21242a] px-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        <ListTree className="h-3.5 w-3.5 text-primary" /> Outliner Struktur & Elemen
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border bg-[#161a21] px-3 text-xs font-semibold text-foreground">
+        <div className="flex items-center gap-2">
+          <ListTree className="h-3.5 w-3.5 text-primary" />
+          <span>Outliner Elemen</span>
+        </div>
+        {onCloseDrawer && (
+          <button
+            type="button"
+            aria-label="Tutup Panel SNI & Outliner"
+            onClick={onCloseDrawer}
+            className="rounded-md p-1 text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-1">
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {rows.map((r) => {
           const Icon = r.icon;
           const isSelected = selected?.kind === "part" && selected.id === r.partId;
@@ -70,17 +84,17 @@ export function OutlinerPanel({ derived, struct }: Props) {
                 }
               }}
               className={cn(
-                "group flex h-7 items-center gap-1 rounded px-1.5 text-[11.5px]",
-                r.partId ? "cursor-pointer hover:bg-accent/60" : "hover:bg-accent/30",
-                isSelected && "bg-primary/20 font-semibold text-primary",
-                r.indent === 1 && "pl-3.5",
-                r.indent === 2 && "pl-6",
+                "group flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11.5px] transition-colors",
+                r.partId ? "cursor-pointer hover:bg-white/[0.06]" : "hover:bg-white/[0.03]",
+                isSelected && "bg-primary/15 font-semibold text-primary",
+                r.indent === 1 && "pl-4",
+                r.indent === 2 && "pl-7",
               )}
             >
               <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />
               {Icon && <Icon className={cn("h-3.5 w-3.5 shrink-0", isSelected ? "text-primary" : "text-muted-foreground")} />}
               <span className="min-w-0 flex-1 truncate">{r.label}</span>
-              {r.note && <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground group-hover:inline">{r.note}</span>}
+              {r.note && <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums group-hover:inline">{r.note}</span>}
               {(r.flagKey || r.partId) && (
                 <button
                   type="button"
@@ -91,8 +105,8 @@ export function OutlinerPanel({ derived, struct }: Props) {
                     else if (r.partId) toggleHiddenPart(r.partId);
                   }}
                   className={cn(
-                    "flex h-5 w-5 shrink-0 items-center justify-center rounded transition",
-                    locked ? "opacity-30" : isVisible ? "text-primary hover:bg-primary/20" : "text-muted-foreground/50 hover:text-foreground",
+                    "flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition",
+                    locked ? "opacity-30" : isVisible ? "text-primary hover:bg-primary/20" : "text-muted-foreground/45 hover:text-foreground",
                   )}
                   title={locked ? "Dikendalikan Timeline Konstruksi" : isVisible ? "Sembunyikan" : "Tampilkan"}
                 >

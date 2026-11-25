@@ -5,18 +5,18 @@ import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { fmtM, fmtNum } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
-import { BookOpenText, FileStack, Printer } from "lucide-react";
+import { BookOpenText, FileStack, Printer, X, ZoomIn, ZoomOut } from "lucide-react";
 
 type SheetId = "denah1" | "denah2" | "potongan" | "struktur";
 
 const SHEETS: { id: SheetId; kode: string; label: string }[] = [
-  { id: "denah1", kode: "A-01", label: "Denah Lantai 1 (5×17 m)" },
-  { id: "denah2", kode: "A-02", label: "Denah Lantai 2 & Void" },
-  { id: "potongan", kode: "A-03", label: "Potongan Memanjang & Tampak" },
-  { id: "struktur", kode: "S-01", label: "Denah Pondasi, Kolom & Balok" },
+  { id: "denah1", kode: "A-01", label: "Denah LT1" },
+  { id: "denah2", kode: "A-02", label: "Denah LT2 & Void" },
+  { id: "potongan", kode: "A-03", label: "Potongan" },
+  { id: "struktur", kode: "S-01", label: "Struktur SNI" },
 ];
 
-const S = 52; // px per meter (17m * 52 = 884px fits crisp A3 landscape viewBox)
+const S = 52;
 const INK = "#22211e";
 const SOFT = "#6f6a60";
 const FADED = "#b8b2a6";
@@ -26,6 +26,8 @@ const PAPER = "#f8f7f2";
 export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProjectModel; struct: StructuralReport }) {
   const [sheet, setSheet] = useState<SheetId>("denah1");
   const [showMep, setShowMep] = useState(true);
+  const [zoomPct, setZoomPct] = useState(100);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   const openingsList = derived.project.levels.flatMap((lv) =>
     lv.walls.flatMap((w) =>
@@ -41,39 +43,100 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
   );
 
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1 overflow-hidden">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="no-print flex h-10 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border bg-[#21242a] px-2.5">
-          <FileStack className="h-3.5 w-3.5 text-primary" />
-          {SHEETS.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => setSheet(s.id)}
-              className={cn(
-                "flex h-7 shrink-0 items-center gap-1.5 rounded px-2.5 text-[11px] font-medium",
-                sheet === s.id ? "bg-primary text-primary-foreground" : "text-stone-300 hover:bg-white/10",
-              )}
-            >
-              <span className="rounded bg-black/25 px-1 font-mono text-[9.5px] font-bold">{s.kode}</span>
-              {s.label}
-            </button>
-          ))}
-          <label className="ml-2 flex cursor-pointer items-center gap-1 text-[11px] text-stone-300">
-            <input type="checkbox" checked={showMep} onChange={(e) => setShowMep(e.target.checked)} className="accent-[#df8949]" />
-            Overlay Pipa & Listrik
-          </label>
+        {/* CAD Drafting Toolbar */}
+        <div className="no-print flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-[#151920] px-3 py-1.5">
+          <div className="flex items-center gap-1 rounded-lg bg-black/30 p-0.5">
+            <FileStack className="mx-1.5 h-3.5 w-3.5 text-primary" />
+            {SHEETS.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => setSheet(s.id)}
+                className={cn(
+                  "flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium transition",
+                  sheet === s.id
+                    ? "bg-[#f2efe8] font-semibold text-[#14171c] shadow-sm"
+                    : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground",
+                )}
+              >
+                <span className={cn("rounded px-1 font-mono text-[9.5px] font-bold", sheet === s.id ? "bg-black/15" : "bg-black/30")}>
+                  {s.kode}
+                </span>
+                <span className="hidden sm:inline">{s.label}</span>
+              </button>
+            ))}
+          </div>
+
           <button
             type="button"
-            onClick={() => window.print()}
-            className="ml-auto flex h-7 items-center gap-1 rounded border border-border bg-card px-2.5 text-[11px] font-medium hover:border-primary"
+            onClick={() => setShowMep((v) => !v)}
+            className={cn(
+              "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition",
+              showMep
+                ? "border-primary/45 bg-primary/15 text-[#f6ba86]"
+                : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground",
+            )}
           >
-            <Printer className="h-3.5 w-3.5" /> Cetak Lembar
+            Overlay Pipa &amp; Listrik
           </button>
+
+          {/* Zoom Controls */}
+          <div className="flex items-center gap-0.5 rounded-lg border border-border bg-black/25 p-0.5">
+            <button
+              type="button"
+              aria-label="Perkecil lembar"
+              onClick={() => setZoomPct((z) => Math.max(70, z - 15))}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+            >
+              <ZoomOut className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoomPct(100)}
+              title="Reset zoom 100%"
+              className="min-w-11 rounded-md px-1.5 py-0.5 font-mono text-[10.5px] font-semibold text-foreground tabular-nums hover:bg-white/[0.06]"
+            >
+              {zoomPct}%
+            </button>
+            <button
+              type="button"
+              aria-label="Perbesar lembar"
+              onClick={() => setZoomPct((z) => Math.min(180, z + 15))}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+            >
+              <ZoomIn className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setScheduleOpen((v) => !v)}
+              className={cn(
+                "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition xl:hidden",
+                scheduleOpen ? "border-primary bg-primary text-primary-foreground" : "border-border bg-secondary text-foreground",
+              )}
+            >
+              <BookOpenText className="h-3.5 w-3.5" /> Jadwal
+            </button>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="flex h-8 items-center gap-1.5 rounded-lg bg-[#f2efe8] px-3 text-[11px] font-semibold text-[#14171c] shadow-sm transition hover:brightness-95"
+            >
+              <Printer className="h-3.5 w-3.5 text-[#b9662a]" /> Cetak Lembar
+            </button>
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto bg-[#1b1e23] p-4 sm:p-6">
-          <div className="mx-auto max-w-[1060px] shadow-2xl ring-1 ring-black/50">
+        {/* Drafting Table Background */}
+        <div className="min-h-0 flex-1 overflow-auto bg-[#181b21] p-4 sm:p-6">
+          <div
+            className="mx-auto origin-top shadow-2xl ring-1 ring-black/50 transition-transform duration-150"
+            style={{ maxWidth: `${(1060 * zoomPct) / 100}px` }}
+          >
             {sheet === "denah1" && <DenahFloorSvg derived={derived} struct={struct} levelIndex={0} showMep={showMep} />}
             {sheet === "denah2" && <DenahFloorSvg derived={derived} struct={struct} levelIndex={1} showMep={showMep} />}
             {sheet === "potongan" && <PotonganMemanjangSvg derived={derived} struct={struct} />}
@@ -82,28 +145,43 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
         </div>
       </div>
 
-      {/* Right Schedule Sidebar */}
-      <aside className="no-print hidden min-h-0 w-[310px] shrink-0 flex-col overflow-y-auto border-l border-border bg-card/50 xl:flex">
-        <div className="flex h-10 items-center gap-1.5 border-b border-border px-3 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-          <BookOpenText className="h-3.5 w-3.5 text-primary" /> Jadwal Ruang & Bukaan
+      {/* Right Schedule Sidebar (Always visible xl+, toggleable slide-over below xl) */}
+      <aside
+        className={cn(
+          "no-print min-h-0 w-[310px] shrink-0 flex-col overflow-y-auto border-l border-border bg-[#151920]",
+          scheduleOpen ? "absolute bottom-0 right-0 top-0 z-20 flex shadow-2xl xl:static xl:shadow-none" : "hidden xl:flex",
+        )}
+      >
+        <div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-3.5 text-xs font-semibold text-foreground">
+          <span className="flex items-center gap-2">
+            <BookOpenText className="h-3.5 w-3.5 text-primary" /> Jadwal Ruang &amp; Bukaan
+          </span>
+          <button
+            type="button"
+            aria-label="Tutup jadwal"
+            onClick={() => setScheduleOpen(false)}
+            className="rounded p-1 text-muted-foreground hover:bg-white/10 xl:hidden"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
-        <div className="space-y-4 p-3 text-[11px]">
+        <div className="space-y-4 p-3.5 text-[11px]">
           <section>
-            <h3 className="mb-1.5 font-bold text-foreground">Jadwal Luas Bersih Ruangan</h3>
-            <div className="overflow-hidden rounded border border-border">
-              <table className="w-full text-[10.5px]">
-                <thead className="bg-muted text-muted-foreground">
+            <h3 className="mb-2 font-semibold text-foreground">Luas Bersih Ruangan</h3>
+            <div className="studio-surface overflow-hidden rounded-xl">
+              <table className="w-full text-[11px]">
+                <thead className="bg-[#1b2029] text-muted-foreground">
                   <tr>
-                    <th className="px-2 py-1 text-left">Ruang</th>
-                    <th className="px-2 py-1 text-right">Bersih</th>
+                    <th className="px-2.5 py-1.5 text-left">Ruang</th>
+                    <th className="px-2.5 py-1.5 text-right">Bersih</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-border">
+                <tbody className="divide-y divide-border tabular-nums">
                   {derived.floors.flatMap((fl) =>
                     fl.rooms.map((r) => (
                       <tr key={r.room.id}>
-                        <td className="px-2 py-1">LT{fl.levelIndex + 1} · {r.room.name}</td>
-                        <td className="px-2 py-1 text-right font-mono font-semibold">{fmtNum(r.netAreaM2, 2)} m²</td>
+                        <td className="px-2.5 py-1.5">LT{fl.levelIndex + 1} · {r.room.name}</td>
+                        <td className="px-2.5 py-1.5 text-right font-mono font-semibold">{fmtNum(r.netAreaM2, 2)} m²</td>
                       </tr>
                     )),
                   )}
@@ -113,20 +191,20 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
           </section>
 
           <section>
-            <h3 className="mb-1.5 font-bold text-foreground">Jadwal Bukaan ({openingsList.length} item)</h3>
-            <div className="overflow-hidden rounded border border-border">
-              <table className="w-full text-[10.5px]">
-                <thead className="bg-muted text-muted-foreground">
+            <h3 className="mb-2 font-semibold text-foreground">Jadwal Bukaan ({openingsList.length} item)</h3>
+            <div className="studio-surface overflow-hidden rounded-xl">
+              <table className="w-full text-[11px]">
+                <thead className="bg-[#1b2029] text-muted-foreground">
                   <tr>
-                    <th className="px-2 py-1 text-left">Bukaan</th>
-                    <th className="px-2 py-1 text-right">L×T (m)</th>
+                    <th className="px-2.5 py-1.5 text-left">Bukaan</th>
+                    <th className="px-2.5 py-1.5 text-right">L×T (m)</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-border">
+                <tbody className="divide-y divide-border tabular-nums">
                   {openingsList.map((o, i) => (
                     <tr key={i}>
-                      <td className="px-2 py-1">LT{o.lv} · {o.label}</td>
-                      <td className="px-2 py-1 text-right font-mono">{o.w.toFixed(2)}×{o.h.toFixed(2)}</td>
+                      <td className="px-2.5 py-1.5">LT{o.lv} · {o.label}</td>
+                      <td className="px-2.5 py-1.5 text-right font-mono">{o.w.toFixed(2)}×{o.h.toFixed(2)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -154,7 +232,6 @@ function DenahFloorSvg({
   const MT = 85;
   const VW = ML + 17 * S + 80;
   const VH = MT + 5 * S + 150;
-  // Horizontal axis = Z (0 front left -> 17 rear right, matching uploaded plan!), Vertical = X (0..5m)
   const px = (z: number) => ML + z * S;
   const py = (x: number) => MT + x * S;
 
@@ -166,7 +243,6 @@ function DenahFloorSvg({
       <rect x={0} y={0} width={VW} height={VH} fill={PAPER} />
       <rect x={10} y={10} width={VW - 20} height={VH - 20} fill="none" stroke={INK} strokeWidth={1.6} />
 
-      {/* Top Dimension Chains (matching uploaded 5x17 plan!) */}
       {[
         [0, 3, "3,00"],
         [3, 4, "1,00"],
@@ -180,7 +256,6 @@ function DenahFloorSvg({
       <HDim x1={px(0)} x2={px(17)} y={36} label="17,00 m" />
       <VDim y1={py(0)} y2={py(5)} x={55} label="5,00 m" />
 
-      {/* Rooms */}
       {rooms.map((rm) => {
         const pts = rm.room.polygon.map((p) => `${px(p.z)},${py(p.x)}`).join(" ");
         const fill =
@@ -212,7 +287,6 @@ function DenahFloorSvg({
         );
       })}
 
-      {/* Stairs */}
       {derived.project.levels[0]!.stairs.map((st) => (
         <g key={st.id} stroke={SOFT} strokeWidth={0.8}>
           {Array.from({ length: st.riserCount }, (_, i) => {
@@ -225,7 +299,6 @@ function DenahFloorSvg({
         </g>
       ))}
 
-      {/* Walls */}
       {lv.walls.map((w) => (
         <line
           key={w.id}
@@ -239,7 +312,6 @@ function DenahFloorSvg({
         />
       ))}
 
-      {/* Columns */}
       {struct.columns
         .filter((c) => c.minLevel <= levelIndex && c.maxLevel >= levelIndex)
         .map((c) => (
@@ -255,7 +327,6 @@ function DenahFloorSvg({
           />
         ))}
 
-      {/* Openings */}
       {lv.walls.flatMap((w) => {
         const len = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
         return w.openings.map((o) => {
@@ -276,7 +347,6 @@ function DenahFloorSvg({
         });
       })}
 
-      {/* MEP X-Ray Overlay */}
       {showMep &&
         lv.mepRoutes.map((rt) => {
           const pts = rt.pts.map((p) => `${px(p.z)},${py(p.x)}`).join(" ");
@@ -293,7 +363,6 @@ function DenahFloorSvg({
           return <polyline key={rt.id} points={pts} fill="none" stroke={col} strokeWidth={1.6} strokeDasharray={rt.kind === "air_kotor" ? "5 3" : undefined} />;
         })}
 
-      {/* Neighbor labels */}
       <text x={px(8.5)} y={py(0) - 10} textAnchor="middle" fontSize={7.5} fontWeight={700} fill={SOFT}>
         BATAS TEMBOK TETANGGA SISI KIRI (TANPA JENDELA)
       </text>
@@ -331,24 +400,19 @@ function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectMode
       <rect x={0} y={0} width={VW} height={VH} fill={PAPER} />
       <rect x={10} y={10} width={VW - 20} height={VH - 20} fill="none" stroke={INK} strokeWidth={1.6} />
 
-      {/* Street & Ground datum */}
       <line x1={px(-0.8)} y1={py(0)} x2={px(17.5)} y2={py(0)} stroke={INK} strokeWidth={1.6} />
       <text x={px(-0.6)} y={py(0) - 5} fontSize={7.5} fontWeight={700} fill={DIM}>JALAN ±0,00</text>
 
-      {/* Foundations */}
       {struct.foundations.slice(0, 7).map((f) => (
         <rect key={f.id} x={px(f.z) - 16} y={py(-0.5)} width={32} height={14} fill="#b8b4aa" stroke={INK} strokeWidth={1} />
       ))}
 
-      {/* LT1 Plinth & Floor */}
       <rect x={px(4)} y={py(lt1Y)} width={13 * S} height={lt1Y * 30} fill="#dad6cc" stroke={INK} strokeWidth={1} />
       <text x={px(10.5)} y={py(lt1Y) - 6} fontSize={8} fontWeight={700} fill={INK}>PEIL LT1 +{Math.round(lt1Y * 100)} cm</text>
 
-      {/* LT2 Slab */}
       <rect x={px(3)} y={py(lt2Y)} width={12.35 * S} height={5} fill="#8f9295" stroke={INK} strokeWidth={1} />
       <text x={px(9)} y={py(lt2Y) - 6} fontSize={8} fontWeight={700} fill={INK}>PELAT LT2 +{fmtM(lt2Y)} m</text>
 
-      {/* Shed Roof 10° Forward */}
       <polygon
         points={`${px(2.4)},${py(derived.roof.heightAt(2.5, 2.4) + lt1Y)} ${px(17.4)},${py(derived.roof.heightAt(2.5, 17.4) + lt1Y)} ${px(17.4)},${py(derived.roof.heightAt(2.5, 17.4) + lt1Y + 0.2)} ${px(2.4)},${py(derived.roof.heightAt(2.5, 2.4) + lt1Y + 0.2)}`}
         fill="#363b40"
@@ -359,7 +423,6 @@ function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectMode
         ATAP SHED {derived.roof.slopeDeg}° MIRING KE DEPAN ({derived.project.systems.roofCover})
       </text>
 
-      {/* Carport Canopy */}
       <line x1={px(-0.4)} y1={py(lt2Y - 0.8)} x2={px(4.5)} y2={py(lt2Y - 0.1)} stroke="#363b40" strokeWidth={4} />
 
       <TitleBlock x={VW - 290} y={VH - 20} judul="POTONGAN MEMANJANG A-A (5×17 M)" kode="A-03" rev={derived.project.structuralParams.drawingRevision} />
@@ -380,7 +443,6 @@ function StrukturPlanSvg({ derived, struct }: { derived: DerivedProjectModel; st
       <rect x={0} y={0} width={VW} height={VH} fill={PAPER} />
       <rect x={10} y={10} width={VW - 20} height={VH - 20} fill="none" stroke={INK} strokeWidth={1.6} />
 
-      {/* Beams */}
       {struct.beams
         .filter((b) => b.kind === "sloof" || b.kind === "balok_induk")
         .map((b) => (
@@ -395,7 +457,6 @@ function StrukturPlanSvg({ derived, struct }: { derived: DerivedProjectModel; st
           />
         ))}
 
-      {/* Foundations & Columns */}
       {struct.foundations.map((f) => (
         <rect
           key={f.id}

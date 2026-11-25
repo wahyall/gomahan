@@ -65,7 +65,7 @@ export default function HomePage() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Load latest IndexedDB autosave post-mount (handles v1 legacy saves safely without crashing or corrupting data)
+  // Load latest IndexedDB autosave post-mount
   useEffect(() => {
     let active = true;
     loadLatestProject()
@@ -128,7 +128,7 @@ export default function HomePage() {
     return () => clearInterval(id);
   }, [captureSnapshot]);
 
-  // Global studio keyboard shortcuts (Ctrl+Z, Ctrl+Shift+Z, Shift+B Build Stub, Shift+V Walk Stub, Esc)
+  // Global studio keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -244,7 +244,7 @@ export default function HomePage() {
   const isSimSplit = SIM_SPLIT_WORKSPACES.includes(workspace);
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+    <div className="flex h-dvh min-h-[100dvh] w-screen flex-col overflow-hidden bg-background text-foreground">
       <input
         ref={fileInputRef}
         type="file"
@@ -263,13 +263,13 @@ export default function HomePage() {
 
       {/* Mobile switcher inside split simulation workspaces */}
       {isSimSplit && (
-        <div className="no-print flex shrink-0 items-center gap-1 border-b border-border bg-[#191c21] px-3 py-1.5 lg:hidden">
+        <div className="no-print flex shrink-0 items-center gap-1.5 border-b border-border bg-[#15181e] px-3 py-1.5 lg:hidden">
           <button
             type="button"
             onClick={() => setMobileSimTab("panel")}
             className={cn(
-              "flex flex-1 items-center justify-center gap-1.5 rounded py-1 text-xs font-semibold",
-              mobileSimTab === "panel" ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground",
+              "flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition",
+              mobileSimTab === "panel" ? "bg-[#f2efe8] text-[#14171c]" : "bg-card text-muted-foreground",
             )}
           >
             <SlidersHorizontal className="h-3.5 w-3.5" /> Panel Analisis
@@ -278,8 +278,8 @@ export default function HomePage() {
             type="button"
             onClick={() => setMobileSimTab("3d")}
             className={cn(
-              "flex flex-1 items-center justify-center gap-1.5 rounded py-1 text-xs font-semibold",
-              mobileSimTab === "3d" ? "bg-primary text-primary-foreground" : "bg-card text-muted-foreground",
+              "flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition",
+              mobileSimTab === "3d" ? "bg-[#f2efe8] text-[#14171c]" : "bg-card text-muted-foreground",
             )}
           >
             <Eye className="h-3.5 w-3.5" /> Tampilan 3D Live
@@ -289,16 +289,14 @@ export default function HomePage() {
 
       {/* Main Studio Shell */}
       <main className="relative flex min-h-0 flex-1 overflow-hidden">
-        {/* New Sims 4-inspired Unified Single-Source Build Mode + Phase 0 Walk Stub */}
         {isBuildStub && (
           <BuildWorkspace
             derived={derived}
             struct={struct}
             lighting={lighting}
             airflow={airflow}
-            onExportJson={handleExportJson}
-            onImportJson={handleImportJson}
-            onSaveSnapshot={handleSaveSnapshot}
+            buildSniOpen={buildSniOpen}
+            onToggleBuildSni={() => setBuildSniOpen((v) => !v)}
           />
         )}
         {isWalkStub && <WalkWorkspace derived={derived} struct={struct} />}
@@ -325,25 +323,11 @@ export default function HomePage() {
           </section>
         )}
 
-        {/* Optional SNI / Brick Inspector Drawer Toggle inside Build Mode */}
-        {isBuildStub && (
-          <button
-            type="button"
-            onClick={() => setBuildSniOpen((v) => !v)}
-            className="no-print absolute left-2.5 top-[46px] z-20 flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#1a1f27]/92 px-2.5 py-1.5 text-[11px] font-semibold text-foreground shadow-lg backdrop-blur-md hover:border-primary/60 sm:top-2"
-            title="Buka / Tutup Panel Sistem Arsitektur SNI & Custom Ukuran Bata"
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
-            <span className="hidden sm:inline">{buildSniOpen ? "Tutup Panel SNI" : "Data SNI & Bata"}</span>
-            <span className="sm:hidden">SNI</span>
-          </button>
-        )}
-
-        {/* Right Dock: Outliner + Inspector when opened in Build Mode (responsive desktop + tablet/mobile drawer) */}
+        {/* Right Dock: Outliner + Inspector when opened in Build Mode */}
         {isBuildStub && buildSniOpen && (
-          <aside className="no-print absolute bottom-0 right-0 top-0 z-30 flex w-[300px] shrink-0 flex-col border-l border-border bg-[#181a1f]/98 shadow-2xl backdrop-blur-md lg:static lg:z-auto lg:w-[320px] lg:shadow-none xl:w-[348px]">
-            <div className="flex h-[38%] min-h-[180px] flex-col">
-              <OutlinerPanel derived={derived} struct={struct} />
+          <aside className="no-print absolute bottom-0 right-0 top-0 z-30 flex w-[310px] shrink-0 flex-col border-l border-border bg-[#14181f]/98 shadow-2xl backdrop-blur-xl lg:static lg:z-auto lg:w-[332px] lg:shadow-none xl:w-[356px]">
+            <div className="flex h-[36%] min-h-[175px] flex-col">
+              <OutlinerPanel derived={derived} struct={struct} onCloseDrawer={() => setBuildSniOpen(false)} />
             </div>
             <div className="flex min-h-0 flex-1 flex-col">
               <InspectorPanel derived={derived} />
@@ -351,11 +335,11 @@ export default function HomePage() {
           </aside>
         )}
 
-        {/* Analytical Split Panel (Structure / Lighting / Airflow / Flood) */}
+        {/* Analytical Split Panel (container-queried so controls never squeeze into narrow cols!) */}
         {isSimSplit && (
           <aside
             className={cn(
-              "min-h-0 w-full shrink-0 flex-col border-l border-border bg-background lg:flex lg:w-[490px] xl:w-[560px]",
+              "@container min-h-0 w-full shrink-0 flex-col border-l border-border bg-background lg:flex lg:w-[500px] xl:w-[570px] 2xl:w-[630px]",
               mobileSimTab === "panel" ? "flex" : "hidden lg:flex",
             )}
           >
@@ -366,7 +350,7 @@ export default function HomePage() {
           </aside>
         )}
 
-        {/* Full-Width Engineering / Business / Site Workspaces */}
+        {/* Full-Width Workspaces */}
         {workspace === "drawings" && <DrawingsWorkspace derived={derived} struct={struct} />}
         {workspace === "rab" && <RabWorkspace derived={derived} rab={rab} />}
         {workspace === "timeline" && <TimelineWorkspace schedule={schedule} />}
@@ -397,7 +381,7 @@ export default function HomePage() {
       {toast && (
         <div
           role="status"
-          className="no-print fixed bottom-10 right-4 z-50 flex items-center gap-2 rounded-lg border border-primary/40 bg-[#1a1d24]/95 px-3.5 py-2 text-xs font-medium text-foreground shadow-xl backdrop-blur"
+          className="studio-glass no-print fixed bottom-10 right-4 z-50 flex items-center gap-2 rounded-xl border-primary/40 px-3.5 py-2 text-xs font-medium text-foreground shadow-xl"
         >
           <span>{toast}</span>
           <button type="button" onClick={() => setToast(null)} className="text-muted-foreground hover:text-foreground">

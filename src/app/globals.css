@@ -25,25 +25,25 @@
 }
 
 :root {
-  --radius: 0.375rem;
-  --background: #16181c;
-  --foreground: #f2efe9;
-  --card: #1d2025;
-  --card-foreground: #f2efe9;
-  --popover: #23272d;
-  --popover-foreground: #f2efe9;
-  --primary: #df8949;
-  --primary-foreground: #1b1108;
-  --secondary: #262a31;
-  --secondary-foreground: #e5e2dc;
-  --muted: #22252b;
-  --muted-foreground: #98a0ab;
-  --accent: #2e333c;
-  --accent-foreground: #f8f6f2;
+  --radius: 0.5rem;
+  --background: #111418;
+  --foreground: #f2efe8;
+  --card: #171b22;
+  --card-foreground: #f2efe8;
+  --popover: #1e232c;
+  --popover-foreground: #f2efe8;
+  --primary: #e28a48;
+  --primary-foreground: #191008;
+  --secondary: #222731;
+  --secondary-foreground: #e6e2da;
+  --muted: #1c2028;
+  --muted-foreground: #969fab;
+  --accent: #292f3b;
+  --accent-foreground: #f7f4ee;
   --destructive: #ef5350;
-  --border: #2f343d;
-  --input: #343a44;
-  --ring: #df8949;
+  --border: rgba(242, 239, 232, 0.09);
+  --input: rgba(242, 239, 232, 0.14);
+  --ring: #e28a48;
 }
 
 @layer base {
@@ -52,28 +52,94 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #3d434e transparent;
+  scrollbar-color: rgba(150, 159, 171, 0.28) transparent;
 }
 ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3d434e;
-  border-radius: 4px;
+  background: rgba(150, 159, 171, 0.26);
+  border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #525a67;
+  background: rgba(150, 159, 171, 0.44);
 }
 
 canvas.viewport-canvas {
   outline: none;
   display: block;
+}
+
+/* Custom sleek architectural studio range input */
+input[type="range"].studio-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  outline: none;
+}
+input[type="range"].studio-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 9999px;
+  background: var(--studio-accent, #e28a48);
+  border: 2px solid #f2efe8;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 140ms ease;
+}
+input[type="range"].studio-range:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+  box-shadow: 0 0 0 4px rgba(226, 138, 72, 0.2);
+}
+input[type="range"].studio-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgba(226, 138, 72, 0.35);
+}
+input[type="range"].studio-range::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 9999px;
+  background: var(--studio-accent, #e28a48);
+  border: 2px solid #f2efe8;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* Studio Frosted Glass Surface with inset top rim light */
+.studio-glass {
+  background: linear-gradient(165deg, rgba(28, 33, 42, 0.88) 0%, rgba(19, 23, 29, 0.92) 100%);
+  border: 1px solid rgba(242, 239, 232, 0.11);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 4px 12px -2px rgba(0, 0, 0, 0.38),
+    0 14px 28px -8px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(16px) saturate(135%);
+  -webkit-backdrop-filter: blur(16px) saturate(135%);
+}
+
+.studio-surface {
+  background: linear-gradient(180deg, rgba(28, 32, 40, 0.98) 0%, rgba(22, 26, 33, 0.98) 100%);
+  border: 1px solid rgba(242, 239, 232, 0.085);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 1px 2px rgba(0, 0, 0, 0.24),
+    0 6px 16px -4px rgba(0, 0, 0, 0.25);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 @layer base {
@@ -84,17 +150,6 @@ canvas.viewport-canvas {
   [tabindex]:focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
   }
 }
 
@@ -110,6 +165,14 @@ canvas.viewport-canvas {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .studio-glass {
+    background: #171b22;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 

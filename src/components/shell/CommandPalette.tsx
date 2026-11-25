@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
-import { Search, X } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { CornerDownLeft, Search, X } from "lucide-react";
 
 interface ActionItem {
   id: string;
   label: string;
   category: string;
+  shortcut?: string;
   run: () => void;
 }
 
@@ -18,13 +20,20 @@ export function CommandPalette() {
   const setBrickPreset = useStudioStore((s) => s.setBrickPreset);
   const patchView = useStudioStore((s) => s.patchView);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
+
   const [query, setQuery] = useState("");
+  const [selectedIndex, setSelectedIndex] = useState(0);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setOpen(!useStudioStore.getState().commandPaletteOpen);
+        const nextOpen = !useStudioStore.getState().commandPaletteOpen;
+        setOpen(nextOpen);
+        if (nextOpen) {
+          setQuery("");
+          setSelectedIndex(0);
+        }
       } else if (e.key === "Escape" && useStudioStore.getState().commandPaletteOpen) {
         setOpen(false);
       }
@@ -34,79 +43,156 @@ export function CommandPalette() {
   }, [setOpen]);
 
   const actions = useMemo<ActionItem[]>(() => {
-    const ws: [WorkspaceId, string][] = [
-      ["build", "Buka Build Mode Baru (Stub Fase 0)"],
-      ["walk", "Buka Walk Mode Realistis (Stub Fase 0)"],
+    const ws: [WorkspaceId, string, string?][] = [
+      ["build", "Buka Build Mode 3D", "Shift+B"],
+      ["walk", "Buka Walk Mode Realistis", "Shift+V"],
       ["structure", "Buka Analisis Struktur SNI & Besi BBS"],
       ["lighting", "Buka Simulasi Pencahayaan & Matahari"],
       ["airflow", "Buka Simulasi Sirkulasi Udara & AC"],
       ["flood", "Buka Simulasi Hujan Deras & Banjir"],
-      ["drawings", "Buka Gambar Kerja 2D (Denah/Potongan/MEP)"],
+      ["drawings", "Buka Gambar Kerja 2D (Denah / Potongan / MEP)"],
       ["rab", "Buka RAB & Harga Satuan Surabaya"],
       ["timeline", "Buka Jadwal Gantt & S-Curve Cash Flow"],
-      ["deliver", "Buka Export Paket Kontraktor (PDF/Excel/ZIP)"],
       ["site", "Buka Mode Lapangan Mandor (Site Mode)"],
+      ["deliver", "Buka Ekspor Paket Kontraktor (PDF / Excel / ZIP)"],
       ["guide", "Buka Panduan Standar Arsitektur Indonesia"],
     ];
 
     return [
-      ...ws.map(([id, label]) => ({
+      ...ws.map(([id, label, shortcut]) => ({
         id: `ws-${id}`,
         label,
-        category: "Navigasi",
+        category: "Ruang Kerja",
+        shortcut,
         run: () => setWorkspace(id),
       })),
       { id: "brick-hebel", label: "Ganti Dinding ke Bata Putih / Hebel AAC", category: "Material", run: () => setBrickPreset("hebel") },
       { id: "brick-merah", label: "Ganti Dinding ke Bata Merah SNI", category: "Material", run: () => setBrickPreset("merah") },
       { id: "brick-custom", label: "Gunakan Ukuran Bata Custom", category: "Material", run: () => setBrickPreset("custom") },
-      { id: "explode", label: "Toggle Exploded View (Bongkar Granular)", category: "Viewport", run: () => patchView({ explode: useStudioStore.getState().view.explode > 0.1 ? 0 : 1 }) },
-      { id: "xray-rebar", label: "Toggle X-Ray Tulangan Besi Struktur", category: "Viewport", run: () => patchView({ xrayRebar: !useStudioStore.getState().view.xrayRebar }) },
-      { id: "flood-60", label: "Uji Simulasi Banjir 60 cm + Hujan Lebat", category: "Simulasi", run: () => { setWorkspace("flood"); patchSimulation({ floodDepthCm: 60, rainIntensityMmH: 85 }); } },
-      { id: "night-lights", label: "Pratinjau Suasana Malam Hari (19:30)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 19.5 }) },
-      { id: "noon-sun", label: "Pratinjau Matahari Siang Hari (12:00)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 12 }) },
+      {
+        id: "explode",
+        label: "Toggle Exploded View (Bongkar Granular)",
+        category: "Viewport",
+        run: () => patchView({ explode: useStudioStore.getState().view.explode > 0.1 ? 0 : 1 }),
+      },
+      {
+        id: "xray-rebar",
+        label: "Toggle X-Ray Tulangan Besi Struktur",
+        category: "Viewport",
+        run: () => patchView({ xrayRebar: !useStudioStore.getState().view.xrayRebar }),
+      },
+      {
+        id: "flood-60",
+        label: "Uji Simulasi Banjir 60 cm + Hujan Lebat",
+        category: "Simulasi",
+        run: () => {
+          setWorkspace("flood");
+          patchSimulation({ floodDepthCm: 60, rainIntensityMmH: 85 });
+        },
+      },
+      { id: "night-lights", label: "Pratinjau Suasana Malam Hari (19:30 WIB)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 19.5 }) },
+      { id: "noon-sun", label: "Pratinjau Matahari Siang Hari (12:00 WIB)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 12 }) },
     ];
   }, [patchSimulation, patchView, setBrickPreset, setWorkspace]);
 
-  if (!open) return null;
-
-  const filtered = actions.filter(
-    (a) => a.label.toLowerCase().includes(query.toLowerCase()) || a.category.toLowerCase().includes(query.toLowerCase()),
+  const filtered = useMemo(
+    () =>
+      actions.filter(
+        (a) => a.label.toLowerCase().includes(query.toLowerCase()) || a.category.toLowerCase().includes(query.toLowerCase()),
+      ),
+    [actions, query],
   );
 
+  if (!open) return null;
+
+  const clampedIndex = filtered.length > 0 ? Math.min(selectedIndex, filtered.length - 1) : 0;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/65 pt-20 backdrop-blur-sm" onClick={() => setOpen(false)}>
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/65 px-4 pt-16 backdrop-blur-sm sm:pt-24"
+      onClick={() => setOpen(false)}
+    >
       <div
-        className="w-full max-w-lg overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        role="dialog"
+        aria-label="Command Palette"
+        className="studio-glass w-full max-w-lg overflow-hidden rounded-2xl shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
-          <Search className="h-4 w-4 text-primary" />
+        <div className="flex items-center gap-2.5 border-b border-white/[0.08] px-3.5 py-3">
+          <Search className="h-4 w-4 shrink-0 text-primary" />
           <input
             autoFocus
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ketik perintah, material, simulasi, atau ruang kerja..."
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSelectedIndex(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setSelectedIndex((i) => Math.min(filtered.length - 1, i + 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setSelectedIndex((i) => Math.max(0, i - 1));
+              } else if (e.key === "Enter" && filtered[clampedIndex]) {
+                e.preventDefault();
+                filtered[clampedIndex]!.run();
+                setOpen(false);
+              }
+            }}
+            placeholder="Cari ruang kerja, material bata, atau simulasi..."
             className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
           />
-          <button type="button" onClick={() => setOpen(false)} className="text-muted-foreground hover:text-foreground">
+          <button
+            type="button"
+            aria-label="Tutup pencarian"
+            onClick={() => setOpen(false)}
+            className="rounded-md p-1 text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+          >
             <X className="h-4 w-4" />
           </button>
         </div>
+
         <div className="max-h-80 overflow-y-auto p-1.5">
-          {filtered.map((a) => (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => {
-                a.run();
-                setOpen(false);
-              }}
-              className="flex w-full items-center justify-between rounded px-2.5 py-2 text-left text-xs hover:bg-accent"
-            >
-              <span className="font-medium text-foreground">{a.label}</span>
-              <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">{a.category}</span>
-            </button>
-          ))}
+          {filtered.length === 0 ? (
+            <div className="px-3 py-8 text-center text-xs text-muted-foreground">
+              Tidak ditemukan perintah yang cocok dengan &ldquo;{query}&rdquo;.
+            </div>
+          ) : (
+            filtered.map((a, idx) => {
+              const active = idx === clampedIndex;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  onMouseEnter={() => setSelectedIndex(idx)}
+                  onClick={() => {
+                    a.run();
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-xs transition-colors",
+                    active ? "bg-primary/15 text-foreground" : "text-foreground/85 hover:bg-white/[0.06]",
+                  )}
+                >
+                  <div className="min-w-0 truncate font-medium">{a.label}</div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {a.shortcut && (
+                      <kbd className="rounded bg-black/35 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{a.shortcut}</kbd>
+                    )}
+                    <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-muted-foreground">{a.category}</span>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <div className="flex items-center justify-between border-t border-white/[0.08] bg-black/20 px-3.5 py-2 text-[10px] text-muted-foreground">
+          <span>Gunakan ↑ ↓ untuk memilih</span>
+          <span className="flex items-center gap-1">
+            <CornerDownLeft className="h-3 w-3" /> Enter buka · Esc tutup
+          </span>
         </div>
       </div>
     </div>
