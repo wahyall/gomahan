@@ -216,6 +216,25 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
   const [helpOpen, setHelpOpen] = useState(false);
   const [catalogCollapsed, setCatalogCollapsed] = useState(false);
 
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("rumah_studio_onboarding_seen_v2") !== "1") {
+        queueMicrotask(() => setHelpOpen(true));
+      }
+    } catch {
+      // ignore private storage restrictions
+    }
+  }, []);
+
+  const dismissOnboarding = useCallback(() => {
+    setHelpOpen(false);
+    try {
+      window.localStorage.setItem("rumah_studio_onboarding_seen_v2", "1");
+    } catch {
+      // ignore private storage restrictions
+    }
+  }, []);
+
   const pastCount = useStudioStore.temporal.getState().pastStates.length;
   const futureCount = useStudioStore.temporal.getState().futureStates.length;
 
@@ -884,21 +903,50 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
       )}
 
       {helpOpen && (
-        <div className="pointer-events-auto absolute left-3 top-14 z-30 w-72 rounded-xl border border-white/15 bg-[#181d25]/95 p-3.5 text-xs shadow-2xl backdrop-blur-md">
-          <div className="flex items-center justify-between">
-            <span className="font-bold text-foreground">Kontrol Kamera & Build Mode</span>
-            <button type="button" onClick={() => setHelpOpen(false)} className="text-muted-foreground hover:text-foreground">✕</button>
+        <div
+          role="dialog"
+          aria-label="Panduan Cepat Build & Walk Mode"
+          className="pointer-events-auto absolute left-2.5 top-14 z-30 w-[calc(100vw-20px)] max-w-md rounded-xl border border-white/15 bg-[#181d25]/96 p-3.5 text-xs shadow-2xl backdrop-blur-md"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-primary">Panduan Cepat 1 Layar</div>
+              <span className="font-bold text-foreground">Kontrol Build Mode &amp; Walk Mode</span>
+            </div>
+            <button
+              type="button"
+              onClick={dismissOnboarding}
+              className="rounded-md border border-white/15 px-2 py-1 text-[11px] font-semibold text-foreground hover:bg-white/10"
+            >
+              Mulai Desain
+            </button>
           </div>
-          <ul className="mt-2 space-y-1.5 text-[11px] text-muted-foreground">
-            <li><strong className="text-foreground">Klik Kanan + Seret</strong>: Putar kamera</li>
-            <li><strong className="text-foreground">Q / E</strong>: Putar sudut kamera</li>
-            <li><strong className="text-foreground">WASD / Panah / Tengah</strong>: Geser kamera</li>
-            <li><strong className="text-foreground">Scroll Mouse</strong>: Zoom ke arah kursor</li>
-            <li><strong className="text-foreground">PageUp / PageDown</strong>: Pindah lantai (LT1 / LT2 / Atap)</li>
-            <li><strong className="text-foreground">Home / End</strong>: Mode Dinding (Penuh / Cutaway / Rendah)</li>
-            <li><strong className="text-foreground">K / I / R / Del</strong>: Hapus / Pipet / Putar / Hapus Terpilih</li>
-            <li><strong className="text-foreground">Alt</strong>: Bebas grid saat tarik dinding / pasang furnitur</li>
-          </ul>
+          <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <ul className="space-y-1 text-[10.5px] text-muted-foreground">
+              <li className="font-semibold text-emerald-300">Build Mode</li>
+              <li><strong className="text-foreground">Klik Kanan / Q·E</strong>: Putar kamera</li>
+              <li><strong className="text-foreground">WASD / Tengah</strong>: Geser kamera</li>
+              <li><strong className="text-foreground">Scroll</strong>: Zoom ke arah kursor</li>
+              <li><strong className="text-foreground">PgUp / PgDn</strong>: Lantai (LT1/LT2/Atap)</li>
+              <li><strong className="text-foreground">Home / End</strong>: Dinding (Penuh/Cut/Rendah)</li>
+              <li><strong className="text-foreground">R / K / I / Alt</strong>: Putar / Hapus / Pipet / Bebas Grid</li>
+            </ul>
+            <ul className="space-y-1 text-[10.5px] text-muted-foreground">
+              <li className="font-semibold text-teal-300">Walk Mode Realistis</li>
+              <li><strong className="text-foreground">Shift + V / Klik Tombol</strong>: Masuk Walk</li>
+              <li><strong className="text-foreground">WASD + Shift</strong>: Berjalan &amp; Lari</li>
+              <li><strong className="text-foreground">Klik Kanvas / Seret</strong>: Lihat 360°</li>
+              <li><strong className="text-foreground">V</strong>: 1st Person ↔ 3rd Person</li>
+              <li><strong className="text-foreground">E</strong>: Buka / Tutup pintu terdekat</li>
+              <li><strong className="text-foreground">F3 / Esc</strong>: Debug Collision / Kembali Build</li>
+            </ul>
+          </div>
+          <div className="mt-2.5 flex items-center justify-between border-t border-white/10 pt-2 text-[10.5px] text-muted-foreground">
+            <span>Denah asli 5×17 m selalu tersinkron ke semua simulasi.</span>
+            <button type="button" onClick={dismissOnboarding} className="font-semibold text-primary hover:underline">
+              Jangan tampilkan lagi
+            </button>
+          </div>
         </div>
       )}
 

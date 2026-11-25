@@ -212,13 +212,13 @@ export function WalkWorkspace({ derived, struct }: WalkWorkspaceProps) {
         </div>
       </div>
 
-      {/* Interactive Door Prompt near Doorway */}
+      {/* Interactive Door Prompt near Doorway (kept above mobile D-pad) */}
       {nearDoor && (
-        <div className="absolute bottom-20 left-1/2 z-20 -translate-x-1/2 sm:bottom-14">
+        <div className="absolute bottom-36 left-4 z-20 sm:bottom-14 sm:left-1/2 sm:-translate-x-1/2">
           <button
             type="button"
             onClick={() => sceneRef.current?.triggerInteractNearestDoor()}
-            className="flex min-h-9 items-center gap-2 rounded-full border border-teal-400/50 bg-[#141c24]/92 px-4 py-1.5 text-xs font-semibold text-teal-100 shadow-xl backdrop-blur-md hover:bg-teal-500/25"
+            className="flex min-h-9 items-center gap-2 rounded-full border border-teal-400/50 bg-[#141c24]/92 px-3.5 py-1.5 text-xs font-semibold text-teal-100 shadow-xl backdrop-blur-md hover:bg-teal-500/25"
           >
             <DoorOpen className="h-3.5 w-3.5 text-teal-300" aria-hidden />
             <span>
@@ -290,6 +290,32 @@ export function WalkWorkspace({ derived, struct }: WalkWorkspaceProps) {
         >
           <ArrowRight className="h-4 w-4" />
         </TouchPadBtn>
+      </div>
+
+      {/* Mobile Touch Sprint & Quick Look Controls */}
+      <div className="absolute bottom-5 right-4 z-20 flex items-center gap-2 sm:hidden">
+        <button
+          type="button"
+          onPointerDown={() => {
+            padRef.current.sprint = true;
+            pushPad();
+          }}
+          onPointerUp={() => {
+            padRef.current.sprint = false;
+            pushPad();
+          }}
+          onPointerCancel={() => {
+            padRef.current.sprint = false;
+            pushPad();
+          }}
+          onPointerLeave={() => {
+            padRef.current.sprint = false;
+            pushPad();
+          }}
+          className="flex h-11 items-center gap-1.5 rounded-lg border border-white/20 bg-[#151a22]/85 px-3 text-xs font-semibold text-foreground active:bg-primary/40"
+        >
+          Lari
+        </button>
       </div>
 
       {/* Bottom Desktop Key Legend Strip */}

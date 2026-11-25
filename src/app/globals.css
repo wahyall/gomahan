@@ -87,6 +87,17 @@ canvas.viewport-canvas {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 .safe-pb {
   padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
 }
