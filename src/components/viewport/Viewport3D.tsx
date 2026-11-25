@@ -69,6 +69,7 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
   const [webglStatus, setWebglStatus] = useState<WebGLStatus>("ok");
   const [sceneStats, setSceneStats] = useState<SceneStatsSnapshot | null>(null);
   const [qualityOverride, setQualityOverride] = useState<QualityTier | "auto">("auto");
+  const [showControlHint, setShowControlHint] = useState(true);
 
   const view = useStudioStore((s) => s.view);
   const patchView = useStudioStore((s) => s.patchView);
@@ -460,23 +461,35 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
             {/* Top-Right Interactive View Cube (never overlaps left HUD!) */}
             <div className="pointer-events-auto flex shrink-0 flex-col items-center gap-1">
               <div className="rounded border border-white/12 bg-black/65 p-1 backdrop-blur-sm">
-                <svg width="52" height="52" viewBox="0 0 62 62" className="sm:h-[58px] sm:w-[58px]">
+                <svg width="52" height="52" viewBox="0 0 62 62" className="sm:h-[58px] sm:w-[58px]" aria-label="Kubus orientasi kamera 3D">
                   <polygon
                     points="31,7 52,17.5 31,28 10,17.5"
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Kamera Atas"
                     onClick={() => setPreset("top")}
-                    className="cursor-pointer fill-stone-600/60 stroke-stone-300/60 hover:fill-primary/70"
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setPreset("top")}
+                    className="cursor-pointer fill-stone-600/60 stroke-stone-300/60 hover:fill-primary/70 focus:outline-none focus:fill-primary"
                   />
                   <text x="31" y="21" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">ATAS</text>
                   <polygon
                     points="10,17.5 31,28 31,53 10,42.5"
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Kamera Depan"
                     onClick={() => setPreset("front")}
-                    className="cursor-pointer fill-stone-700/70 stroke-stone-300/60 hover:fill-primary/70"
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setPreset("front")}
+                    className="cursor-pointer fill-stone-700/70 stroke-stone-300/60 hover:fill-primary/70 focus:outline-none focus:fill-primary"
                   />
                   <text x="20.5" y="39" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">DEPAN</text>
                   <polygon
                     points="52,17.5 52,42.5 31,53 31,28"
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Kamera Samping"
                     onClick={() => setPreset("side")}
-                    className="cursor-pointer fill-stone-800/80 stroke-stone-300/60 hover:fill-primary/70"
+                    onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setPreset("side")}
+                    className="cursor-pointer fill-stone-800/80 stroke-stone-300/60 hover:fill-primary/70 focus:outline-none focus:fill-primary"
                   />
                   <text x="41.5" y="39" textAnchor="middle" fontSize="6.5" className="pointer-events-none fill-stone-100">SAMP</text>
                 </svg>
@@ -491,6 +504,28 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
               </button>
             </div>
           </div>
+
+          {/* Initial WebGL Scene Loading Badge (disappears as soon as first stats arrive) */}
+          {webglStatus === "ok" && !sceneStats && (
+            <div className="pointer-events-none absolute bottom-12 right-3 z-10 rounded border border-white/15 bg-black/75 px-3 py-1.5 text-[11px] text-stone-200 backdrop-blur-sm">
+              Menyiapkan mesin render 3D &amp; tekstur PBR...
+            </div>
+          )}
+
+          {/* Dismissible Control Hint Pill (desktop/tablet onboarding) */}
+          {showControlHint && !selected && !view.beforeAfterEnabled && (
+            <div className="pointer-events-auto absolute bottom-2.5 right-2.5 hidden items-center gap-2 rounded border border-white/10 bg-black/65 px-2.5 py-1 text-[10px] text-stone-300 backdrop-blur-sm lg:flex">
+              <span>Seret: Putar · Shift/Kanan: Geser · Scroll: Zoom · Klik furnitur: Geser Sims 4</span>
+              <button
+                type="button"
+                aria-label="Tutup panduan kontrol"
+                onClick={() => setShowControlHint(false)}
+                className="rounded px-1 text-stone-400 hover:bg-white/10 hover:text-white"
+              >
+                ×
+              </button>
+            </div>
+          )}
 
           {/* Before / After Baseline Comparison Overlay */}
           {view.beforeAfterEnabled && (

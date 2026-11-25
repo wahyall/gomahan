@@ -309,8 +309,13 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
           <div className="truncate text-[13px] font-bold text-foreground">{info.label}</div>
           <div className="text-[10px] uppercase tracking-wider text-primary">{info.group}</div>
         </div>
-        <button type="button" onClick={() => setSelected(null)} className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground">
-          <X className="h-3.5 w-3.5" />
+        <button
+          type="button"
+          aria-label="Tutup panel detail elemen"
+          onClick={() => setSelected(null)}
+          className="flex min-h-7 min-w-7 items-center justify-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" aria-hidden />
         </button>
       </div>
 
