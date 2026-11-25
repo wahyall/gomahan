@@ -1,5 +1,33 @@
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
-import type { RoomGeometryMetrics } from "@/lib/geometry/rooms";
+import { pointInPolygon, type RoomGeometryMetrics } from "@/lib/geometry/rooms";
+import type { Wall } from "@/lib/model/types";
+
+function segmentBlockedByWalls(ax: number, az: number, bx: number, bz: number, walls: Wall[]): boolean {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const segLen = Math.hypot(dx, dz);
+  if (segLen < 0.12) return false;
+  for (const w of walls) {
+    if (w.height < 1.6) continue;
+    const wx = w.end.x - w.start.x;
+    const wz = w.end.z - w.start.z;
+    const wLen = Math.hypot(wx, wz);
+    if (wLen < 0.1) continue;
+    const denom = dx * wz - dz * wx;
+    if (Math.abs(denom) < 1e-6) continue;
+    const t = ((w.start.x - ax) * wz - (w.start.z - az) * wx) / denom;
+    const u = ((w.start.x - ax) * dz - (w.start.z - az) * dx) / denom;
+    if (t > 0.06 && t < 0.94 && u > 0.02 && u < 0.98) {
+      // Check if an open door / window / arch exists at u * wLen
+      const hitAlong = u * wLen;
+      const passesOpening = w.openings.some(
+        (op) => Math.abs(hitAlong - op.offset) <= op.width * 0.5 && (op.kind === "arch" || op.kind === "window" || op.openPct > 15),
+      );
+      if (!passesOpening) return true;
+    }
+  }
+  return false;
+}
 
 export interface SolarPosition {
   altitudeDeg: number;
@@ -182,17 +210,19 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
           }
         }
 
-        // Artificial fixtures on this level
+        // Artificial fixtures on this level (wall-occluded so lamps illuminate their own room without bleeding through brick walls)
         for (const l of lv.lights) {
           if (!l.on || l.dimmer <= 0) continue;
           const dHoriz = Math.hypot(px - l.position.x, pz - l.position.z);
-          const dVert = Math.max(0.8, l.position.y - 0.75); // workplane 0.75 m
+          if (dHoriz > 6.5) continue;
+          if (segmentBlockedByWalls(l.position.x, l.position.z, px, pz, lv.walls)) continue;
+          const dVert = Math.max(0.65, l.position.y - 0.75); // workplane 0.75 m
           const d3 = Math.hypot(dHoriz, dVert);
           const cosTheta = dVert / d3;
           const beamHalf = ((l.beamAngleDeg * 0.5) * Math.PI) / 180;
           const angle = Math.acos(Math.min(1, cosTheta));
-          const beamAtten = angle <= beamHalf ? 1.0 : Math.max(0.15, Math.exp(-Math.pow((angle - beamHalf) * 2.5, 2)));
-          lux += ((l.lumens * l.dimmer * cosTheta) / (Math.PI * d3 * d3)) * beamAtten * 1.45;
+          const beamAtten = angle <= beamHalf ? 1.0 : Math.max(0.18, Math.exp(-Math.pow((angle - beamHalf) * 2.2, 2)));
+          lux += ((l.lumens * l.dimmer * cosTheta) / (Math.PI * d3 * d3)) * beamAtten * 1.65;
         }
 
         grid[gz * gridW + gx] = Math.min(25000, lux);
@@ -213,22 +243,28 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
     let cnt = 0;
     for (let z = z0; z <= z1; z++) {
       for (let x = x0; x <= x1; x++) {
+        const cx = (x + 0.5) * 0.2;
+        const cz = (z + 0.5) * 0.2;
+        if (!pointInPolygon({ x: cx, z: cz }, rm.room.polygon)) continue;
         sum += grid[z * gridW + x] ?? 0;
         cnt++;
       }
     }
     const totalLux = cnt > 0 ? sum / cnt : 0;
 
-    // Split natural vs artificial estimate
+    // Split natural vs artificial estimate using true polygon containment (handles L-shaped rooms & wall-mounted lamps!)
     const lv = project.levels[rm.levelIndex]!;
     let artSum = 0;
     for (const l of lv.lights) {
       if (!l.on || l.dimmer <= 0) continue;
-      if (l.position.x >= minX - 0.5 && l.position.x <= maxX + 0.5 && l.position.z >= minZ - 0.5 && l.position.z <= maxZ + 0.5) {
-        artSum += (l.lumens * l.dimmer) / Math.max(3, rm.netAreaM2);
+      const inPoly = pointInPolygon({ x: l.position.x, z: l.position.z }, rm.room.polygon);
+      const nearBoundary = !inPoly && Math.hypot(l.position.x - rm.centroid.x, l.position.z - rm.centroid.z) <= 2.4 &&
+        !segmentBlockedByWalls(l.position.x, l.position.z, rm.centroid.x, rm.centroid.z, lv.walls);
+      if (inPoly || nearBoundary) {
+        artSum += (l.lumens * l.dimmer) / Math.max(2.5, rm.netAreaM2);
       }
     }
-    const artificialLux = Math.round(artSum * 0.72);
+    const artificialLux = Math.round(artSum * 0.78);
     const naturalLux = Math.max(0, Math.round(totalLux - artificialLux));
     const daylightFactorPct =
       solar.isDaylight && solar.skyIrradianceLux > 100

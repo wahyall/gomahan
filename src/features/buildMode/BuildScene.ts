@@ -22,11 +22,13 @@ import type {
 } from "@/features/buildMode/types";
 import { simsAudio } from "@/lib/audio/simsAudio";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
-import type { FurnitureItem, HvacUnit, LightFixture, Room, Stair, Wall } from "@/lib/model/types";
+import type { FurnitureItem, HvacType, HvacUnit, LightFixture, LightType, Room, Stair, Wall } from "@/lib/model/types";
+import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
+import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { createContactShadowTexture, mergeGeometryBatch } from "@/lib/scene/geometryHelpers";
 import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, type MaterialPalette } from "@/lib/scene/materials";
 import { buildProjectHouse, buildStaticNeighborhood, type WallCutawayRecord } from "@/lib/scene/projectHouseBuilder";
-import type { SelectionTarget } from "@/lib/store/useStudioStore";
+import type { SelectionTarget, ViewState } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 
 export interface BuildSceneStats {
@@ -54,13 +56,13 @@ export interface BuildSceneActions {
   onSetFloorTiles: (tiles: { levelIndex: number; gx: number; gz: number; materialId: string }[]) => void;
   onAddStair: (lv: 0 | 1, stair: Stair, voidPoly: { x: number; z: number }[]) => void;
   onAddFurniture: (lv: 0 | 1, item: FurnitureItem) => void;
-  onMoveFurniture: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }) => void;
+  onMoveFurniture: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }, rotationY?: number) => void;
   onDeleteFurniture: (lv: 0 | 1, id: string) => void;
   onAddHvac: (lv: 0 | 1, item: HvacUnit) => void;
-  onMoveHvac: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }) => void;
+  onMoveHvac: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }, rotationY?: number) => void;
   onDeleteHvac: (lv: 0 | 1, id: string) => void;
   onAddLight: (lv: 0 | 1, light: LightFixture) => void;
-  onMoveLight: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }) => void;
+  onMoveLight: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }, rotationY?: number) => void;
   onDeleteLight: (lv: 0 | 1, id: string) => void;
   onAddPool: (pool: { id: string; gx1: number; gz1: number; gx2: number; gz2: number; depth: number }) => void;
   onSetTerrainHeights: (heights: number[]) => void;
@@ -111,27 +113,43 @@ export class BuildScene {
   private readonly envGroup = new THREE.Group();
   private readonly neighborsGroup = new THREE.Group();
   private readonly houseContainer = new THREE.Group();
+  private readonly simGroup = new THREE.Group();
   private readonly overlayGroup = new THREE.Group();
   private readonly previewGroup = new THREE.Group();
   private readonly selectedRing: THREE.Mesh;
 
   private staticDisposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private dynResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+  private simResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private levelRoots: [THREE.Group, THREE.Group] | null = null;
   private lt2StructuralGroup: THREE.Group | null = null;
   private roofGroup: THREE.Group | null = null;
   private wallCutawayRecords: WallCutawayRecord[] = [];
   private animatedFans: THREE.Object3D[] = [];
+  private airParticlesMesh: THREE.InstancedMesh | null = null;
+  private airParticleStates: { x: number; y: number; z: number; lv: 0 | 1; life: number }[] = [];
 
   private gridMesh: THREE.LineSegments | null = null;
   private hoverTileMesh: THREE.Mesh | null = null;
 
   private derived: DerivedProjectModel | null = null;
   private struct: StructuralReport | null = null;
+  private lighting: LightingSimulationResult | null = null;
+  private airflow: AirflowSimulationResult | null = null;
+  private studioView: ViewState | null = null;
   private selected: SelectionTarget = null;
   private envKey = "";
   private buildSignature = "";
+  private simSignature = "";
   private lastCutawayYaw = Number.NaN;
+
+  private readonly _m4 = new THREE.Matrix4();
+  private readonly _q = new THREE.Quaternion();
+  private readonly _v1 = new THREE.Vector3();
+  private readonly _s1 = new THREE.Vector3(1, 1, 1);
+  private readonly _up = new THREE.Vector3(0, 1, 0);
+  private readonly _col = new THREE.Color();
+  private readonly _tmpNorm = new THREE.Vector3();
 
   private viewOpts: BuildViewOptions = {
     activeLevel: 0,
@@ -276,7 +294,7 @@ export class BuildScene {
     this.overlayGroup.add(this.hoverTileMesh);
     this.staticDisposables.push(hoverGeo, hoverMat);
 
-    this.scene.add(this.envGroup, this.neighborsGroup, this.houseContainer, this.overlayGroup, this.previewGroup, this.selectedRing);
+    this.scene.add(this.envGroup, this.neighborsGroup, this.houseContainer, this.simGroup, this.overlayGroup, this.previewGroup, this.selectedRing);
 
     this.handleResize();
     window.addEventListener("resize", this.onResizeBound);
@@ -308,6 +326,7 @@ export class BuildScene {
     this.cameraCtrl.dispose();
 
     for (const r of this.dynResources) r.dispose();
+    for (const r of this.simResources) r.dispose();
     for (const r of this.staticDisposables) r.dispose();
     this.validMat.dispose();
     this.invalidMat.dispose();
@@ -335,10 +354,20 @@ export class BuildScene {
     this.previewGroup.clear();
   }
 
-  public updateProjectData(derived: DerivedProjectModel, struct: StructuralReport, selected: SelectionTarget): void {
+  public updateProjectData(
+    derived: DerivedProjectModel,
+    struct: StructuralReport,
+    selected: SelectionTarget,
+    studioView?: ViewState,
+    lighting?: LightingSimulationResult,
+    airflow?: AirflowSimulationResult,
+  ): void {
     this.derived = derived;
     this.struct = struct;
     this.selected = selected;
+    if (studioView) this.studioView = studioView;
+    if (lighting) this.lighting = lighting;
+    if (airflow) this.airflow = airflow;
 
     const { project } = derived;
     const sim = project.simulation;
@@ -377,18 +406,53 @@ export class BuildScene {
       }
     }
 
+    const vFlags = this.studioView
+      ? {
+          sb: this.studioView.showBricks,
+          ss: this.studioView.showStructure,
+          sr: this.studioView.showRoof,
+          srk: this.studioView.showRangka,
+          sf: this.studioView.showFinishing,
+          xr: this.studioView.xrayRebar,
+          sa: this.studioView.showAir,
+          sl: this.studioView.showListrik,
+          hp: this.studioView.hiddenParts,
+        }
+      : null;
+
     const sig = JSON.stringify({
       u: project.updatedAt,
       sys: project.systems,
       peil: project.site.peil,
+      sp: project.structuralParams,
+      soil: project.site.soil,
+      fm: project.floodMitigation,
       lv: project.levels.map((l) => [l.walls, l.rooms, l.slabs, l.stairs, l.furniture, l.lights, l.hvac]),
       ext: project.buildExtras,
       brk: this.viewOpts.showBricksOverlay,
+      vf: vFlags,
     });
 
     if (sig !== this.buildSignature) {
       this.buildSignature = sig;
       this.rebuildFromProject(derived, struct);
+    }
+
+    const simSig = JSON.stringify({
+      u: project.updatedAt,
+      al: this.viewOpts.activeLevel,
+      lux: this.studioView?.showLuxHeatmap ?? false,
+      air: this.studioView?.showAirParticles ?? false,
+      hr: Math.round(sim.hourOfDay * 4),
+      ws: Math.round(sim.windSpeedMs * 10),
+      wd: Math.round(sim.windDirectionDeg),
+      at: Math.round(sim.ambientTempC * 2),
+      lg: project.levels.map((l) => l.lights.map((x) => `${x.id}:${x.on}:${x.lumens}:${x.position.x.toFixed(2)},${x.position.z.toFixed(2)}`)),
+      hv: project.levels.map((l) => l.hvac.map((x) => `${x.id}:${x.on}:${x.speedLevel}:${x.rotationY.toFixed(2)}:${x.position.x.toFixed(2)},${x.position.z.toFixed(2)}`)),
+    });
+    if (simSig !== this.simSignature) {
+      this.simSignature = simSig;
+      this.rebuildSimOverlays();
     }
 
     this.updateSelectionRing(derived, selected);
@@ -416,6 +480,7 @@ export class BuildScene {
       this.cameraCtrl.setTargetElevation(y);
       this.activeFloorPlane.constant = -y;
       this.rebuildGridOverlay();
+      this.rebuildSimOverlays();
     }
     this.applyLevelAndWallVisibility();
   }
@@ -436,17 +501,23 @@ export class BuildScene {
     this.dynResources = [];
     this.animatedFans = [];
 
+    const showBricksOverlay = this.viewOpts.showBricksOverlay;
+    const sv = this.studioView;
+    const showFinishing = showBricksOverlay ? false : (sv?.showFinishing ?? true);
+    // Only render 3D brick InstancedMesh in Build Mode when Bata overlay is active or plaster is hidden,
+    // so full-height bricks never block Sims-style wall cutaway when rotating the camera!
+    const showBricks = showBricksOverlay || (sv ? sv.showBricks && !showFinishing : false);
     const built = buildProjectHouse(derived, struct, this.palette, this.contactShadowMat, {
       stage: 0,
-      showBricks: this.viewOpts.showBricksOverlay,
-      showStructure: true,
-      showRoof: true,
-      showRangka: true,
-      showFinishing: true,
-      xrayRebar: false,
-      showAir: false,
-      showListrik: false,
-      hiddenParts: new Set(),
+      showBricks,
+      showStructure: sv?.showStructure ?? true,
+      showRoof: sv?.showRoof ?? true,
+      showRangka: sv?.showRangka ?? true,
+      showFinishing,
+      xrayRebar: sv?.xrayRebar ?? false,
+      showAir: sv?.showAir ?? false,
+      showListrik: sv?.showListrik ?? false,
+      hiddenParts: new Set(sv?.hiddenParts ?? []),
       activeLevelView: "all",
       supportWallCutaway: true,
     });
@@ -529,11 +600,6 @@ export class BuildScene {
   }
 
   private updateWallCutawayVisibility(force = false): void {
-    const yaw = this.cameraCtrl.getCurrentYaw();
-    if (!force && Math.abs(yaw - this.lastCutawayYaw) < 0.06) return;
-    this.lastCutawayYaw = yaw;
-
-    const active = Math.min(1, this.viewOpts.activeLevel);
     const camPos = this.cameraCtrl.camera.position;
     const lotCX = (this.derived?.project.site.width ?? 5) * 0.5;
     const lotCZ = (this.derived?.project.site.depth ?? 17) * 0.5;
@@ -542,6 +608,11 @@ export class BuildScene {
     const len = Math.hypot(dx, dz) || 1;
     const ux = dx / len;
     const uz = dz / len;
+    const viewAngle = Math.atan2(ux, uz);
+    if (!force && Math.abs(viewAngle - this.lastCutawayYaw) < 0.04) return;
+    this.lastCutawayYaw = viewAngle;
+
+    const active = Math.min(1, this.viewOpts.activeLevel);
 
     for (const ch of this.neighborsGroup.children) {
       if (this.viewOpts.activeLevel >= 2) {
@@ -615,7 +686,81 @@ export class BuildScene {
     return UNIFIED_BUILD_CATALOG.find((c) => c.id === this.viewOpts.selectedCatalogId) ?? UNIFIED_BUILD_CATALOG[0]!;
   }
 
-  private raycastHit(e: PointerEvent): { sel: NonNullable<SelectionTarget>; label: string; obj: THREE.Object3D } | null {
+  private clearSim(): void {
+    this.simGroup.clear();
+    this.airParticlesMesh = null;
+    this.airParticleStates = [];
+    for (const r of this.simResources) r.dispose();
+    this.simResources = [];
+  }
+
+  private rebuildSimOverlays(): void {
+    this.clearSim();
+    if (!this.derived || !this.studioView) return;
+    const { project } = this.derived;
+    const lt1Y = project.site.peil.floor1PeilM;
+    const lt2Y = lt1Y + (project.levels[0]?.height ?? 3.6);
+    const activeLv = this.viewOpts.activeLevel;
+
+    if (this.studioView.showLuxHeatmap && this.lighting) {
+      const lighting = this.lighting;
+      const makeHeatmapPlane = (grid: Float32Array, yPos: number) => {
+        const cv = document.createElement("canvas");
+        cv.width = lighting.gridWidth;
+        cv.height = lighting.gridDepth;
+        const ctx = cv.getContext("2d")!;
+        const img = ctx.createImageData(lighting.gridWidth, lighting.gridDepth);
+        for (let i = 0; i < grid.length; i++) {
+          const lux = grid[i] ?? 0;
+          const norm = Math.min(1, lux / 800);
+          const r = Math.round(norm < 0.5 ? 25 + norm * 180 : 115 + (norm - 0.5) * 280);
+          const g = Math.round(norm < 0.4 ? 40 + norm * 320 : 168 + (norm - 0.4) * 145);
+          const b = Math.round(norm < 0.35 ? 120 + norm * 260 : Math.max(40, 210 - (norm - 0.35) * 260));
+          img.data[i * 4] = Math.min(255, r);
+          img.data[i * 4 + 1] = Math.min(255, g);
+          img.data[i * 4 + 2] = Math.min(255, b);
+          img.data[i * 4 + 3] = 175;
+        }
+        ctx.putImageData(img, 0, 0);
+        const tex = new THREE.CanvasTexture(cv);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const geo = new THREE.PlaneGeometry(project.site.width, project.site.depth);
+        geo.rotateX(-Math.PI / 2);
+        const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(project.site.width * 0.5, yPos, project.site.depth * 0.5);
+        mesh.renderOrder = 500;
+        this.simGroup.add(mesh);
+        this.simResources.push(tex, geo, mat);
+      };
+      if (activeLv === 0 || activeLv === 2) makeHeatmapPlane(lighting.lt1LuxGrid, lt1Y + 0.045);
+      if (activeLv >= 1) makeHeatmapPlane(lighting.lt2LuxGrid, lt2Y + 0.045);
+    }
+
+    if (this.studioView.showAirParticles && this.airflow) {
+      const count = 320;
+      const geo = new THREE.ConeGeometry(0.032, 0.22, 6);
+      geo.rotateX(Math.PI / 2);
+      const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthWrite: false });
+      const im = new THREE.InstancedMesh(geo, mat, count);
+      im.renderOrder = 700;
+      this.airParticlesMesh = im;
+      this.airParticleStates = Array.from({ length: count }, (_, i) => {
+        const lv: 0 | 1 = activeLv === 0 ? 0 : activeLv === 1 ? 1 : i % 2 === 0 ? 0 : 1;
+        return {
+          x: Math.random() * (project.site.width - 0.2) + 0.1,
+          y: (lv === 0 ? lt1Y : lt2Y) + 0.8 + Math.random() * 1.7,
+          z: Math.random() * (project.site.depth - 0.4) + 0.2,
+          lv,
+          life: Math.random(),
+        };
+      });
+      this.simGroup.add(im);
+      this.simResources.push(geo, mat);
+    }
+  }
+
+  private raycastHit(e: PointerEvent, ignoreParts = true): { sel: NonNullable<SelectionTarget>; label: string; obj: THREE.Object3D } | null {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
@@ -635,12 +780,167 @@ export class BuildScene {
       cur = h.object;
       while (cur) {
         if (cur.userData?.sel) {
-          return { sel: cur.userData.sel as NonNullable<SelectionTarget>, label: String(cur.userData.label ?? "Elemen"), obj: cur };
+          const sel = cur.userData.sel as NonNullable<SelectionTarget>;
+          if (ignoreParts && sel.kind === "part") break;
+          return { sel, label: String(cur.userData.label ?? "Elemen"), obj: cur };
         }
         cur = cur.parent;
       }
     }
     return null;
+  }
+
+  private getMountKind(
+    tool: BuildToolId,
+    hvacType?: HvacType,
+    lightType?: LightType,
+  ): "wall" | "ceiling" | "surface" {
+    if (
+      (tool === "hvac" && (hvacType === "ac_split" || hvacType === "wall_fan" || hvacType === "exhaust_fan")) ||
+      (tool === "light" && lightType === "wall")
+    ) {
+      return "wall";
+    }
+    if (
+      (tool === "hvac" && hvacType === "ceiling_fan") ||
+      (tool === "light" && (lightType === "ceiling" || lightType === "pendant" || lightType === "spot" || lightType === "strip"))
+    ) {
+      return "ceiling";
+    }
+    return "surface";
+  }
+
+  private raycastSurfaceForPlacement(
+    e: PointerEvent,
+    lvIdx: 0 | 1,
+    mountKind: "wall" | "ceiling" | "surface",
+    wallOffset: number,
+    defaultElev: number,
+    excludeEntityId?: string,
+  ): { x: number; y: number; z: number; rotationY?: number; valid: boolean; surfaceLabel: string } {
+    if (!this.derived) return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Luar area" };
+    const project = this.derived.project;
+    const baseY = this.getActiveFloorY();
+    const lv = project.levels[lvIdx]!;
+
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+      this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.camera);
+    }
+
+    const targets: THREE.Object3D[] = [];
+    if (this.levelRoots) targets.push(this.levelRoots[lvIdx]);
+    if (lvIdx === 1 && this.lt2StructuralGroup && mountKind === "surface") targets.push(this.lt2StructuralGroup);
+
+    const hits = targets.length > 0 ? this.raycaster.intersectObjects(targets, true) : [];
+
+    const isVisibleAndNotExcluded = (obj: THREE.Object3D): { ok: boolean; selKind?: string } => {
+      let cur: THREE.Object3D | null = obj;
+      let selKind: string | undefined;
+      while (cur) {
+        if (!cur.visible) return { ok: false };
+        if (cur.userData?.sel) {
+          const s = cur.userData.sel as NonNullable<SelectionTarget>;
+          if (excludeEntityId && "id" in s && s.id === excludeEntityId) return { ok: false };
+          if (!selKind) selKind = s.kind;
+        }
+        cur = cur.parent;
+      }
+      return { ok: true, selKind };
+    };
+
+    if (mountKind === "wall") {
+      for (const h of hits) {
+        const check = isVisibleAndNotExcluded(h.object);
+        if (!check.ok || !h.face) continue;
+        this._tmpNorm.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
+        const isVertical = Math.abs(this._tmpNorm.y) < 0.35;
+        if (check.selKind === "wall" || isVertical) {
+          let nx = this._tmpNorm.x;
+          let nz = this._tmpNorm.z;
+          const nLen = Math.hypot(nx, nz);
+          if (nLen < 1e-4) continue;
+          nx /= nLen;
+          nz /= nLen;
+          // Ensure normal points toward camera side of wall
+          const toCamX = this.cameraCtrl.camera.position.x - h.point.x;
+          const toCamZ = this.cameraCtrl.camera.position.z - h.point.z;
+          if (nx * toCamX + nz * toCamZ < 0) {
+            nx = -nx;
+            nz = -nz;
+          }
+          const px = h.point.x + nx * wallOffset;
+          const pz = h.point.z + nz * wallOffset;
+          const rawLocalY = h.point.y - baseY;
+          const py = rawLocalY >= 0.35 && rawLocalY <= lv.height - 0.15 ? rawLocalY : defaultElev;
+          const rotY = Math.atan2(nx, nz);
+          const inBounds = px >= 0.02 && px <= project.site.width - 0.02 && pz >= 0.02 && pz <= project.site.depth - 0.02;
+          return { x: px, y: py, z: pz, rotationY: rotY, valid: inBounds, surfaceLabel: "Permukaan Dinding" };
+        }
+      }
+
+      // Fallback: snap to nearest wall near floor cursor when walls are in cutaway/down mode
+      const wallSnap = snapOpeningToProjectWalls(lv.walls, this.lastWorldPos.x, this.lastWorldPos.z, 0.35);
+      if (wallSnap) {
+        const w = wallSnap.wall;
+        const wdx = w.end.x - w.start.x;
+        const wdz = w.end.z - w.start.z;
+        const wLen = Math.max(0.01, Math.hypot(wdx, wdz));
+        let nx = -wdz / wLen;
+        let nz = wdx / wLen;
+        const toCamX = this.cameraCtrl.camera.position.x - wallSnap.worldX;
+        const toCamZ = this.cameraCtrl.camera.position.z - wallSnap.worldZ;
+        if (nx * toCamX + nz * toCamZ < 0) {
+          nx = -nx;
+          nz = -nz;
+        }
+        return {
+          x: wallSnap.worldX + nx * wallOffset,
+          y: defaultElev,
+          z: wallSnap.worldZ + nz * wallOffset,
+          rotationY: Math.atan2(nx, nz),
+          valid: true,
+          surfaceLabel: `Dinding (${w.name})`,
+        };
+      }
+      return {
+        x: this.lastWorldPos.x,
+        y: defaultElev,
+        z: this.lastWorldPos.z,
+        valid: false,
+        surfaceLabel: "Arahkan ke permukaan dinding",
+      };
+    }
+
+    if (mountKind === "surface") {
+      for (const h of hits) {
+        const check = isVisibleAndNotExcluded(h.object);
+        if (!check.ok || !h.face) continue;
+        if (check.selKind === "wall") continue;
+        this._tmpNorm.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
+        if (this._tmpNorm.y < 0.65) continue;
+        const px = e.shiftKey ? Math.round(h.point.x * 2) / 2 : h.point.x;
+        const pz = e.shiftKey ? Math.round(h.point.z * 2) / 2 : h.point.z;
+        const rawLocalY = h.point.y - baseY;
+        const py = rawLocalY < 0.08 ? 0 : Math.min(lv.height - 0.3, rawLocalY);
+        const inBounds = px >= 0.08 && px <= project.site.width - 0.08 && pz >= 0.08 && pz <= project.site.depth - 0.08;
+        const label = check.selKind === "furniture" ? "Atas Furnitur" : "Permukaan Lantai";
+        return { x: px, y: py, z: pz, valid: inBounds, surfaceLabel: label };
+      }
+    }
+
+    // Fallback or ceiling mount: smooth continuous XZ on active floor plane
+    const px = e.shiftKey ? Math.round(this.lastWorldPos.x * 2) / 2 : this.lastWorldPos.x;
+    const pz = e.shiftKey ? Math.round(this.lastWorldPos.z * 2) / 2 : this.lastWorldPos.z;
+    const inBounds = px >= 0.08 && px <= project.site.width - 0.08 && pz >= 0.08 && pz <= project.site.depth - 0.08;
+    return {
+      x: px,
+      y: mountKind === "ceiling" ? defaultElev : 0,
+      z: pz,
+      valid: inBounds,
+      surfaceLabel: mountKind === "ceiling" ? "Plafon Ruangan" : "Permukaan Lantai",
+    };
   }
 
   private updateToolPreview(e: PointerEvent): void {
@@ -658,19 +958,26 @@ export class BuildScene {
     const tool = this.viewOpts.activeTool;
     const item = this.getActiveCatalogItem();
 
-    if (tool === "sledgehammer" || tool === "eyedropper" || tool === "wall_paint") {
-      const hitRes = this.raycastHit(e);
+    if (tool === "select" || tool === "sledgehammer" || tool === "eyedropper" || tool === "wall_paint") {
+      const hitRes = this.raycastHit(e, true);
       if (hitRes && (tool !== "wall_paint" || hitRes.sel.kind === "wall")) {
         const box = new THREE.Box3().setFromObject(hitRes.obj);
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
         const geo = new THREE.BoxGeometry(Math.max(0.18, size.x + 0.06), Math.max(0.18, size.y + 0.06), Math.max(0.18, size.z + 0.06));
-        const mat = tool === "sledgehammer" ? this.invalidMat : tool === "eyedropper" ? this.cyanMat : this.validMat;
+        const mat = tool === "sledgehammer" ? this.invalidMat : tool === "wall_paint" ? this.validMat : this.cyanMat;
         const m = new THREE.Mesh(geo, mat);
         m.position.copy(center);
         this.previewGroup.add(m);
         this.actions.onPreviewHud({
-          label: tool === "sledgehammer" ? `Hapus: ${hitRes.label}` : tool === "wall_paint" ? `Cat: ${item.name}` : `Salin: ${hitRes.label}`,
+          label:
+            tool === "sledgehammer"
+              ? `Hapus: ${hitRes.label}`
+              : tool === "wall_paint"
+                ? `Cat: ${item.name}`
+                : tool === "eyedropper"
+                  ? `Salin: ${hitRes.label}`
+                  : `Pilih / Seret: ${hitRes.label}`,
           valid: true,
         });
       } else {
@@ -819,20 +1126,27 @@ export class BuildScene {
           : tool === "hvac"
             ? item.hvacMeta?.type === "ac_split"
               ? [0.85, 0.28, 0.22]
-              : [0.55, 0.45, 0.55]
+              : item.hvacMeta?.type === "wall_fan"
+                ? [0.44, 0.44, 0.28]
+                : [0.55, 0.45, 0.55]
             : [0.35, 0.3, 0.35];
-      const rot = this.viewOpts.placementRotationQuarter * (Math.PI / 2);
-      const px = e.altKey || this.altHeld ? wx : Math.round(wx * 2) / 2;
-      const pz = e.altKey || this.altHeld ? wz : Math.round(wz * 2) / 2;
-      const elev = tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
-      const valid = px >= 0.1 && px <= project.site.width - 0.1 && pz >= 0.1 && pz <= project.site.depth - 0.1;
-      const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), valid ? this.validMat : this.invalidMat);
-      m.position.set(px, baseY + elev + sy * 0.5, pz);
+      const mountKind = this.getMountKind(tool, item.hvacMeta?.type, item.lightMeta?.type);
+      const wallOffset =
+        item.hvacMeta?.type === "ac_split" ? 0.12 : item.hvacMeta?.type === "wall_fan" ? 0.03 : 0.05;
+      const defaultElev =
+        tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
+      const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
+      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
+      const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), placed.valid ? this.validMat : this.invalidMat);
+      const centerY = mountKind === "surface" ? baseY + placed.y + sy * 0.5 : baseY + placed.y;
+      m.position.set(placed.x, centerY, placed.z);
       m.rotation.y = rot;
       this.previewGroup.add(m);
       this.actions.onPreviewHud({
-        label: valid ? `${item.name} (${this.viewOpts.placementRotationQuarter * 90}° · R putar · Alt bebas)` : "Di luar batas kavling",
-        valid,
+        label: placed.valid
+          ? `${item.name} · ${placed.surfaceLabel} (R putar · Shift snap)`
+          : placed.surfaceLabel,
+        valid: placed.valid,
       });
       return;
     }
@@ -861,27 +1175,42 @@ export class BuildScene {
     const inBounds = gx >= 0 && gx < cols && gz >= 0 && gz < rows;
     this.lastWorldPos = { x: hit.x, z: hit.z, inBounds };
 
-    this.hoverTileMesh.visible = inBounds;
-    if (inBounds) {
+    const showGridHover = inBounds && this.viewOpts.activeTool !== "select" && !this.draggingEntity;
+    this.hoverTileMesh.visible = showGridHover;
+    if (showGridHover) {
       this.hoverTileMesh.position.set((gx + 0.5) * cs, this.getActiveFloorY() + 0.03, (gz + 0.5) * cs);
     }
 
-    // Drag moving an already-selected Furniture / HVAC / Light item in Select mode
-    if (this.draggingEntity && inBounds) {
-      const snapX = e.altKey || this.altHeld ? hit.x : Math.round(hit.x * 2) / 2;
-      const snapZ = e.altKey || this.altHeld ? hit.z : Math.round(hit.z * 2) / 2;
+    // Drag moving an already-selected Furniture / HVAC / Light item directly along surfaces (walls/floors/tables)
+    if (this.draggingEntity) {
       const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
       const lv = this.derived.project.levels[lvIdx];
       if (lv) {
         if (this.draggingEntity.kind === "furniture") {
           const cur = lv.furniture.find((x) => x.id === this.draggingEntity?.id);
-          if (cur) this.actions.onMoveFurniture(lvIdx, cur.id, { x: snapX, y: cur.position.y, z: snapZ });
+          if (cur) {
+            const placed = this.raycastSurfaceForPlacement(e, lvIdx, "surface", 0, cur.position.y, cur.id);
+            if (placed.valid) this.actions.onMoveFurniture(lvIdx, cur.id, { x: placed.x, y: placed.y, z: placed.z });
+          }
         } else if (this.draggingEntity.kind === "hvac") {
           const cur = lv.hvac.find((x) => x.id === this.draggingEntity?.id);
-          if (cur) this.actions.onMoveHvac(lvIdx, cur.id, { x: snapX, y: cur.position.y, z: snapZ });
+          if (cur) {
+            const mk = this.getMountKind("hvac", cur.type, undefined);
+            const wallOff = cur.type === "ac_split" ? 0.12 : cur.type === "wall_fan" ? 0.03 : 0.05;
+            const placed = this.raycastSurfaceForPlacement(e, lvIdx, mk, wallOff, cur.position.y, cur.id);
+            if (placed.valid) {
+              this.actions.onMoveHvac(lvIdx, cur.id, { x: placed.x, y: placed.y, z: placed.z }, placed.rotationY);
+            }
+          }
         } else if (this.draggingEntity.kind === "light") {
           const cur = lv.lights.find((x) => x.id === this.draggingEntity?.id);
-          if (cur) this.actions.onMoveLight(lvIdx, cur.id, { x: snapX, y: cur.position.y, z: snapZ });
+          if (cur) {
+            const mk = this.getMountKind("light", undefined, cur.type);
+            const placed = this.raycastSurfaceForPlacement(e, lvIdx, mk, 0.05, cur.position.y, cur.id);
+            if (placed.valid) {
+              this.actions.onMoveLight(lvIdx, cur.id, { x: placed.x, y: placed.y, z: placed.z }, placed.rotationY);
+            }
+          }
         }
       }
       return;
@@ -926,10 +1255,12 @@ export class BuildScene {
     const tool = this.viewOpts.activeTool;
 
     if (tool === "select") {
-      const hitRes = this.raycastHit(e);
+      const hitRes = this.raycastHit(e, true);
       if (hitRes && (hitRes.sel.kind === "furniture" || hitRes.sel.kind === "hvac" || hitRes.sel.kind === "light")) {
         this.draggingEntity = hitRes.sel;
         this.actions.onSelect(hitRes.sel);
+      } else {
+        this.actions.onSelect(hitRes ? hitRes.sel : null);
       }
       return;
     }
@@ -1134,34 +1465,27 @@ export class BuildScene {
       return;
     }
 
-    // Place Furniture / HVAC / Light
+    // Place Furniture / HVAC / Light on real 3D surfaces (wall, ceiling, floor, or tabletop)
     if (tool === "furniture" || tool === "hvac" || tool === "light") {
-      if (!this.lastWorldPos.inBounds) {
+      const mountKind = this.getMountKind(tool, item.hvacMeta?.type, item.lightMeta?.type);
+      const wallOffset =
+        item.hvacMeta?.type === "ac_split" ? 0.12 : item.hvacMeta?.type === "wall_fan" ? 0.03 : 0.05;
+      const defaultElev =
+        tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
+      const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
+      if (!placed.valid) {
         simsAudio.play("warning");
         return;
       }
-      const px = e.altKey ? this.lastWorldPos.x : Math.round(this.lastWorldPos.x * 2) / 2;
-      const pz = e.altKey ? this.lastWorldPos.z : Math.round(this.lastWorldPos.z * 2) / 2;
-      const rot = this.viewOpts.placementRotationQuarter * (Math.PI / 2);
+      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
       if (tool === "furniture") {
         const [sx, sy, sz] = item.sizeM ?? [1.0, 0.8, 0.8];
-        // Stack tabletop/plant decor cleanly onto surface if overlapping table/kitchen counter
-        let mountY = 0;
-        if (item.furnitureCategory === "decor" || item.furnitureCategory === "plant") {
-          for (const host of lv.furniture) {
-            if (host.category === "table" || host.category === "kitchen") {
-              if (Math.abs(px - host.position.x) <= host.size.x * 0.5 && Math.abs(pz - host.position.z) <= host.size.z * 0.5) {
-                mountY = Math.max(mountY, host.position.y + host.size.y);
-              }
-            }
-          }
-        }
         this.actions.onAddFurniture(lvIdx, {
           id: uid("furn"),
           catalogId: item.materialId ?? "sofa_l",
           name: item.name,
           category: item.furnitureCategory ?? "seating",
-          position: { x: px, y: mountY, z: pz },
+          position: { x: placed.x, y: placed.y, z: placed.z },
           size: { x: sx, y: sy, z: sz },
           rotationY: rot,
           colorHex: item.swatchHex,
@@ -1172,7 +1496,7 @@ export class BuildScene {
           id: uid("hv"),
           name: item.name,
           type: item.hvacMeta.type,
-          position: { x: px, y: item.hvacMeta.defaultElevationM, z: pz },
+          position: { x: placed.x, y: placed.y, z: placed.z },
           rotationY: rot,
           pkRating: item.hvacMeta.pkRating,
           flowRateM3h: item.hvacMeta.flowRateM3h,
@@ -1187,7 +1511,8 @@ export class BuildScene {
           id: uid("lgt"),
           name: item.name,
           type: item.lightMeta.type,
-          position: { x: px, y: item.lightMeta.defaultElevationM, z: pz },
+          position: { x: placed.x, y: placed.y, z: placed.z },
+          rotationY: placed.rotationY,
           lumens: item.lightMeta.lumens,
           colorTempK: item.lightMeta.colorTempK,
           beamAngleDeg: item.lightMeta.beamAngleDeg,
@@ -1264,6 +1589,43 @@ export class BuildScene {
 
       for (const fan of this.animatedFans) {
         fan.rotation.y += dt * 7.5;
+      }
+
+      if (this.airParticlesMesh && this.airflow && this.airParticleStates.length > 0 && this.derived) {
+        const af = this.airflow;
+        const proj = this.derived.project;
+        const lt1Y = proj.site.peil.floor1PeilM;
+        const lt2Y = lt1Y + (proj.levels[0]?.height ?? 3.6);
+        const clampedDt = Math.min(0.05, Math.max(0.001, dt));
+        for (let i = 0; i < this.airParticleStates.length; i++) {
+          const p = this.airParticleStates[i]!;
+          const gx = Math.max(0, Math.min(af.gridW - 1, Math.floor(p.x / 0.2)));
+          const gz = Math.max(0, Math.min(af.gridD - 1, Math.floor(p.z / 0.2)));
+          const idx = gz * af.gridW + gx;
+          const vx = (p.lv === 0 ? af.lt1VelX[idx] : af.lt2VelX[idx]) ?? 0;
+          const vz = (p.lv === 0 ? af.lt1VelZ[idx] : af.lt2VelZ[idx]) ?? 0.2;
+          const temp = (p.lv === 0 ? af.lt1Temp[idx] : af.lt2Temp[idx]) ?? 30;
+
+          p.x += vx * clampedDt * 1.4;
+          p.z += vz * clampedDt * 1.4;
+          p.life += clampedDt * 0.35;
+          if (p.life > 1 || p.x < 0.05 || p.x > proj.site.width - 0.05 || p.z < 0.05 || p.z > proj.site.depth - 0.05) {
+            p.x = 0.2 + Math.random() * (proj.site.width - 0.4);
+            p.z = 0.2 + Math.random() * (proj.site.depth - 0.4);
+            p.lv = this.viewOpts.activeLevel === 0 ? 0 : this.viewOpts.activeLevel === 1 ? 1 : i % 2 === 0 ? 0 : 1;
+            p.y = (p.lv === 0 ? lt1Y : lt2Y) + 0.7 + Math.random() * 1.7;
+            p.life = 0;
+          }
+          this._v1.set(p.x, p.y, p.z);
+          this._q.setFromAxisAngle(this._up, Math.atan2(vx, vz));
+          this._m4.compose(this._v1, this._q, this._s1);
+          this.airParticlesMesh.setMatrixAt(i, this._m4);
+          const tNorm = Math.max(0, Math.min(1, (temp - 23) / 10));
+          this._col.setRGB(0.2 + tNorm * 0.78, 0.76 - tNorm * 0.25, 0.96 - tNorm * 0.72);
+          this.airParticlesMesh.setColorAt(i, this._col);
+        }
+        this.airParticlesMesh.instanceMatrix.needsUpdate = true;
+        if (this.airParticlesMesh.instanceColor) this.airParticlesMesh.instanceColor.needsUpdate = true;
       }
 
       this.cameraCtrl.update(dt);

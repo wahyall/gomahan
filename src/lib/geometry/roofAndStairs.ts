@@ -263,6 +263,46 @@ export function validateProjectModel(
         }
       }
 
+      // Check if any other wall on the same level intersects an opening (door/window blocked by adjacent wall)
+      const wux = (w.end.x - w.start.x) / Math.max(0.01, len);
+      const wuz = (w.end.z - w.start.z) / Math.max(0.01, len);
+      for (const op of w.openings) {
+        if (op.kind !== "door" && op.kind !== "window" && op.kind !== "arch") continue;
+        const opLo = op.offset - op.width * 0.5;
+        const opHi = op.offset + op.width * 0.5;
+        for (const other of level.walls) {
+          if (other.id === w.id) continue;
+          const odx = other.end.x - other.start.x;
+          const odz = other.end.z - other.start.z;
+          const olen = Math.hypot(odx, odz);
+          if (olen < 0.05) continue;
+          // Check endpoints and midpoint of other wall against opening span
+          const samples = [0, 0.5, 1];
+          let blocked = false;
+          for (const st of samples) {
+            const px = other.start.x + odx * st;
+            const pz = other.start.z + odz * st;
+            const proj = (px - w.start.x) * wux + (pz - w.start.z) * wuz;
+            const perp = Math.abs((px - w.start.x) * -wuz + (pz - w.start.z) * wux);
+            if (proj > opLo + 0.03 && proj < opHi - 0.03 && perp < (w.thickness + other.thickness) * 0.5 + 0.04 && other.height > op.sill + 0.2) {
+              blocked = true;
+              break;
+            }
+          }
+          if (blocked) {
+            issues.push({
+              id: `op-wall-block-${op.id}-${other.id}`,
+              severity: "critical",
+              category: "opening",
+              title: `Bukaan "${op.label}" tertutup dinding "${other.name}"`,
+              detail: `Dinding "${other.name}" memotong rentang ${op.kind} pada "${w.name}". Geser posisi sekat atau bukaan.`,
+              levelIndex: level.index,
+              elementId: op.id,
+            });
+          }
+        }
+      }
+
       // Unsupported masonry wall length without intermediate column
       if (len > 4.2) {
         issues.push({

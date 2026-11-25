@@ -142,5 +142,15 @@ describe("Unified Single-Source Build Mode (Project + Zundo Undo/Redo)", () => {
       colorHex: "#d8d1c5",
     });
     expect(useStudioStore.getState().project.levels[0]!.furniture.length).toBe(1);
+
+    // Verify wall_fan catalog entry & SNI/Brick automatic store updates
+    const wallFanItem = UNIFIED_BUILD_CATALOG.find((c) => c.hvacMeta?.type === "wall_fan");
+    expect(wallFanItem).toBeDefined();
+
+    const prevUpdatedAt = useStudioStore.getState().project.updatedAt;
+    useStudioStore.getState().patchStructuralParams({ concreteFcMpa: 25.0 });
+    expect(useStudioStore.getState().project.structuralParams.concreteFcMpa).toBe(25.0);
+    expect(useStudioStore.getState().project.updatedAt).not.toBe("");
+    expect(prevUpdatedAt).toBeDefined();
   });
 });

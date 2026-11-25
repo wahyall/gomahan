@@ -27,6 +27,7 @@ import {
   Trash2,
   Undo2,
   Upload,
+  Wind,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -43,6 +44,8 @@ import { simsAudio } from "@/lib/audio/simsAudio";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { PAINT_SWATCHES, ROOF_SWATCHES } from "@/lib/model/catalog";
 import type { RoofType } from "@/lib/model/types";
+import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
+import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { cn } from "@/lib/utils";
@@ -50,6 +53,8 @@ import { cn } from "@/lib/utils";
 interface BuildWorkspaceProps {
   derived: DerivedProjectModel;
   struct: StructuralReport;
+  lighting?: LightingSimulationResult;
+  airflow?: AirflowSimulationResult;
   onExportJson: () => void;
   onImportJson: () => void;
   onSaveSnapshot: () => void;
@@ -163,7 +168,7 @@ function ItemThumbnail({ item }: { item: BuildCatalogEntry }) {
   );
 }
 
-export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, onSaveSnapshot }: BuildWorkspaceProps) {
+export function BuildWorkspace({ derived, struct, lighting, airflow, onExportJson, onImportJson, onSaveSnapshot }: BuildWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<BuildScene | null>(null);
 
@@ -171,6 +176,8 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
   const selected = useStudioStore((s) => s.selected);
   const setSelected = useStudioStore((s) => s.setSelected);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
+  const view = useStudioStore((s) => s.view);
+  const patchView = useStudioStore((s) => s.patchView);
 
   const activeLevel = useBuildModeStore((s) => s.activeLevel);
   const wallVisibility = useBuildModeStore((s) => s.wallVisibility);
@@ -267,13 +274,16 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
         onSetFloorTiles: (tiles) => st.setFloorTileOverrides(tiles),
         onAddStair: (lv, s, v) => st.addStairWithCutout(lv, s, v),
         onAddFurniture: (lv, f) => st.addFurniture(lv, f),
-        onMoveFurniture: (lv, id, pos) => st.updateFurniture(lv, id, { position: pos }),
+        onMoveFurniture: (lv, id, pos, rotationY) =>
+          st.updateFurniture(lv, id, rotationY !== undefined ? { position: pos, rotationY } : { position: pos }),
         onDeleteFurniture: (lv, id) => st.deleteFurniture(lv, id),
         onAddHvac: (lv, h) => st.addHvac(lv, h),
-        onMoveHvac: (lv, id, pos) => st.updateHvac(lv, id, { position: pos }),
+        onMoveHvac: (lv, id, pos, rotationY) =>
+          st.updateHvac(lv, id, rotationY !== undefined ? { position: pos, rotationY } : { position: pos }),
         onDeleteHvac: (lv, id) => st.deleteHvac(lv, id),
         onAddLight: (lv, l) => st.addLight(lv, l),
-        onMoveLight: (lv, id, pos) => st.updateLight(lv, id, { position: pos }),
+        onMoveLight: (lv, id, pos, rotationY) =>
+          st.updateLight(lv, id, rotationY !== undefined ? { position: pos, rotationY } : { position: pos }),
         onDeleteLight: (lv, id) => st.deleteLight(lv, id),
         onAddPool: (p) => st.addPool(p),
         onSetTerrainHeights: (h) => st.setTerrainHeights(h),
@@ -295,8 +305,8 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
   }, []);
 
   useEffect(() => {
-    sceneRef.current?.updateProjectData(derived, struct, selected);
-  }, [derived, struct, selected]);
+    sceneRef.current?.updateProjectData(derived, struct, selected, view, lighting, airflow);
+  }, [derived, struct, selected, view, lighting, airflow]);
 
   useEffect(() => {
     sceneRef.current?.setViewOptions({
@@ -455,6 +465,9 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
         e.preventDefault();
         setWallVisibility(wallVisibility === "down" ? "cutaway" : "down");
         simsAudio.play("select");
+      } else if (e.key.toLowerCase() === "v" && !mod && !e.shiftKey) {
+        selectCatalogById("tool_select");
+        simsAudio.play("select");
       } else if (e.key.toLowerCase() === "g" && !mod) {
         toggleGrid();
       } else if (e.key.toLowerCase() === "k" && !mod) {
@@ -517,7 +530,10 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
 
   return (
     <div className="relative flex h-full w-full flex-1 flex-col overflow-hidden bg-[#161b22] select-none">
-      <canvas ref={canvasRef} className="viewport-canvas h-full w-full flex-1 cursor-crosshair" />
+      <canvas
+        ref={canvasRef}
+        className={cn("viewport-canvas h-full w-full flex-1", activeTool === "select" ? "cursor-pointer" : "cursor-crosshair")}
+      />
 
       {webglError && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#14181f]/95 p-6 text-center">
@@ -557,6 +573,21 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
 
           <span className="mx-0.5 h-4 w-px bg-white/15" />
 
+          <button
+            type="button"
+            onClick={() => {
+              selectCatalogById("tool_select");
+              simsAudio.play("select");
+            }}
+            title="Mode Pilih & Geser Objek 3D (V / Esc)"
+            className={cn(
+              "flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition",
+              activeTool === "select" ? "bg-sky-500/25 text-sky-200 ring-1 ring-sky-400/50" : "text-muted-foreground hover:bg-white/10",
+            )}
+          >
+            <MousePointer2 className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Pilih</span>
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -613,6 +644,30 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
           >
             <BrickWall className="h-3.5 w-3.5" />
             <span className="hidden lg:inline">Bata</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => patchView({ showLuxHeatmap: !view.showLuxHeatmap })}
+            title="Tampilkan / Sembunyikan Simulasi Heatmap Cahaya (Lux)"
+            className={cn(
+              "flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition",
+              view.showLuxHeatmap ? "bg-yellow-500/25 text-yellow-200" : "text-muted-foreground hover:bg-white/10",
+            )}
+          >
+            <Sun className="h-3.5 w-3.5" />
+            <span className="hidden xl:inline">Lux</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => patchView({ showAirParticles: !view.showAirParticles })}
+            title="Tampilkan / Sembunyikan Simulasi Partikel Aliran Angin & AC/Kipas"
+            className={cn(
+              "flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium transition",
+              view.showAirParticles ? "bg-teal-500/25 text-teal-200" : "text-muted-foreground hover:bg-white/10",
+            )}
+          >
+            <Wind className="h-3.5 w-3.5" />
+            <span className="hidden xl:inline">Angin</span>
           </button>
           <button
             type="button"
@@ -874,6 +929,11 @@ export function BuildWorkspace({ derived, struct, onExportJson, onImportJson, on
                       Hapus
                     </button>
                   </div>
+                </div>
+              ) : activeTool === "select" ? (
+                <div className="flex items-center justify-between gap-2 text-[11px] text-sky-300">
+                  <span>Mode Pilih Aktif</span>
+                  <span className="text-muted-foreground">Klik / seret objek 3D</span>
                 </div>
               ) : (
                 hover && (

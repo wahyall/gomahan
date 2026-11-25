@@ -219,4 +219,71 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     const resV2 = parseVersionedProjectSave(v2);
     expect(resV2.status).toBe("ok");
   });
+
+  it("bounds structural columns to their own floor level and couples new lights/AC/wall_fan to simulations", () => {
+    const p = createDefaultProject();
+    const d = buildDerivedModel(p);
+    const s = computeStructuralReport(d);
+
+    // LT1-only partition corner (2.25, 4.5) must NOT pierce LT2; LT2-only toilet corner (3.5, 9.5) must NOT pierce LT1
+    const lt1Only = s.columns.find((c) => Math.hypot(c.x - 2.25, c.z - 4.5) < 0.15);
+    const lt2Only = s.columns.find((c) => Math.hypot(c.x - 3.5, c.z - 9.5) < 0.15);
+    const shared = s.columns.find((c) => Math.hypot(c.x - 0.05, c.z - 7.5) < 0.15);
+    expect(lt1Only).toBeDefined();
+    expect(lt1Only?.minLevel).toBe(0);
+    expect(lt1Only?.maxLevel).toBe(0);
+    expect(lt2Only).toBeDefined();
+    expect(lt2Only?.minLevel).toBe(1);
+    expect(lt2Only?.maxLevel).toBe(1);
+    expect(shared?.minLevel).toBe(0);
+    expect(shared?.maxLevel).toBe(1);
+
+    // Adding a night light in KT2 increases KT2 totalLux without leaking through solid walls into KM2
+    p.simulation.hourOfDay = 21;
+    p.levels[1]!.lights.forEach((l) => {
+      l.on = false;
+    });
+    const baseLight = runLightingSimulation(buildDerivedModel(p));
+    const kt2Base = baseLight.rooms.find((r) => r.roomId === "r2-kt2")!;
+    const km2Base = baseLight.rooms.find((r) => r.roomId === "r2-km2")!;
+
+    p.levels[1]!.lights.push({
+      id: "l-test-kt2",
+      name: "Lampu Uji KT2",
+      type: "ceiling",
+      position: { x: 3.75, y: 3.08, z: 5.75 },
+      lumens: 1500,
+      colorTempK: 4000,
+      beamAngleDeg: 110,
+      dimmer: 1,
+      on: true,
+    });
+    const afterLight = runLightingSimulation(buildDerivedModel(p));
+    const kt2After = afterLight.rooms.find((r) => r.roomId === "r2-kt2")!;
+    const km2After = afterLight.rooms.find((r) => r.roomId === "r2-km2")!;
+    expect(kt2After.totalLux).toBeGreaterThan(kt2Base.totalLux + 50);
+    expect(km2After.artificialLux).toBe(km2Base.artificialLux);
+
+    // Adding a wall_fan in Ruang Tamu increases velocity & lowers effectiveTempC in Ruang Tamu
+    const baseAir = runAirflowSimulation(buildDerivedModel(p));
+    const tamuBase = baseAir.zones.find((z) => z.roomId === "r1-tamu")!;
+    p.levels[0]!.hvac.push({
+      id: "hv-wall-fan-test",
+      name: "Kipas Angin Dinding Uji",
+      type: "wall_fan",
+      position: { x: 0.15, y: 2.0, z: 5.8 },
+      rotationY: Math.PI / 2,
+      flowRateM3h: 1550,
+      coolingCapacityW: 0,
+      powerW: 50,
+      setpointC: 27,
+      speedLevel: 3,
+      on: true,
+    });
+    const afterAir = runAirflowSimulation(buildDerivedModel(p));
+    const tamuAfter = afterAir.zones.find((z) => z.roomId === "r1-tamu")!;
+    expect(tamuAfter.avgVelocityMs).toBeGreaterThan(tamuBase.avgVelocityMs);
+    expect(tamuAfter.effectiveTempC).toBeLessThan(tamuBase.effectiveTempC);
+    expect(afterAir.totalHvacPowerW).toBe(baseAir.totalHvacPowerW + 50);
+  });
 });

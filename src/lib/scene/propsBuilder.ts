@@ -688,6 +688,24 @@ export function buildHvacMesh(
     rotor.add(rb.flush(disposables));
     g.add(rotor);
     if (unit.on) animatedFanBlades.push(rotor);
+  } else if (unit.type === "wall_fan") {
+    // Wall bracket + tilted arm + circular grille + animated 3-blade rotor
+    b.add(palette.aluDark, createChamferBox(0.14, 0.18, 0.03, 0.006, 1), 0, -0.06, 0.015);
+    b.add(palette.steelLight, new THREE.CylinderGeometry(0.018, 0.022, 0.18, 8), 0, 0.02, 0.09, Math.PI * 0.35);
+    b.add(whitePlastic, new THREE.CylinderGeometry(0.055, 0.055, 0.09, 12), 0, 0.06, 0.14, Math.PI * 0.56);
+    b.add(palette.aluDark, new THREE.TorusGeometry(0.21, 0.016, 8, 22), 0, 0.05, 0.2, 0.18);
+    g.add(b.flush(disposables));
+
+    const rotor = new THREE.Group();
+    rotor.position.set(0, 0.05, 0.21);
+    rotor.rotation.x = 0.18;
+    const rb = new PropBatcher();
+    for (let i = 0; i < 3; i++) {
+      rb.add(indicatorMat, createChamferBox(0.05, 0.17, 0.014, 0.004, 1), 0, 0, 0, 0, 0, (i / 3) * Math.PI * 2);
+    }
+    rotor.add(rb.flush(disposables));
+    g.add(rotor);
+    if (unit.on) animatedFanBlades.push(rotor);
   } else {
     b.add(whitePlastic, createChamferBox(0.32, 0.32, 0.08, 0.012, 1));
     b.add(palette.aluDark, new THREE.CylinderGeometry(0.11, 0.11, 0.09, 14), 0, 0, 0.01, Math.PI / 2);
@@ -732,5 +750,6 @@ export function buildLightFixtureMesh(
 
   g.add(b.flush(disposables, { castShadow: false }));
   g.position.set(light.position.x, light.position.y, light.position.z);
+  g.rotation.y = light.rotationY ?? 0;
   return g;
 }

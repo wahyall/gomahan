@@ -153,6 +153,7 @@ export const lightFixtureSchema = z.object({
   name: z.string(),
   type: z.enum(["ceiling", "pendant", "wall", "spot", "strip", "garden"]),
   position: vec3Schema,
+  rotationY: z.number().finite().optional(),
   lumens: z.number().min(100).max(10000),
   colorTempK: z.number().min(2000).max(7000),
   beamAngleDeg: z.number().min(15).max(180),
@@ -163,7 +164,7 @@ export const lightFixtureSchema = z.object({
 export const hvacUnitSchema = z.object({
   id: z.string().min(1),
   name: z.string(),
-  type: z.enum(["ac_split", "ceiling_fan", "stand_fan", "exhaust_fan"]),
+  type: z.enum(["ac_split", "ceiling_fan", "stand_fan", "wall_fan", "exhaust_fan"]),
   position: vec3Schema,
   rotationY: z.number().finite(),
   pkRating: z

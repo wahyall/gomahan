@@ -554,6 +554,12 @@ export class HouseScene {
       barH: derived.project.floodMitigation.barrierHeightCm,
       hr: Math.round(sim.hourOfDay * 4),
       rn: Math.round(sim.rainIntensityMmH),
+      ws: Math.round(sim.windSpeedMs * 10),
+      wd: Math.round(sim.windDirectionDeg),
+      at: Math.round(sim.ambientTempC * 2),
+      rh: Math.round(sim.humidityPct),
+      lg: derived.project.levels.map((l) => l.lights.map((x) => `${x.id}:${x.on}:${x.lumens}:${x.position.x.toFixed(1)},${x.position.z.toFixed(1)}`)),
+      hv: derived.project.levels.map((l) => l.hvac.map((x) => `${x.id}:${x.on}:${x.speedLevel}:${x.rotationY.toFixed(2)}:${x.position.x.toFixed(1)},${x.position.z.toFixed(1)}`)),
     });
     if (simKey !== this.lastSimKey) {
       this.lastSimKey = simKey;

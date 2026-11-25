@@ -1,5 +1,31 @@
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
-import type { HvacUnit, Vec2 } from "@/lib/model/types";
+import { pointInPolygon } from "@/lib/geometry/rooms";
+import type { HvacUnit, Vec2, Wall } from "@/lib/model/types";
+
+function airflowBlockedByWalls(ax: number, az: number, bx: number, bz: number, walls: Wall[]): boolean {
+  const dx = bx - ax;
+  const dz = bz - az;
+  if (Math.hypot(dx, dz) < 0.15) return false;
+  for (const w of walls) {
+    if (w.height < 1.6) continue;
+    const wx = w.end.x - w.start.x;
+    const wz = w.end.z - w.start.z;
+    const wLen = Math.hypot(wx, wz);
+    if (wLen < 0.1) continue;
+    const denom = dx * wz - dz * wx;
+    if (Math.abs(denom) < 1e-6) continue;
+    const t = ((w.start.x - ax) * wz - (w.start.z - az) * wx) / denom;
+    const u = ((w.start.x - ax) * dz - (w.start.z - az) * dx) / denom;
+    if (t > 0.08 && t < 0.92 && u > 0.02 && u < 0.98) {
+      const hitAlong = u * wLen;
+      const passesOpening = w.openings.some(
+        (op) => Math.abs(hitAlong - op.offset) <= op.width * 0.5 && (op.kind === "arch" || op.openPct > 15),
+      );
+      if (!passesOpening) return true;
+    }
+  }
+  return false;
+}
 
 export interface ZoneAirflowResult {
   roomId: string;
@@ -126,48 +152,51 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
           }
         }
 
-        // Movable HVAC units contribution (AC Split, Ceiling Fan, Stand Fan, Exhaust Fan)
+        // Movable HVAC units contribution (AC Split, Ceiling Fan, Stand Fan, Wall Fan, Exhaust Fan)
         for (const h of activeHvac) {
           const speedMult = h.speedLevel === 1 ? 0.7 : h.speedLevel === 2 ? 1.0 : 1.3;
           const dx = px - h.position.x;
           const dz = pz - h.position.z;
           const dist = Math.hypot(dx, dz);
+          if (dist > 5.0) continue;
+          if (airflowBlockedByWalls(h.position.x, h.position.z, px, pz, lv.walls)) continue;
 
-          if (h.type === "ceiling_fan" && dist < 3.6) {
+          if (h.type === "ceiling_fan" && dist < 3.8) {
             // Radial downdraft + swirl
-            const falloff = Math.exp(-dist * 0.65) * speedMult;
+            const falloff = Math.exp(-dist * 0.6) * speedMult;
             const r = Math.max(0.2, dist);
-            vx += ((dx / r) * 0.75 - (dz / r) * 0.45) * falloff;
-            vz += ((dz / r) * 0.75 + (dx / r) * 0.45) * falloff;
-            cellTemp -= 1.6 * falloff; // convective wind chill
-          } else if (h.type === "stand_fan" && dist < 4.5) {
+            vx += ((dx / r) * 0.82 - (dz / r) * 0.48) * falloff;
+            vz += ((dz / r) * 0.82 + (dx / r) * 0.48) * falloff;
+            cellTemp -= 1.8 * falloff; // convective wind chill
+          } else if ((h.type === "stand_fan" || h.type === "wall_fan") && dist < 4.6) {
             const dirX = Math.sin(h.rotationY);
             const dirZ = Math.cos(h.rotationY);
             const proj = dx * dirX + dz * dirZ;
             const perp = Math.abs(dx * -dirZ + dz * dirX);
-            if (proj >= -0.2 && perp < 1.35) {
-              const cone = Math.exp(-proj * 0.45) * Math.exp(-perp * 1.1) * speedMult;
-              vx += dirX * 1.6 * cone;
-              vz += dirZ * 1.6 * cone;
-              cellTemp -= 1.4 * cone;
+            if (proj >= -0.25 && perp < 1.5) {
+              const cone = Math.exp(-Math.max(0, proj) * 0.4) * Math.exp(-perp * 0.95) * speedMult;
+              const boost = h.type === "wall_fan" ? 1.75 : 1.6;
+              vx += dirX * boost * cone;
+              vz += dirZ * boost * cone;
+              cellTemp -= 1.6 * cone;
             }
-          } else if (h.type === "ac_split" && dist < 4.6) {
+          } else if (h.type === "ac_split" && dist < 4.8) {
             const dirX = Math.sin(h.rotationY);
             const dirZ = Math.cos(h.rotationY);
             const proj = dx * dirX + dz * dirZ;
             const perp = Math.abs(dx * -dirZ + dz * dirX);
-            if (proj >= -0.4 && perp < 2.3) {
-              const zoneEffect = Math.exp(-dist * 0.35) * speedMult;
-              vx += dirX * 0.9 * zoneEffect;
-              vz += dirZ * 0.9 * zoneEffect;
+            if (proj >= -0.45 && perp < 2.5) {
+              const zoneEffect = Math.exp(-dist * 0.32) * speedMult;
+              vx += dirX * 1.0 * zoneEffect;
+              vz += dirZ * 1.0 * zoneEffect;
               const deltaT = Math.max(0, cellTemp - h.setpointC);
-              cellTemp -= deltaT * Math.min(0.88, zoneEffect * 0.85);
+              cellTemp -= deltaT * Math.min(0.9, zoneEffect * 0.88);
             }
-          } else if (h.type === "exhaust_fan" && dist < 2.4) {
-            const pull = Math.exp(-dist * 0.9) * speedMult;
+          } else if (h.type === "exhaust_fan" && dist < 2.6) {
+            const pull = Math.exp(-dist * 0.85) * speedMult;
             const r = Math.max(0.2, dist);
-            vx -= (dx / r) * 0.85 * pull;
-            vz -= (dz / r) * 0.85 * pull;
+            vx -= (dx / r) * 0.95 * pull;
+            vz -= (dz / r) * 0.95 * pull;
           }
         }
 
@@ -223,6 +252,9 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
 
       for (let z = z0; z <= z1; z++) {
         for (let x = x0; x <= x1; x++) {
+          const cx = (x + 0.5) * 0.2;
+          const cz = (z + 0.5) * 0.2;
+          if (!pointInPolygon({ x: cx, z: cz }, rm.room.polygon)) continue;
           const idx = z * gridW + x;
           sumSpeed += Math.hypot(field.velX[idx] ?? 0, field.velZ[idx] ?? 0);
           sumTemp += field.temp[idx] ?? sim.ambientTempC;
@@ -233,17 +265,24 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
       const avgVel = cnt > 0 ? sumSpeed / cnt : 0.1;
       const avgTemp = cnt > 0 ? sumTemp / cnt : sim.ambientTempC;
 
-      const roomHvac = lv.hvac.filter(
-        (h) =>
-          h.on &&
-          h.position.x >= minX - 0.3 &&
-          h.position.x <= maxX + 0.3 &&
-          h.position.z >= minZ - 0.3 &&
-          h.position.z <= maxZ + 0.3,
-      );
+      const roomHvac = lv.hvac.filter((h) => {
+        if (!h.on) return false;
+        if (pointInPolygon({ x: h.position.x, z: h.position.z }, rm.room.polygon)) return true;
+        // Include wall-mounted units facing into this room (within 0.25m of room boundary and unblocked toward room centroid)
+        const nearBbox =
+          h.position.x >= minX - 0.25 &&
+          h.position.x <= maxX + 0.25 &&
+          h.position.z >= minZ - 0.25 &&
+          h.position.z <= maxZ + 0.25;
+        if (!nearBbox) return false;
+        const probeX = h.position.x + Math.sin(h.rotationY) * 0.35;
+        const probeZ = h.position.z + Math.cos(h.rotationY) * 0.35;
+        return pointInPolygon({ x: probeX, z: probeZ }, rm.room.polygon);
+      });
       const hasAc = roomHvac.some((h) => h.type === "ac_split");
+      const hasFan = roomHvac.some((h) => h.type === "ceiling_fan" || h.type === "stand_fan" || h.type === "wall_fan");
       const hasExhaust = roomHvac.some((h) => h.type === "exhaust_fan");
-      const mechFlowM3h = roomHvac.reduce((s, h) => s + (h.type === "ac_split" ? h.flowRateM3h * 0.25 : h.flowRateM3h * 0.45), 0);
+      const mechFlowM3h = roomHvac.reduce((s, h) => s + (h.type === "ac_split" ? h.flowRateM3h * 0.28 : h.flowRateM3h * 0.48), 0);
 
       const isOpenProgram =
         rm.room.program === "garden" || rm.room.program === "carport" || rm.room.program === "balcony";
@@ -260,6 +299,7 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
         rm.room.program === "living" ||
         rm.room.program === "kitchen" ||
         hasExhaust ||
+        (hasFan && ach >= 2.8) ||
         (rm.windowAreaM2 >= 0.8 && ach >= 3.2);
 
       // Perceived temperature accounts for convective cooling from airflow velocity

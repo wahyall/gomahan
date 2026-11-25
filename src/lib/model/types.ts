@@ -205,6 +205,7 @@ export interface LightFixture {
   name: string;
   type: LightType;
   position: Vec3;
+  rotationY?: number;
   lumens: number;
   colorTempK: number;
   beamAngleDeg: number;
@@ -212,7 +213,7 @@ export interface LightFixture {
   on: boolean;
 }
 
-export type HvacType = "ac_split" | "ceiling_fan" | "stand_fan" | "exhaust_fan";
+export type HvacType = "ac_split" | "ceiling_fan" | "stand_fan" | "wall_fan" | "exhaust_fan";
 
 export interface HvacUnit {
   id: ID;

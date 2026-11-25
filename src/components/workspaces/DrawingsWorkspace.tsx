@@ -240,18 +240,20 @@ function DenahFloorSvg({
       ))}
 
       {/* Columns */}
-      {struct.columns.map((c) => (
-        <rect
-          key={c.id}
-          x={px(c.z) - 4}
-          y={py(c.x) - 4}
-          width={8}
-          height={8}
-          fill={c.isMain ? "#c9522e" : INK}
-          stroke={PAPER}
-          strokeWidth={0.7}
-        />
-      ))}
+      {struct.columns
+        .filter((c) => c.minLevel <= levelIndex && c.maxLevel >= levelIndex)
+        .map((c) => (
+          <rect
+            key={c.id}
+            x={px(c.z) - 4}
+            y={py(c.x) - 4}
+            width={8}
+            height={8}
+            fill={c.isMain ? "#c9522e" : INK}
+            stroke={PAPER}
+            strokeWidth={0.7}
+          />
+        ))}
 
       {/* Openings */}
       {lv.walls.flatMap((w) => {

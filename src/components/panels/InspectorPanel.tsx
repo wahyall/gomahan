@@ -25,11 +25,15 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
   const setBrickPreset = useStudioStore((s) => s.setBrickPreset);
   const patchBrickSpec = useStudioStore((s) => s.patchBrickSpec);
   const patchPeil = useStudioStore((s) => s.patchPeil);
+  const patchSoil = useStudioStore((s) => s.patchSoil);
+  const patchStructuralParams = useStudioStore((s) => s.patchStructuralParams);
   const patchView = useStudioStore((s) => s.patchView);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
 
   const sys = project.systems;
   const brick = sys.brick;
+  const sp = project.structuralParams;
+  const soil = project.site.soil;
   const isPro = project.gamification.mode === "pro";
 
   return (
@@ -259,6 +263,59 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
                   ["60", "60 × 60 cm (Granit Tile Luas)"],
                 ]}
               />
+            </Section>
+
+            {/* SNI Structural & Soil Parameters (live synced in Build Mode!) */}
+            <Section title="4. Parameter SNI Struktur & Tanah">
+              <div className="grid grid-cols-2 gap-1.5">
+                <NumInput
+                  label="Mutu Beton fc' (MPa)"
+                  val={sp.concreteFcMpa}
+                  min={15}
+                  max={45}
+                  onChange={(v) => patchStructuralParams({ concreteFcMpa: v })}
+                />
+                <NumInput
+                  label="Tulangan fy (MPa)"
+                  val={sp.rebarFyMpa}
+                  min={240}
+                  max={550}
+                  onChange={(v) => patchStructuralParams({ rebarFyMpa: v })}
+                />
+                <NumInput
+                  label="Daya Dukung (kPa)"
+                  val={soil.allowableBearingKpa}
+                  min={40}
+                  max={400}
+                  onChange={(v) => patchSoil({ allowableBearingKpa: v })}
+                />
+                <SelectField
+                  label="Kelas Situs Gempa"
+                  value={soil.siteClass}
+                  onChange={(v) => patchSoil({ siteClass: v as "SC" | "SD" | "SE" })}
+                  options={[
+                    ["SC", "SC (Tanah Keras)"],
+                    ["SD", "SD (Tanah Sedang)"],
+                    ["SE", "SE (Lunak Surabaya)"],
+                  ]}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <NumInput
+                  label="Beban Hidup Ruang (kPa)"
+                  val={sp.liveLoadRoomKpa}
+                  min={1.5}
+                  max={5}
+                  onChange={(v) => patchStructuralParams({ liveLoadRoomKpa: v })}
+                />
+                <NumInput
+                  label="Faktor Gempa R"
+                  val={sp.seismicR}
+                  min={3}
+                  max={8}
+                  onChange={(v) => patchStructuralParams({ seismicR: v })}
+                />
+              </div>
             </Section>
           </div>
         )}

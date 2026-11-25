@@ -290,20 +290,32 @@ export class WalkScene {
     this.dynResources = built.resources;
     this.animatedFans = built.animatedFans;
 
-    // Active warm interior lighting (PointLights for dusk/interior warmth without exceeding texture units)
+    // Active warm interior lighting isolated per floor (downward SpotLights prevent LT1<->LT2 light bleed)
     const lt1Y = derived.project.site.peil.floor1PeilM;
     const lt2Y = lt1Y + derived.project.levels[0]!.height;
-    const simNightBoost = derived.project.simulation.hourOfDay < 6.5 || derived.project.simulation.hourOfDay > 17.2 ? 1.85 : 0.72;
-    let lightCap = 0;
+    const simNightBoost = derived.project.simulation.hourOfDay < 6.5 || derived.project.simulation.hourOfDay > 17.2 ? 2.1 : 0.95;
     for (const lvIdx of [0, 1] as const) {
+      const lv = derived.project.levels[lvIdx];
+      if (!lv) continue;
       const baseY = lvIdx === 0 ? lt1Y : lt2Y;
-      for (const l of derived.project.levels[lvIdx]?.lights ?? []) {
-        if (!l.on || lightCap >= 10) continue;
-        lightCap += 1;
-        const pl = new THREE.PointLight(0xffe7bd, (l.lumens / 900) * l.dimmer * simNightBoost, 7.5, 1.7);
-        pl.position.set(l.position.x, baseY + l.position.y - 0.14, l.position.z);
-        this.lightsGroup.add(pl);
-        this.pointLights.push(pl);
+      const activeLights = lv.lights.filter((l) => l.on && l.dimmer > 0).slice(-7);
+      for (const l of activeLights) {
+        const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xffe7bd;
+        const rotY = l.rotationY ?? 0;
+        const fwdOff = l.type === "wall" ? 1.15 : 0;
+        const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
+        const spot = new THREE.SpotLight(
+          lightHex,
+          (l.lumens / 450) * l.dimmer * 2.2 * simNightBoost,
+          Math.min(3.85, lv.height + 0.15),
+          halfAngle,
+          0.78,
+          1.4,
+        );
+        spot.position.set(l.position.x, baseY + Math.min(lv.height - 0.25, l.position.y) - 0.05, l.position.z);
+        spot.target.position.set(l.position.x + Math.sin(rotY) * fwdOff, baseY, l.position.z + Math.cos(rotY) * fwdOff);
+        this.lightsGroup.add(spot, spot.target);
+        this.pointLights.push(spot as unknown as THREE.PointLight);
       }
     }
   }

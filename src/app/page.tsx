@@ -40,7 +40,6 @@ const SIM_SPLIT_WORKSPACES: WorkspaceId[] = ["structure", "lighting", "airflow",
 export default function HomePage() {
   const project = useStudioStore((s) => s.project);
   const workspace = useStudioStore((s) => s.workspace);
-  const dockOpen = useStudioStore((s) => s.dockOpen);
   const scheduleScenario = useStudioStore((s) => s.scheduleScenario);
   const loadProject = useStudioStore((s) => s.loadProject);
   const setSelected = useStudioStore((s) => s.setSelected);
@@ -295,6 +294,8 @@ export default function HomePage() {
           <BuildWorkspace
             derived={derived}
             struct={struct}
+            lighting={lighting}
+            airflow={airflow}
             onExportJson={handleExportJson}
             onImportJson={handleImportJson}
             onSaveSnapshot={handleSaveSnapshot}
@@ -338,9 +339,9 @@ export default function HomePage() {
           </button>
         )}
 
-        {/* Right Dock: Outliner + Inspector only when explicitly opened by user */}
-        {isBuildStub && dockOpen && buildSniOpen && (
-          <aside className="no-print hidden w-[320px] shrink-0 flex-col border-l border-border bg-[#181a1f] lg:flex xl:w-[348px]">
+        {/* Right Dock: Outliner + Inspector when opened in Build Mode (responsive desktop + tablet/mobile drawer) */}
+        {isBuildStub && buildSniOpen && (
+          <aside className="no-print absolute bottom-0 right-0 top-0 z-30 flex w-[300px] shrink-0 flex-col border-l border-border bg-[#181a1f]/98 shadow-2xl backdrop-blur-md lg:static lg:z-auto lg:w-[320px] lg:shadow-none xl:w-[348px]">
             <div className="flex h-[38%] min-h-[180px] flex-col">
               <OutlinerPanel derived={derived} struct={struct} />
             </div>

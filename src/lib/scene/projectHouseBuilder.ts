@@ -531,43 +531,80 @@ export function buildProjectHouse(
     }
   }
 
-  // 3. Structural Frame (LT1 & LT2 Columns/Beams)
+  // 3. Structural Frame (LT1 & LT2 Columns/Beams — strictly bounded to each column's spanned levels!)
   if (showSloofCol) {
     const colMat = project.systems.frame === "steel_wf" ? palette.steelWf : palette.concrete;
-    const maxColLevel = opts.activeLevelView === "lt1" ? 1 : 2;
-    const colTop = maxColLevel === 1 ? lt2Y : lt2Y + project.levels[1]!.height;
-    const colH = colTop - lt1Y + 0.25;
+    const hLt1 = project.levels[0]?.height ?? 3.6;
+    const hLt2 = project.levels[1]?.height ?? 3.6;
 
     for (const col of struct.columns) {
       const isCanopy = col.z < 1.0;
-      const h = isCanopy ? Math.max(2.2, lt2Y - 0.38 - (4.45 - col.z) * 0.055 - (lt1Y - 0.15)) : colH;
-      const colBatch = maxColLevel === 1 || isCanopy ? batchBase : batchLt2;
-      colBatch.addGeo(
-        "struct:col",
-        colMat,
-        "kolom",
-        `Kolom Utama (${struct.columns.length} titik)`,
-        createChamferBox(col.widthM, h, col.depthM, 0.008, 1),
-        col.x,
-        lt1Y - 0.15 + h * 0.5,
-        col.z,
-        0,
-        [0, 0.45, 0],
-      );
-      if (opts.xrayRebar && col.isMain) {
-        colBatch.addBox(
-          "struct:rebar",
-          palette.rebar,
+      // LT1 segment (ground/sloof up to LT2 slab soffit or capped wall height)
+      if (col.minLevel === 0) {
+        const capH = col.maxHeightM ? Math.min(hLt1, col.maxHeightM) : hLt1;
+        const h1 = isCanopy
+          ? Math.max(2.2, lt2Y - 0.38 - (4.45 - col.z) * 0.055 - (lt1Y - 0.15))
+          : capH + 0.15;
+        batchBase.addGeo(
+          "struct:col",
+          colMat,
           "kolom",
-          `Tulangan Kolom (${col.rebarSpec})`,
+          `Kolom LT1 (${struct.columns.length} titik)`,
+          createChamferBox(col.widthM, h1, col.depthM, 0.008, 1),
           col.x,
-          lt1Y - 0.15 + h * 0.5,
+          lt1Y - 0.15 + h1 * 0.5,
           col.z,
-          col.widthM * 0.68,
-          h + 0.1,
-          col.depthM * 0.68,
-          { explodeOff: [0, 0.45, 0] },
+          0,
+          [0, 0.45, 0],
         );
+        if (opts.xrayRebar && col.isMain) {
+          batchBase.addBox(
+            "struct:rebar",
+            palette.rebar,
+            "kolom",
+            `Tulangan Kolom LT1 (${col.rebarSpec})`,
+            col.x,
+            lt1Y - 0.15 + h1 * 0.5,
+            col.z,
+            col.widthM * 0.68,
+            h1 + 0.08,
+            col.depthM * 0.68,
+            { explodeOff: [0, 0.45, 0] },
+          );
+        }
+      }
+
+      // LT2 segment (only when this column belongs to LT2!)
+      if (col.maxLevel >= 1 && opts.activeLevelView !== "lt1") {
+        const capH2 = col.minLevel === 1 && col.maxHeightM ? Math.min(hLt2, col.maxHeightM) : hLt2;
+        const h2 = capH2 + 0.12;
+        batchLt2.addGeo(
+          "struct:col",
+          colMat,
+          "kolom",
+          `Kolom LT2 (${struct.columns.length} titik)`,
+          createChamferBox(col.widthM, h2, col.depthM, 0.008, 1),
+          col.x,
+          lt2Y - 0.04 + h2 * 0.5,
+          col.z,
+          0,
+          [0, 1.35, 0],
+        );
+        if (opts.xrayRebar && col.isMain) {
+          batchLt2.addBox(
+            "struct:rebar",
+            palette.rebar,
+            "kolom",
+            `Tulangan Kolom LT2 (${col.rebarSpec})`,
+            col.x,
+            lt2Y - 0.04 + h2 * 0.5,
+            col.z,
+            col.widthM * 0.68,
+            h2 + 0.08,
+            col.depthM * 0.68,
+            { explodeOff: [0, 1.35, 0] },
+          );
+        }
       }
     }
 
@@ -1205,7 +1242,6 @@ export function buildProjectHouse(
 
   // 9. Furniture, Movable HVAC, Lights & Outdoor Condensers
   if (showProps) {
-    let activePointLights = 0;
     for (const lv of project.levels) {
       if (lv.index === 1 && (opts.activeLevelView === "lt1" || opts.hideUpperPropsInLt1)) continue;
       const lvIdx = (lv.index === 1 ? 1 : 0) as 0 | 1;
@@ -1246,20 +1282,47 @@ export function buildProjectHouse(
         }
       }
 
+      // Per-level lighting budget (7 per level max so LT1 never starves LT2) + downward SpotLights so light never bleeds across floors!
+      const activeLightsOnLevel = lv.lights.filter((x) => x.on && x.dimmer > 0);
+      const maxHardwareLightsPerLevel = 7;
+      const activeIdSet = new Set(activeLightsOnLevel.slice(-maxHardwareLightsPerLevel).map((x) => x.id));
+
       for (const l of lv.lights) {
         const mesh = buildLightFixtureMesh(l, palette, resources);
         lvGrp.add(mesh);
         tagPickable(mesh, { kind: "light", id: l.id, levelIndex: lvIdx }, l.name);
-        if (l.on && l.dimmer > 0 && activePointLights < 6) {
-          activePointLights++;
-          const ptLight = new THREE.PointLight(
-            l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de,
-            (l.lumens / 650) * l.dimmer * 1.45,
-            7.5,
-            1.8,
-          );
-          ptLight.position.set(l.position.x, l.position.y - 0.14, l.position.z);
-          lvGrp.add(ptLight);
+        if (activeIdSet.has(l.id)) {
+          const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de;
+          const clampedY = Math.min(lv.height - 0.25, Math.max(0.25, l.position.y));
+          if (l.type === "garden") {
+            const pt = new THREE.PointLight(lightHex, (l.lumens / 500) * l.dimmer * 1.4, 2.6, 1.6);
+            pt.position.set(l.position.x, clampedY, l.position.z);
+            lvGrp.add(pt);
+          } else {
+            // Downward-aimed SpotLight illuminates only this floor & never bleeds upward through slab into LT2 or downward into LT1
+            const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
+            const rotY = l.rotationY ?? 0;
+            const fwdOff = l.type === "wall" ? 1.15 : 0;
+            const spot = new THREE.SpotLight(
+              lightHex,
+              (l.lumens / 450) * l.dimmer * 2.5,
+              Math.min(3.85, lv.height + 0.15),
+              halfAngle,
+              0.78,
+              1.4,
+            );
+            spot.position.set(
+              l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.1 : 0),
+              clampedY - 0.04,
+              l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.1 : 0),
+            );
+            spot.target.position.set(
+              l.position.x + Math.sin(rotY) * fwdOff,
+              0,
+              l.position.z + Math.cos(rotY) * fwdOff,
+            );
+            lvGrp.add(spot, spot.target);
+          }
         }
       }
 

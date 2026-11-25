@@ -258,6 +258,9 @@ export function createDefaultProject(): Project {
       9.35,
       false,
       [door("op1-p-powder", 0.9, 0.72, "Pintu Powder Room", -1, 15)],
+      {
+        height: 2.4,
+      },
     ),
     wall(
       "w1-powder-belakang",
@@ -267,7 +270,10 @@ export function createDefaultProject(): Project {
       1.35,
       9.35,
       false,
-      [vent("op1-la-powder", 0.65, 0.4, 2.0, "Roster Powder Room")],
+      [vent("op1-la-powder", 0.65, 0.4, 1.75, "Roster Powder Room")],
+      {
+        height: 2.15,
+      },
     ),
     // Dapur & Ruang Makan ke Taman Belakang (Z=15.35)
     wall("w1-wc-depan", "Sekat Depan WC LT1", halfO, 15.35, 1.7, 15.35, false, [
@@ -421,15 +427,15 @@ export function createDefaultProject(): Project {
       5 - halfO,
       7.5,
       false,
-      [door("op2-p-kt2", 0.65, 0.85, "Pintu Kamar Tidur 2 (Anak)", -1, 30)],
+      [door("op2-p-kt2", 0.5, 0.8, "Pintu Kamar Tidur 2 (Anak)", -1, 30)],
     ),
-    // Toilet Bersama LT2 (X: 3.25..4.95, Z: 7.50..9.50)
+    // Toilet Bersama LT2 (X: 3.50..4.95, Z: 7.50..9.50)
     wall(
       "w2-km2-sisi",
       "Sekat Toilet Bersama LT2",
-      3.25,
+      3.5,
       7.5,
-      3.25,
+      3.5,
       9.5,
       false,
       [door("op2-p-km2", 1.0, 0.75, "Pintu Toilet Bersama LT2", 1, 20)],
@@ -437,12 +443,12 @@ export function createDefaultProject(): Project {
     wall(
       "w2-km2-belakang",
       "Sekat Belakang Toilet Bersama LT2",
-      3.25,
+      3.5,
       9.5,
       5 - halfO,
       9.5,
       false,
-      [vent("op2-la-km2", 0.85, 0.4, 2.6, "Roster Toilet Bersama")],
+      [vent("op2-la-km2", 0.725, 0.4, 2.6, "Roster Toilet Bersama")],
     ),
     // Kamar Tidur Utama (X: 0..4.95, Z: 12.50..15.35)
     wall(
@@ -1332,8 +1338,8 @@ export function createDefaultProject(): Project {
               { x: 0, z: 4.0 },
               { x: 2.5, z: 4.0 },
               { x: 2.5, z: 7.5 },
-              { x: 3.25, z: 7.5 },
-              { x: 3.25, z: 9.5 },
+              { x: 3.5, z: 7.5 },
+              { x: 3.5, z: 9.5 },
               { x: 5.0, z: 9.5 },
               { x: 5.0, z: 12.5 },
               { x: 1.35, z: 12.5 },
@@ -1361,10 +1367,10 @@ export function createDefaultProject(): Project {
             name: "Toilet Bersama LT2",
             program: "bathroom",
             polygon: [
-              { x: 3.25, z: 7.5 },
+              { x: 3.5, z: 7.5 },
               { x: 5.0, z: 7.5 },
               { x: 5.0, z: 9.5 },
-              { x: 3.25, z: 9.5 },
+              { x: 3.5, z: 9.5 },
             ],
             floorMaterialId: "tile_30_grey",
             ceilingHeight: 3.0,

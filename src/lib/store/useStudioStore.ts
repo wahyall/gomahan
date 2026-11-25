@@ -308,6 +308,7 @@ export const useStudioStore = create<StudioStore>()(
       patchSiteOrientation: (deg) =>
         set((state) => {
           state.project.site.orientationDeg = deg;
+          state.project.updatedAt = new Date().toISOString();
         }),
       patchFloodMitigation: (patch) =>
         set((state) => {
@@ -323,6 +324,7 @@ export const useStudioStore = create<StudioStore>()(
               if (pt.kind === "panel_mcb") pt.y = patch.mcbHeightM;
             }
           }
+          state.project.updatedAt = new Date().toISOString();
           simsAudio.play("place");
         }),
       patchSimulation: (patch) =>
@@ -334,14 +336,17 @@ export const useStudioStore = create<StudioStore>()(
           if (patch.floodDepthCm !== undefined) {
             state.view.showFloodWater = patch.floodDepthCm > 0;
           }
+          state.project.updatedAt = new Date().toISOString();
         }),
       patchRabSettings: (patch) =>
         set((state) => {
           Object.assign(state.project.rabSettings, patch);
+          state.project.updatedAt = new Date().toISOString();
         }),
       patchStructuralParams: (patch) =>
         set((state) => {
           Object.assign(state.project.structuralParams, patch);
+          state.project.updatedAt = new Date().toISOString();
         }),
       updatePriceItem: (priceId, field, value) =>
         set((state) => {
