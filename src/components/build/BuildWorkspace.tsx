@@ -609,7 +609,7 @@ export function BuildWorkspace({
 
         {/* TOP-CENTER: Unified Edit Tools & Live Simulation Overlays */}
         <div className="order-3 flex w-full justify-center @[1240px]:order-2 @[1240px]:w-auto">
-          <div className="pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto rounded-2xl p-1 studio-glass">
+          <div className="no-scrollbar pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto scroll-smooth rounded-2xl p-1 studio-glass">
           <button
             type="button"
             onClick={() => {
@@ -792,8 +792,8 @@ export function BuildWorkspace({
               ))}
             </div>
 
-            {/* Roof Visibility + Camera Orbit */}
-            <div className="flex items-center justify-between gap-2 pt-0.5">
+            {/* Roof Visibility + Camera Orbit (desktop & tablet) */}
+            <div className="hidden items-center justify-between gap-2 pt-0.5 sm:flex">
               <div className="flex items-center gap-0.5">
                 {(["auto", "show", "hide"] as RoofVisibilityMode[]).map((rm) => (
                   <button
@@ -815,16 +815,18 @@ export function BuildWorkspace({
                 <button
                   type="button"
                   title="Putar Kamera 90° Kiri (Q)"
+                  aria-label="Putar Kamera 90° Kiri"
                   onClick={() => sceneRef.current?.cameraCtrl.rotateQuarter(-1)}
-                  className="flex h-6 w-6 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
+                  className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
                 >
                   <RotateCcw className="h-3 w-3" />
                 </button>
                 <button
                   type="button"
                   title="Putar Kamera 90° Kanan (E)"
+                  aria-label="Putar Kamera 90° Kanan"
                   onClick={() => sceneRef.current?.cameraCtrl.rotateQuarter(1)}
-                  className="flex h-6 w-6 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
+                  className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
                 >
                   <RotateCw className="h-3 w-3" />
                 </button>
@@ -832,7 +834,7 @@ export function BuildWorkspace({
                   type="button"
                   title="Reset Sudut Kamera"
                   onClick={() => sceneRef.current?.cameraCtrl.resetOverview()}
-                  className="flex h-6 items-center justify-center rounded-md bg-white/[0.06] px-1.5 text-[10px] font-medium text-foreground hover:bg-white/[0.14]"
+                  className="flex h-7 items-center justify-center rounded-md bg-white/[0.06] px-2 text-[10.5px] font-medium text-foreground hover:bg-white/[0.14]"
                 >
                   Reset
                 </button>
@@ -1063,8 +1065,8 @@ export function BuildWorkspace({
 
       {/* BOTTOM DOCK: TELEMETRY + DAYLIGHT PRESETS + UNIFIED CATALOG */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col gap-2 px-3 pb-2.5 lg:flex-row lg:items-end lg:justify-between">
-        {/* Bottom-Left Lot Telemetry + Time of Day */}
-        <div className="studio-glass pointer-events-auto hidden flex-col gap-2 rounded-2xl px-3 py-2.5 sm:flex lg:w-[272px] shrink-0">
+        {/* Bottom-Left Lot Telemetry + Time of Day (shown cleanly on wide viewports) */}
+        <div className="studio-glass pointer-events-auto hidden w-[264px] shrink-0 flex-col gap-2 rounded-2xl px-3 py-2.5 min-[1440px]:flex">
           <div className="flex items-start justify-between gap-2">
             <div>
               <div className="font-mono text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Denah 5×17 m</div>
@@ -1143,7 +1145,7 @@ export function BuildWorkspace({
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Cari item..."
-                  className="h-7 w-32 rounded-lg border border-white/10 bg-black/30 pl-7 pr-6 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+                  className="h-8 w-24 rounded-lg border border-white/10 bg-black/30 pl-7 pr-6 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none sm:h-7 sm:w-32"
                 />
                 {query && (
                   <button
@@ -1158,8 +1160,25 @@ export function BuildWorkspace({
               </div>
               <button
                 type="button"
+                title="Ganti Waktu Pencahayaan (Pagi / Siang / Sore / Malam)"
+                onClick={() => {
+                  const idx = TIMES_OF_DAY.findIndex((t) => Math.abs(project.simulation.hourOfDay - t.hour) < 2.2);
+                  const next = TIMES_OF_DAY[(idx + 1) % TIMES_OF_DAY.length]!;
+                  useStudioStore.getState().patchSimulation({ hourOfDay: next.hour });
+                  simsAudio.play("select");
+                }}
+                className="flex h-8 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.06] px-2 text-[10.5px] font-medium text-amber-200 transition hover:bg-white/[0.12] sm:h-7 min-[1440px]:hidden"
+              >
+                {project.simulation.hourOfDay >= 18.5 ? <Moon className="h-3 w-3" /> : <Sun className="h-3 w-3" />}
+                <span className="hidden sm:inline">
+                  {(TIMES_OF_DAY.find((t) => Math.abs(project.simulation.hourOfDay - t.hour) < 2.2) ?? TIMES_OF_DAY[1]!).label}
+                </span>
+              </button>
+              <button
+                type="button"
+                aria-label={catalogCollapsed ? "Tampilkan katalog item" : "Lipat katalog item"}
                 onClick={() => setCatalogCollapsed((c) => !c)}
-                className="flex h-7 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.06] px-2 text-[10.5px] font-medium text-foreground transition hover:bg-white/[0.12]"
+                className="flex h-8 min-w-8 items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/[0.06] px-2 text-[10.5px] font-medium text-foreground transition hover:bg-white/[0.12] sm:h-7"
               >
                 {catalogCollapsed ? (
                   <>
@@ -1294,7 +1313,7 @@ export function BuildWorkspace({
                           floor1PeilM: Math.max(0.15, Number((project.site.peil.floor1PeilM - 0.1).toFixed(2))),
                         })
                       }
-                      className="flex h-5 w-5 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20"
+                      className="flex h-7 w-7 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20 sm:h-6 sm:w-6"
                     >
                       -
                     </button>
@@ -1306,7 +1325,7 @@ export function BuildWorkspace({
                           floor1PeilM: Math.min(1.5, Number((project.site.peil.floor1PeilM + 0.1).toFixed(2))),
                         })
                       }
-                      className="flex h-5 w-5 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20"
+                      className="flex h-7 w-7 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20 sm:h-6 sm:w-6"
                     >
                       +
                     </button>
@@ -1327,7 +1346,7 @@ export function BuildWorkspace({
                     onClick={() => handleSelectItemClick(item)}
                     title={item.description}
                     className={cn(
-                      "group flex w-28 shrink-0 flex-col gap-1.5 rounded-xl border p-1.5 text-left transition active:scale-[0.98]",
+                      "group flex w-24 shrink-0 flex-col gap-1 rounded-xl border p-1.5 text-left transition active:scale-[0.98] sm:w-28 sm:gap-1.5",
                       active
                         ? "border-primary/70 bg-primary/15 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
                         : "border-white/[0.08] bg-black/25 hover:border-white/20 hover:bg-white/[0.05]",

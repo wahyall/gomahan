@@ -74,43 +74,49 @@ export function OutlinerPanel({ derived, struct, onCloseDrawer }: Props) {
           return (
             <div
               key={r.id}
-              onClick={() => r.partId && setSelected(isSelected ? null : { kind: "part", id: r.partId })}
-              role={r.partId ? "button" : undefined}
-              tabIndex={r.partId ? 0 : undefined}
-              onKeyDown={(e) => {
-                if (r.partId && (e.key === "Enter" || e.key === " ")) {
-                  e.preventDefault();
-                  setSelected(isSelected ? null : { kind: "part", id: r.partId });
-                }
-              }}
               className={cn(
-                "group flex h-7 items-center gap-1.5 rounded-lg px-2 text-[11.5px] transition-colors",
-                r.partId ? "cursor-pointer hover:bg-white/[0.06]" : "hover:bg-white/[0.03]",
+                "group flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-[11.5px] transition-colors",
+                r.partId ? "hover:bg-white/[0.06]" : "hover:bg-white/[0.03]",
                 isSelected && "bg-primary/15 font-semibold text-primary",
                 r.indent === 1 && "pl-4",
                 r.indent === 2 && "pl-7",
               )}
             >
-              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />
-              {Icon && <Icon className={cn("h-3.5 w-3.5 shrink-0", isSelected ? "text-primary" : "text-muted-foreground")} />}
-              <span className="min-w-0 flex-1 truncate">{r.label}</span>
-              {r.note && <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums group-hover:inline">{r.note}</span>}
+              {r.partId ? (
+                <button
+                  type="button"
+                  onClick={() => setSelected(isSelected ? null : { kind: "part", id: r.partId! })}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left outline-none focus-visible:text-primary"
+                >
+                  <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/40" aria-hidden />
+                  {Icon && <Icon className={cn("h-3.5 w-3.5 shrink-0", isSelected ? "text-primary" : "text-muted-foreground")} aria-hidden />}
+                  <span className="min-w-0 flex-1 truncate">{r.label}</span>
+                  {r.note && <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums group-hover:inline">{r.note}</span>}
+                </button>
+              ) : (
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 py-1">
+                  <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/40" aria-hidden />
+                  {Icon && <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+                  <span className="min-w-0 flex-1 truncate">{r.label}</span>
+                  {r.note && <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums group-hover:inline">{r.note}</span>}
+                </div>
+              )}
               {(r.flagKey || r.partId) && (
                 <button
                   type="button"
                   disabled={locked}
-                  onClick={(e) => {
-                    e.stopPropagation();
+                  onClick={() => {
                     if (r.flagKey) patchView({ [r.flagKey]: !view[r.flagKey] });
                     else if (r.partId) toggleHiddenPart(r.partId);
                   }}
                   className={cn(
-                    "flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition",
+                    "flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition",
                     locked ? "opacity-30" : isVisible ? "text-primary hover:bg-primary/20" : "text-muted-foreground/45 hover:text-foreground",
                   )}
+                  aria-label={locked ? "Dikendalikan Timeline Konstruksi" : `${isVisible ? "Sembunyikan" : "Tampilkan"} ${r.label}`}
                   title={locked ? "Dikendalikan Timeline Konstruksi" : isVisible ? "Sembunyikan" : "Tampilkan"}
                 >
-                  {isVisible || locked ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+                  {isVisible || locked ? <Eye className="h-3.5 w-3.5" aria-hidden /> : <EyeOff className="h-3.5 w-3.5" aria-hidden />}
                 </button>
               )}
             </div>

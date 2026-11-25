@@ -229,7 +229,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
 
       {/* Interactive Door Prompt */}
       {nearDoor && (
-        <div className="absolute bottom-36 left-4 z-20 sm:bottom-14 sm:left-1/2 sm:-translate-x-1/2">
+        <div className="absolute bottom-40 left-4 z-20 sm:bottom-14 sm:left-1/2 sm:-translate-x-1/2 [@media(max-height:480px)]:bottom-4 [@media(max-height:480px)]:left-1/2 [@media(max-height:480px)]:-translate-x-1/2">
           <button
             type="button"
             onClick={() => sceneRef.current?.triggerInteractNearestDoor()}
@@ -333,7 +333,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
       </div>
 
       {/* Desktop Key Legend Pill */}
-      <div className="studio-glass pointer-events-none absolute bottom-3 left-1/2 z-10 hidden -translate-x-1/2 items-center gap-3 rounded-full px-4 py-1.5 text-[10.5px] text-muted-foreground sm:flex">
+      <div className="studio-glass pointer-events-none absolute bottom-3 left-1/2 z-10 hidden -translate-x-1/2 items-center gap-3 rounded-full px-4 py-1.5 text-[10.5px] text-muted-foreground sm:flex [@media(max-height:500px)]:hidden [@media(pointer:coarse)]:hidden">
         <span><strong className="text-foreground">WASD</strong> Jalan</span>
         <span><strong className="text-foreground">Shift</strong> Lari</span>
         <span><strong className="text-foreground">Klik / Seret</strong> Lihat 360°</span>

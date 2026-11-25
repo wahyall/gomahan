@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { CornerDownLeft, Search, X } from "lucide-react";
@@ -23,6 +23,18 @@ export function CommandPalette() {
 
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const wasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    } else if (!open && wasOpenRef.current) {
+      previousFocusRef.current?.focus?.();
+      previousFocusRef.current = null;
+    }
+    wasOpenRef.current = open;
+  }, [open]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -114,6 +126,7 @@ export function CommandPalette() {
     >
       <div
         role="dialog"
+        aria-modal="true"
         aria-label="Command Palette"
         className="studio-glass w-full max-w-lg overflow-hidden rounded-2xl shadow-2xl"
         onClick={(e) => e.stopPropagation()}

@@ -78,6 +78,15 @@
 canvas.viewport-canvas {
   outline: none;
   display: block;
+  touch-action: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* Custom sleek architectural studio range input */

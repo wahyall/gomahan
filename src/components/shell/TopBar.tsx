@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
+import { useStore } from "zustand";
 import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
@@ -76,13 +77,13 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
   const setCommandPaletteOpen = useStudioStore((s) => s.setCommandPaletteOpen);
   const resetProject = useStudioStore((s) => s.resetProject);
 
-  const canUndo = useStudioStore.temporal.getState().pastStates.length > 0;
-  const canRedo = useStudioStore.temporal.getState().futureStates.length > 0;
+  const canUndo = useStore(useStudioStore.temporal, (s) => s.pastStates.length > 0);
+  const canRedo = useStore(useStudioStore.temporal, (s) => s.futureStates.length > 0);
 
   return (
     <header className="no-print flex shrink-0 flex-col border-b border-border bg-[#0f1216]">
       {/* Primary Row: Brand + Grouped Segmented Dock + Global Actions */}
-      <div className="flex h-12 items-center justify-between gap-2.5 px-3">
+      <div className="flex h-11 items-center justify-between gap-2.5 px-3 sm:h-12 [@media(max-height:480px)]:h-9">
         {/* Brand Identity */}
         <div className="flex shrink-0 items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-[#e28a48] to-[#b9662a] text-[#170f07] shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_6px_rgba(0,0,0,0.4)]">
@@ -140,7 +141,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
               disabled={!canUndo}
               title="Undo (Ctrl+Z)"
               aria-label="Undo (Ctrl+Z)"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.07] hover:text-foreground disabled:opacity-30"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.07] hover:text-foreground disabled:opacity-30 sm:h-7 sm:w-7"
             >
               <Undo2 className="h-3.5 w-3.5" />
             </button>
@@ -150,7 +151,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
               disabled={!canRedo}
               title="Redo (Ctrl+Shift+Z)"
               aria-label="Redo (Ctrl+Shift+Z)"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.07] hover:text-foreground disabled:opacity-30"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-white/[0.07] hover:text-foreground disabled:opacity-30 sm:h-7 sm:w-7"
             >
               <Redo2 className="h-3.5 w-3.5" />
             </button>
@@ -283,7 +284,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
 
       {/* Mobile / Tablet Scrollable Workspace Strip (< lg, comfortable tap targets) */}
       <nav
-        className="flex h-11 items-center gap-1 overflow-x-auto border-t border-white/[0.06] bg-[#13171d] px-2.5 lg:hidden"
+        className="no-scrollbar flex h-10 items-center gap-1 overflow-x-auto border-t border-white/[0.06] bg-[#13171d] px-2.5 lg:hidden [@media(max-height:480px)]:h-8"
         aria-label="Navigasi ruang kerja mobile"
       >
         {WORKSPACES.map((w, idx) => {
