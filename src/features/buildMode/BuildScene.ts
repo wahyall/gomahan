@@ -150,6 +150,11 @@ export class BuildScene {
   private readonly _up = new THREE.Vector3(0, 1, 0);
   private readonly _col = new THREE.Color();
   private readonly _tmpNorm = new THREE.Vector3();
+  private readonly _hoverBox = new THREE.Box3();
+  private readonly _hoverSize = new THREE.Vector3();
+  private readonly _hoverCenter = new THREE.Vector3();
+  private readonly hoverBoxGeo = new THREE.BoxGeometry(1, 1, 1);
+  private hoverHighlightMesh: THREE.Mesh;
 
   private viewOpts: BuildViewOptions = {
     activeLevel: 0,
@@ -174,6 +179,26 @@ export class BuildScene {
   private terrainScratch: number[] | null = null;
   private isBrushDown = false;
   private draggingEntity: SelectionTarget = null;
+  private draggingMesh: THREE.Object3D | null = null;
+  private dragPendingCommit: {
+    kind: "furniture" | "hvac" | "light";
+    lvIdx: 0 | 1;
+    id: string;
+    label: string;
+    pos: { x: number; y: number; z: number };
+    rotationY?: number;
+    origPos: { x: number; y: number; z: number };
+    origRotY?: number;
+    origMeshPos: THREE.Vector3;
+    origMeshRotY: number;
+    yRenderOffset: number;
+  } | null = null;
+  private baseDpr = 1;
+  private currentDpr = 1;
+  private lastDprCheckMs = 0;
+  private contextLost = false;
+  private readonly reducedMotion =
+    typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
   private altHeld = false;
   private lastWorldPos = { x: 2.5, z: 8.5, inBounds: false };
   private pointerDownPos = { x: 0, y: 0 };
@@ -198,6 +223,14 @@ export class BuildScene {
   private readonly onPointerMoveBound = (e: PointerEvent) => this.handlePointerMove(e);
   private readonly onPointerDownBound = (e: PointerEvent) => this.handlePointerDown(e);
   private readonly onPointerUpBound = (e: PointerEvent) => this.handlePointerUp(e);
+  private readonly onContextLostBound = (e: Event) => {
+    e.preventDefault();
+    this.contextLost = true;
+  };
+  private readonly onContextRestoredBound = () => {
+    this.contextLost = false;
+    this.lastFrameMs = performance.now();
+  };
   private readonly onKeyDownBound = (e: KeyboardEvent) => {
     this.altHeld = e.altKey;
     if (e.key === "Escape") this.cancelActivePreview();
@@ -211,7 +244,9 @@ export class BuildScene {
     this.actions = actions;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.baseDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    this.currentDpr = this.baseDpr;
+    this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -232,7 +267,7 @@ export class BuildScene {
     this.sunLight = new THREE.DirectionalLight(0xfff5e0, 2.35);
     this.sunLight.position.set(14, 22, -10);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.mapSize.set(1024, 1024);
     this.sunLight.shadow.camera.near = 1.5;
     this.sunLight.shadow.camera.far = 56;
     this.sunLight.shadow.camera.left = -10.5;
@@ -265,6 +300,10 @@ export class BuildScene {
     this.staticDisposables.push(skyTex, this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
 
     buildStaticNeighborhood(this.envGroup, this.neighborsGroup, this.palette, this.contactShadowTex, this.staticDisposables);
+
+    this.hoverHighlightMesh = new THREE.Mesh(this.hoverBoxGeo, this.cyanMat);
+    this.hoverHighlightMesh.visible = false;
+    this.scene.add(this.hoverHighlightMesh);
 
     const ringGeo = new THREE.RingGeometry(0.42, 0.56, 32);
     ringGeo.rotateX(-Math.PI / 2);
@@ -308,6 +347,8 @@ export class BuildScene {
     canvas.addEventListener("pointermove", this.onPointerMoveBound);
     canvas.addEventListener("pointerdown", this.onPointerDownBound);
     canvas.addEventListener("pointerup", this.onPointerUpBound);
+    canvas.addEventListener("webglcontextlost", this.onContextLostBound);
+    canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
 
     this.startLoop();
   }
@@ -323,8 +364,15 @@ export class BuildScene {
     this.canvas.removeEventListener("pointermove", this.onPointerMoveBound);
     this.canvas.removeEventListener("pointerdown", this.onPointerDownBound);
     this.canvas.removeEventListener("pointerup", this.onPointerUpBound);
+    this.canvas.removeEventListener("webglcontextlost", this.onContextLostBound);
+    this.canvas.removeEventListener("webglcontextrestored", this.onContextRestoredBound);
     this.cameraCtrl.dispose();
 
+    this.scene.remove(this.hoverHighlightMesh);
+    this.hoverBoxGeo.dispose();
+    this.envGroup.clear();
+    this.neighborsGroup.clear();
+    this.houseContainer.clear();
     for (const r of this.dynResources) r.dispose();
     for (const r of this.simResources) r.dispose();
     for (const r of this.staticDisposables) r.dispose();
@@ -337,9 +385,15 @@ export class BuildScene {
   }
 
   public cancelActivePreview(): void {
+    if (this.dragPendingCommit && this.draggingMesh) {
+      this.draggingMesh.position.copy(this.dragPendingCommit.origMeshPos);
+      this.draggingMesh.rotation.y = this.dragPendingCommit.origMeshRotY;
+    }
     this.dragStartVertex = null;
     this.dragStartCell = null;
     this.draggingEntity = null;
+    this.draggingMesh = null;
+    this.dragPendingCommit = null;
     this.isBrushDown = false;
     this.brushStrokeCells.clear();
     this.terrainScratch = null;
@@ -348,6 +402,7 @@ export class BuildScene {
   }
 
   private clearPreviewMeshes(): void {
+    this.hoverHighlightMesh.visible = false;
     for (const c of this.previewGroup.children) {
       if (c instanceof THREE.Mesh || c instanceof THREE.LineSegments) c.geometry.dispose();
     }
@@ -961,14 +1016,18 @@ export class BuildScene {
     if (tool === "select" || tool === "sledgehammer" || tool === "eyedropper" || tool === "wall_paint") {
       const hitRes = this.raycastHit(e, true);
       if (hitRes && (tool !== "wall_paint" || hitRes.sel.kind === "wall")) {
-        const box = new THREE.Box3().setFromObject(hitRes.obj);
-        const size = box.getSize(new THREE.Vector3());
-        const center = box.getCenter(new THREE.Vector3());
-        const geo = new THREE.BoxGeometry(Math.max(0.18, size.x + 0.06), Math.max(0.18, size.y + 0.06), Math.max(0.18, size.z + 0.06));
-        const mat = tool === "sledgehammer" ? this.invalidMat : tool === "wall_paint" ? this.validMat : this.cyanMat;
-        const m = new THREE.Mesh(geo, mat);
-        m.position.copy(center);
-        this.previewGroup.add(m);
+        this._hoverBox.setFromObject(hitRes.obj);
+        this._hoverBox.getSize(this._hoverSize);
+        this._hoverBox.getCenter(this._hoverCenter);
+        this.hoverHighlightMesh.material =
+          tool === "sledgehammer" ? this.invalidMat : tool === "wall_paint" ? this.validMat : this.cyanMat;
+        this.hoverHighlightMesh.scale.set(
+          Math.max(0.18, this._hoverSize.x + 0.06),
+          Math.max(0.18, this._hoverSize.y + 0.06),
+          Math.max(0.18, this._hoverSize.z + 0.06),
+        );
+        this.hoverHighlightMesh.position.copy(this._hoverCenter);
+        this.hoverHighlightMesh.visible = true;
         this.actions.onPreviewHud({
           label:
             tool === "sledgehammer"
@@ -1185,32 +1244,57 @@ export class BuildScene {
     if (this.draggingEntity) {
       const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
       const lv = this.derived.project.levels[lvIdx];
-      if (lv) {
-        if (this.draggingEntity.kind === "furniture") {
-          const cur = lv.furniture.find((x) => x.id === this.draggingEntity?.id);
-          if (cur) {
-            const placed = this.raycastSurfaceForPlacement(e, lvIdx, "surface", 0, cur.position.y, cur.id);
-            if (placed.valid) this.actions.onMoveFurniture(lvIdx, cur.id, { x: placed.x, y: placed.y, z: placed.z });
-          }
-        } else if (this.draggingEntity.kind === "hvac") {
-          const cur = lv.hvac.find((x) => x.id === this.draggingEntity?.id);
+      const lotW = this.derived.project.site.width;
+      const lotD = this.derived.project.site.depth;
+      if (lv && this.dragPendingCommit) {
+        const pending = this.dragPendingCommit;
+        let nextPlaced: { x: number; y: number; z: number; rotationY?: number; valid: boolean; surfaceLabel: string } | null = null;
+        if (pending.kind === "furniture") {
+          nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, "surface", 0, pending.origPos.y, pending.id);
+        } else if (pending.kind === "hvac") {
+          const cur = lv.hvac.find((x) => x.id === pending.id);
           if (cur) {
             const mk = this.getMountKind("hvac", cur.type, undefined);
             const wallOff = cur.type === "ac_split" ? 0.12 : cur.type === "wall_fan" ? 0.03 : 0.05;
-            const placed = this.raycastSurfaceForPlacement(e, lvIdx, mk, wallOff, cur.position.y, cur.id);
-            if (placed.valid) {
-              this.actions.onMoveHvac(lvIdx, cur.id, { x: placed.x, y: placed.y, z: placed.z }, placed.rotationY);
-            }
+            nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mk, wallOff, pending.origPos.y, pending.id);
           }
-        } else if (this.draggingEntity.kind === "light") {
-          const cur = lv.lights.find((x) => x.id === this.draggingEntity?.id);
+        } else if (pending.kind === "light") {
+          const cur = lv.lights.find((x) => x.id === pending.id);
           if (cur) {
             const mk = this.getMountKind("light", undefined, cur.type);
-            const placed = this.raycastSurfaceForPlacement(e, lvIdx, mk, 0.05, cur.position.y, cur.id);
-            if (placed.valid) {
-              this.actions.onMoveLight(lvIdx, cur.id, { x: placed.x, y: placed.y, z: placed.z }, placed.rotationY);
-            }
+            nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mk, 0.05, pending.origPos.y, pending.id);
           }
+        }
+
+        if (nextPlaced && nextPlaced.valid) {
+          const cx = THREE.MathUtils.clamp(nextPlaced.x, 0.16, lotW - 0.16);
+          const cz = THREE.MathUtils.clamp(nextPlaced.z, 0.16, lotD - 0.16);
+          pending.pos = { x: cx, y: nextPlaced.y, z: cz };
+          if (nextPlaced.rotationY !== undefined) pending.rotationY = nextPlaced.rotationY;
+          if (this.draggingMesh) {
+            this.draggingMesh.position.set(cx, nextPlaced.y + pending.yRenderOffset, cz);
+            if (nextPlaced.rotationY !== undefined) this.draggingMesh.rotation.y = nextPlaced.rotationY;
+            this._hoverBox.setFromObject(this.draggingMesh);
+            this._hoverBox.getSize(this._hoverSize);
+            this._hoverBox.getCenter(this._hoverCenter);
+            this.hoverHighlightMesh.material = this.validMat;
+            this.hoverHighlightMesh.scale.set(
+              Math.max(0.18, this._hoverSize.x + 0.06),
+              Math.max(0.18, this._hoverSize.y + 0.06),
+              Math.max(0.18, this._hoverSize.z + 0.06),
+            );
+            this.hoverHighlightMesh.position.copy(this._hoverCenter);
+            this.hoverHighlightMesh.visible = true;
+          }
+          this.actions.onPreviewHud({
+            label: `Geser ${pending.label} (${cx.toFixed(1)}m, ${cz.toFixed(1)}m · Lepas simpan)`,
+            valid: true,
+          });
+        } else {
+          this.actions.onPreviewHud({
+            label: nextPlaced?.surfaceLabel ?? "Area tidak valid",
+            valid: false,
+          });
         }
       }
       return;
@@ -1257,8 +1341,39 @@ export class BuildScene {
     if (tool === "select") {
       const hitRes = this.raycastHit(e, true);
       if (hitRes && (hitRes.sel.kind === "furniture" || hitRes.sel.kind === "hvac" || hitRes.sel.kind === "light")) {
-        this.draggingEntity = hitRes.sel;
-        this.actions.onSelect(hitRes.sel);
+        const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
+        const lv = this.derived.project.levels[lvIdx];
+        const sel = hitRes.sel;
+        const curItem =
+          sel.kind === "furniture"
+            ? lv?.furniture.find((x) => x.id === sel.id)
+            : sel.kind === "hvac"
+              ? lv?.hvac.find((x) => x.id === sel.id)
+              : lv?.lights.find((x) => x.id === sel.id);
+        this.draggingEntity = sel;
+        this.draggingMesh = hitRes.obj;
+        if (curItem) {
+          const origRotY = "rotationY" in curItem ? curItem.rotationY : undefined;
+          this.dragPendingCommit = {
+            kind: sel.kind,
+            lvIdx,
+            id: sel.id,
+            label: hitRes.label,
+            pos: { ...curItem.position },
+            rotationY: origRotY,
+            origPos: { ...curItem.position },
+            origRotY,
+            origMeshPos: hitRes.obj.position.clone(),
+            origMeshRotY: hitRes.obj.rotation.y,
+            yRenderOffset: hitRes.obj.position.y - curItem.position.y,
+          };
+          try {
+            this.canvas.setPointerCapture?.(e.pointerId);
+          } catch {
+            // ignore
+          }
+        }
+        this.actions.onSelect(sel);
       } else {
         this.actions.onSelect(hitRes ? hitRes.sel : null);
       }
@@ -1290,11 +1405,37 @@ export class BuildScene {
   }
 
   private handlePointerUp(e: PointerEvent): void {
+    try {
+      if (this.canvas.hasPointerCapture?.(e.pointerId)) {
+        this.canvas.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // ignore
+    }
     if (e.button !== 0 || !this.derived) return;
 
     if (this.draggingEntity) {
+      const pending = this.dragPendingCommit;
       this.draggingEntity = null;
-      simsAudio.play("place");
+      this.draggingMesh = null;
+      this.dragPendingCommit = null;
+      this.hoverHighlightMesh.visible = false;
+      this.actions.onPreviewHud(null);
+      if (pending) {
+        const moved =
+          Math.hypot(pending.pos.x - pending.origPos.x, pending.pos.y - pending.origPos.y, pending.pos.z - pending.origPos.z) > 0.002 ||
+          Math.abs((pending.rotationY ?? 0) - (pending.origRotY ?? 0)) > 0.002;
+        if (moved) {
+          if (pending.kind === "furniture") {
+            this.actions.onMoveFurniture(pending.lvIdx, pending.id, pending.pos, pending.rotationY);
+          } else if (pending.kind === "hvac") {
+            this.actions.onMoveHvac(pending.lvIdx, pending.id, pending.pos, pending.rotationY);
+          } else {
+            this.actions.onMoveLight(pending.lvIdx, pending.id, pending.pos, pending.rotationY);
+          }
+          simsAudio.play("place");
+        }
+      }
       return;
     }
 
@@ -1575,20 +1716,31 @@ export class BuildScene {
   }
 
   private handleVisibility(): void {
-    if (!document.hidden) this.lastFrameMs = performance.now();
+    if (document.hidden) {
+      if (this.rafId !== null) {
+        cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+    } else {
+      this.lastFrameMs = performance.now();
+      this.startLoop();
+    }
   }
 
   private startLoop(): void {
+    if (this.rafId !== null || this.disposed) return;
     const tick = (now: number) => {
       if (this.disposed) return;
       this.rafId = requestAnimationFrame(tick);
-      if (document.hidden) return;
+      if (document.hidden || this.contextLost) return;
 
       const dt = (now - this.lastFrameMs) / 1000;
       this.lastFrameMs = now;
 
-      for (const fan of this.animatedFans) {
-        fan.rotation.y += dt * 7.5;
+      if (!this.reducedMotion) {
+        for (const fan of this.animatedFans) {
+          fan.rotation.y += dt * 7.5;
+        }
       }
 
       if (this.airParticlesMesh && this.airflow && this.airParticleStates.length > 0 && this.derived) {
@@ -1637,6 +1789,18 @@ export class BuildScene {
         if (this.fpsSamples.length >= 24) {
           const avg = Math.round(this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length);
           this.fpsSamples = [];
+          if (now - this.lastDprCheckMs > 2000) {
+            this.lastDprCheckMs = now;
+            if (avg < 36 && this.currentDpr > 1) {
+              this.currentDpr = 1;
+              this.renderer.setPixelRatio(1);
+              this.handleResize();
+            } else if (avg > 54 && this.currentDpr < this.baseDpr) {
+              this.currentDpr = this.baseDpr;
+              this.renderer.setPixelRatio(this.currentDpr);
+              this.handleResize();
+            }
+          }
           const info = this.renderer.info;
           const snap: BuildSceneStats = {
             fps: avg,

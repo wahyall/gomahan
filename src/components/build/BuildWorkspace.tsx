@@ -555,7 +555,7 @@ export function BuildWorkspace({
     <div className="@container relative flex h-full w-full flex-1 flex-col overflow-hidden bg-[#10141a] select-none">
       <canvas
         ref={canvasRef}
-        className={cn("viewport-canvas h-full w-full flex-1", activeTool === "select" ? "cursor-pointer" : "cursor-crosshair")}
+        className={cn("viewport-canvas touch-none h-full w-full flex-1", activeTool === "select" ? "cursor-pointer" : "cursor-crosshair")}
       />
 
       {webglError && (

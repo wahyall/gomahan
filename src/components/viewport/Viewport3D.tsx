@@ -214,7 +214,7 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
       {/* Main 3D Canvas */}
       <div className="relative flex min-h-0 flex-1">
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          <canvas ref={canvasRef} className="viewport-canvas h-full w-full cursor-grab active:cursor-grabbing" />
+          <canvas ref={canvasRef} className="viewport-canvas touch-none h-full w-full cursor-grab active:cursor-grabbing" />
 
           {/* Top Overlay Row */}
           <div className="pointer-events-none absolute inset-x-2.5 top-2.5 flex items-start justify-between gap-2">

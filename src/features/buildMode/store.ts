@@ -138,7 +138,17 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
       placementRotationQuarter: (((s.placementRotationQuarter + delta + 4) % 4) as 0 | 1 | 2 | 3),
     })),
 
-  setHover: (hover) => set({ hover }),
+  setHover: (hover) =>
+    set((s) => {
+      if (
+        s.hover?.gx === hover?.gx &&
+        s.hover?.gz === hover?.gz &&
+        s.hover?.inBounds === hover?.inBounds
+      ) {
+        return s;
+      }
+      return { hover };
+    }),
   setPreviewHud: (previewHud) => set({ previewHud }),
   saveCameraSnapshot: (savedCameraSnapshot) => set({ savedCameraSnapshot }),
 }));

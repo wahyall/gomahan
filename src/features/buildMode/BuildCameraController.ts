@@ -51,6 +51,8 @@ export class BuildCameraController {
   private readonly _hit = new THREE.Vector3();
   private readonly _fwd = new THREE.Vector3();
   private readonly _right = new THREE.Vector3();
+  private readonly _up = new THREE.Vector3(0, 1, 0);
+  private readonly _wheelNdc = new THREE.Vector2(0, 0);
 
   // Touch pinch state
   private activeTouches = new Map<number, { x: number; y: number }>();
@@ -198,6 +200,11 @@ export class BuildCameraController {
   }
 
   private handlePointerDown(e: PointerEvent): void {
+    try {
+      this.domElement.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore synthetic events
+    }
     if (e.pointerType === "touch") {
       this.activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.activeTouches.size === 2) {
@@ -262,6 +269,13 @@ export class BuildCameraController {
   }
 
   private handlePointerUp(e: PointerEvent): void {
+    try {
+      if (this.domElement.hasPointerCapture?.(e.pointerId)) {
+        this.domElement.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // ignore
+    }
     if (e.pointerType === "touch") {
       this.activeTouches.delete(e.pointerId);
       this.lastPinchDist = 0;
@@ -279,8 +293,9 @@ export class BuildCameraController {
     const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
     // Cursor-directed zoom: trace cursor ray onto current floor horizontal plane
-    this._plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), this.goalTarget);
-    this._raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    this._plane.setFromNormalAndCoplanarPoint(this._up, this.goalTarget);
+    this._wheelNdc.set(ndcX, ndcY);
+    this._raycaster.setFromCamera(this._wheelNdc, this.camera);
     const hitPoint = this._raycaster.ray.intersectPlane(this._plane, this._hit);
 
     const oldDist = this.goalDistance;
