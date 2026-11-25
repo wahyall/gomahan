@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
 import { computeStructuralReport } from "@/lib/structure/sniEngine";
@@ -16,23 +17,77 @@ import type { HouseScene } from "@/lib/scene/HouseScene";
 import { TopBar } from "@/components/shell/TopBar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { CommandPalette } from "@/components/shell/CommandPalette";
-import { Viewport3D } from "@/components/viewport/Viewport3D";
-import { OutlinerPanel } from "@/components/panels/OutlinerPanel";
-import { InspectorPanel } from "@/components/panels/InspectorPanel";
-import { StageTimelineBar } from "@/components/panels/StageTimelineBar";
 import { BuildWorkspace } from "@/components/build/BuildWorkspace";
-import { WalkWorkspace } from "@/components/walk/WalkWorkspace";
-import { StructureWorkspace } from "@/components/workspaces/StructureWorkspace";
-import { LightingWorkspace } from "@/components/workspaces/LightingWorkspace";
-import { AirflowWorkspace } from "@/components/workspaces/AirflowWorkspace";
-import { FloodWorkspace } from "@/components/workspaces/FloodWorkspace";
-import { DrawingsWorkspace } from "@/components/workspaces/DrawingsWorkspace";
-import { RabWorkspace } from "@/components/workspaces/RabWorkspace";
-import { TimelineWorkspace } from "@/components/workspaces/TimelineWorkspace";
-import { DeliverWorkspace } from "@/components/workspaces/DeliverWorkspace";
-import { SiteModeWorkspace } from "@/components/workspaces/SiteModeWorkspace";
-import { GuideWorkspace } from "@/components/workspaces/GuideWorkspace";
 import { cn } from "@/lib/utils";
+
+function WorkspaceLoading({ label }: { label: string }) {
+  return (
+    <div className="flex h-full min-h-[240px] w-full flex-1 items-center justify-center bg-[#0d1015] text-xs font-medium text-muted-foreground">
+      Memuat {label}...
+    </div>
+  );
+}
+
+const Viewport3D = dynamic(
+  () => import("@/components/viewport/Viewport3D").then((m) => m.Viewport3D),
+  { ssr: false, loading: () => <WorkspaceLoading label="Viewport 3D" /> },
+);
+const OutlinerPanel = dynamic(
+  () => import("@/components/panels/OutlinerPanel").then((m) => m.OutlinerPanel),
+  { ssr: false },
+);
+const InspectorPanel = dynamic(
+  () => import("@/components/panels/InspectorPanel").then((m) => m.InspectorPanel),
+  { ssr: false },
+);
+const StageTimelineBar = dynamic(
+  () => import("@/components/panels/StageTimelineBar").then((m) => m.StageTimelineBar),
+  { ssr: false },
+);
+const WalkWorkspace = dynamic(
+  () => import("@/components/walk/WalkWorkspace").then((m) => m.WalkWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Walk Mode 3D" /> },
+);
+const StructureWorkspace = dynamic(
+  () => import("@/components/workspaces/StructureWorkspace").then((m) => m.StructureWorkspace),
+  { ssr: false },
+);
+const LightingWorkspace = dynamic(
+  () => import("@/components/workspaces/LightingWorkspace").then((m) => m.LightingWorkspace),
+  { ssr: false },
+);
+const AirflowWorkspace = dynamic(
+  () => import("@/components/workspaces/AirflowWorkspace").then((m) => m.AirflowWorkspace),
+  { ssr: false },
+);
+const FloodWorkspace = dynamic(
+  () => import("@/components/workspaces/FloodWorkspace").then((m) => m.FloodWorkspace),
+  { ssr: false },
+);
+const DrawingsWorkspace = dynamic(
+  () => import("@/components/workspaces/DrawingsWorkspace").then((m) => m.DrawingsWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Denah & Potongan 2D" /> },
+);
+const RabWorkspace = dynamic(
+  () => import("@/components/workspaces/RabWorkspace").then((m) => m.RabWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Rencana Anggaran Biaya" /> },
+);
+const TimelineWorkspace = dynamic(
+  () => import("@/components/workspaces/TimelineWorkspace").then((m) => m.TimelineWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Jadwal Konstruksi" /> },
+);
+const DeliverWorkspace = dynamic(
+  () => import("@/components/workspaces/DeliverWorkspace").then((m) => m.DeliverWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Pusat Ekspor" /> },
+);
+const SiteModeWorkspace = dynamic(
+  () => import("@/components/workspaces/SiteModeWorkspace").then((m) => m.SiteModeWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Mode Lapangan" /> },
+);
+const GuideWorkspace = dynamic(
+  () => import("@/components/workspaces/GuideWorkspace").then((m) => m.GuideWorkspace),
+  { ssr: false, loading: () => <WorkspaceLoading label="Panduan Studio" /> },
+);
 import { Eye, SlidersHorizontal, X } from "lucide-react";
 
 const SIM_SPLIT_WORKSPACES: WorkspaceId[] = ["structure", "lighting", "airflow", "flood"];
@@ -109,7 +164,9 @@ export default function HomePage() {
   // Capture snapshot whenever scene canvas is live so Deliver/ZIP works anytime
   const captureSnapshot = useCallback((): string | null => {
     try {
-      const cv = sceneRef.current?.getCanvas();
+      const cv =
+        sceneRef.current?.getCanvas() ??
+        (document.querySelector("main canvas") as HTMLCanvasElement | null);
       if (cv && cv.width > 0 && cv.height > 0) {
         const url = cv.toDataURL("image/jpeg", 0.92);
         lastSnapshotRef.current = url;
@@ -121,12 +178,9 @@ export default function HomePage() {
     return lastSnapshotRef.current;
   }, []);
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (sceneRef.current) captureSnapshot();
-    }, 2500);
-    return () => clearInterval(id);
-  }, [captureSnapshot]);
+  const handleSnapshotCapture = useCallback((url: string) => {
+    if (url) lastSnapshotRef.current = url;
+  }, []);
 
   // Global studio keyboard shortcuts
   useEffect(() => {
@@ -297,9 +351,16 @@ export default function HomePage() {
             airflow={airflow}
             buildSniOpen={buildSniOpen}
             onToggleBuildSni={() => setBuildSniOpen((v) => !v)}
+            onSnapshotCapture={handleSnapshotCapture}
           />
         )}
-        {isWalkStub && <WalkWorkspace derived={derived} struct={struct} />}
+        {isWalkStub && (
+          <WalkWorkspace
+            derived={derived}
+            struct={struct}
+            onSnapshotCapture={handleSnapshotCapture}
+          />
+        )}
 
         {/* Analytical 3D Viewport + Timeline */}
         {isSimSplit && (
@@ -318,6 +379,7 @@ export default function HomePage() {
               flood={flood}
               gamification={gamification}
               onSceneReady={handleSceneReady}
+              onSnapshotCapture={handleSnapshotCapture}
             />
             <StageTimelineBar />
           </section>

@@ -38,11 +38,16 @@ interface Props {
   flood: FloodSimulationResult;
   gamification: GamificationEvaluation;
   onSceneReady?: (scene: HouseScene | null) => void;
+  onSnapshotCapture?: (dataUrl: string) => void;
 }
 
-export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gamification, onSceneReady }: Props) {
+export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gamification, onSceneReady, onSnapshotCapture }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<HouseScene | null>(null);
+  const onSnapshotRef = useRef(onSnapshotCapture);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshotCapture;
+  }, [onSnapshotCapture]);
   const [hoverInfo, setHoverInfo] = useState<{ label: string; x: number; y: number } | null>(null);
   const [showQuests, setShowQuests] = useState(false);
   const [webglStatus, setWebglStatus] = useState<WebGLStatus>("ok");
@@ -66,14 +71,22 @@ export function Viewport3D({ derived, struct, rab, lighting, airflow, flood, gam
       onWebGLStatus: (status) => setWebglStatus(status),
       onStats: (stats) => setSceneStats(stats),
     });
-    sceneRef.current = sc;
-    onSceneReady?.(sc);
-    sc.setCameraPreset("3d");
-    return () => {
-      sc.dispose();
-      sceneRef.current = null;
-      onSceneReady?.(null);
-    };
+      sceneRef.current = sc;
+      onSceneReady?.(sc);
+      sc.setCameraPreset("3d");
+      return () => {
+        try {
+          const cv = sc.getCanvas();
+          if (cv && cv.width > 0 && cv.height > 0) {
+            onSnapshotRef.current?.(cv.toDataURL("image/jpeg", 0.9));
+          }
+        } catch {
+          // ignore readback failure
+        }
+        sc.dispose();
+        sceneRef.current = null;
+        onSceneReady?.(null);
+      };
   }, [onSceneReady]);
 
   useEffect(() => {

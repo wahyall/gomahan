@@ -55,6 +55,7 @@ interface BuildWorkspaceProps {
   airflow?: AirflowSimulationResult;
   buildSniOpen?: boolean;
   onToggleBuildSni?: () => void;
+  onSnapshotCapture?: (dataUrl: string) => void;
 }
 
 const CATEGORIES: { id: BuildCategoryId; label: string; short: string }[] = [
@@ -175,9 +176,14 @@ export function BuildWorkspace({
   airflow,
   buildSniOpen = false,
   onToggleBuildSni,
+  onSnapshotCapture,
 }: BuildWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<BuildScene | null>(null);
+  const onSnapshotRef = useRef(onSnapshotCapture);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshotCapture;
+  }, [onSnapshotCapture]);
 
   const project = derived.project;
   const selected = useStudioStore((s) => s.selected);
@@ -297,6 +303,13 @@ export function BuildWorkspace({
       sceneRef.current = bs;
       return () => {
         saveCameraSnapshot(bs.cameraCtrl.getSnapshot());
+        try {
+          if (canvas.width > 0 && canvas.height > 0) {
+            onSnapshotRef.current?.(canvas.toDataURL("image/jpeg", 0.9));
+          }
+        } catch {
+          // ignore readback failure
+        }
         bs.dispose();
         sceneRef.current = null;
       };

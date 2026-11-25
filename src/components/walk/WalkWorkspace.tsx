@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 interface WalkWorkspaceProps {
   derived: DerivedProjectModel;
   struct: StructuralReport;
+  onSnapshotCapture?: (dataUrl: string) => void;
 }
 
 const SURFACE_LABEL: Record<WalkHudTelemetry["surface"], string> = {
@@ -34,9 +35,13 @@ const SURFACE_LABEL: Record<WalkHudTelemetry["surface"], string> = {
   stone: "Batu / Jalan",
 };
 
-export function WalkWorkspace({ derived, struct }: WalkWorkspaceProps) {
+export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<WalkScene | null>(null);
+  const onSnapshotRef = useRef(onSnapshotCapture);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshotCapture;
+  }, [onSnapshotCapture]);
 
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
   const updateOpening = useStudioStore((s) => s.updateOpening);
@@ -68,6 +73,13 @@ export function WalkWorkspace({ derived, struct }: WalkWorkspaceProps) {
       });
       sceneRef.current = ws;
       return () => {
+        try {
+          if (canvas.width > 0 && canvas.height > 0) {
+            onSnapshotRef.current?.(canvas.toDataURL("image/jpeg", 0.9));
+          }
+        } catch {
+          // ignore readback failure
+        }
         ws.dispose();
         sceneRef.current = null;
       };

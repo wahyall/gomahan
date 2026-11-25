@@ -1,6 +1,4 @@
-import ExcelJS from "exceljs";
 import { jsPDF } from "jspdf";
-import JSZip from "jszip";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
@@ -72,6 +70,7 @@ export function exportTakeoffCsv(rab: RabSummary, derived: DerivedProjectModel) 
 }
 
 export async function buildExcelWorkbookBlob(input: ExportBundleInput): Promise<Blob> {
+  const ExcelJS = (await import("exceljs")).default;
   const { derived, struct, rab, schedule } = input;
   const wb = new ExcelJS.Workbook();
   wb.creator = "Rumah Studio 3D";
@@ -362,6 +361,7 @@ export function exportCanvasJpg(canvas: HTMLCanvasElement | null, filename = "04
 }
 
 export async function exportContractorZipPackage(input: ExportBundleInput) {
+  const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
   const pdfBlob = buildPdfDrawingsAndReportBlob(input);
   const xlsxBlob = await buildExcelWorkbookBlob(input);
