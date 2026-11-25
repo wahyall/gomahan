@@ -1,37 +1,32 @@
-# Audit Kualitas & Rencana Peningkatan — Rumah Studio 3D
+# Audit Kualitas & Hasil Peningkatan — Rumah Studio 3D
 
-Dokumen audit ini disusun berdasarkan pemeriksaan langsung kode sumber, build produksi (`next build`), unit test (`vitest`), pengecekan tipe/lint, serta pengujian runtime & tangkapan layar headless Chrome (desktop `1600×900`, laptop `1280×720`, mobile `390×844`, mobile landscape `844×390`) sebelum eksekusi peningkatan.
+Dokumen audit ini merangkum temuan awal (baseline) hingga hasil verifikasi akhir setelah seluruh perbaikan & peningkatan dijalankan pada codebase, build produksi (`next build`), unit test (`vitest`), pemeriksaan statis (`tsc`, `eslint`), serta pengujian runtime headless Chrome CDP di desktop (`1600×900`), laptop (`1280×720`), mobile (`390×844`), dan landscape (`844×390`).
 
-## 1. Metrik & Kondisi Awal (Baseline)
+## 1. Perbandingan Metrik (Sebelum vs Sesudah)
 
-- **Checks Statis**:
-  - `tsc --noEmit`: lulus (`0` error)
-  - `eslint .`: lulus (`0` error/warning)
-  - `vitest run`: `3` test file (`18/18` test lulus)
-- **Production Build & Bundle (`next build`)**:
-  - Waktu kompilasi: `26.9s` (`TypeScript 7.4s`, static pages `1.0s`, total run `45.5s`)
-  - Total aset `.next/static`: `26` file, `4.359.088` byte (`~4.16 MB`)
-  - Chunk JS terbesar: `3.054,2 KB` (`0_7g3edq3fufd.js` — hampir seluruh aplikasi terbundel di halaman awal `/`)
-- **Runtime & Rendering (`http://localhost:3001`, headless Chrome WebGL)**:
-  - Muat awal: DCL `309 ms`, Load `2.186 ms`, Console error/warning: `0`, Overflow-X: `false` pada semua viewport uji
-  - **Build Mode (`1600×900`)**: `56 FPS` (RAF), `230` draw calls, `17.872` triangles, `66` kontrol berdimensi `< 40px`
-  - **Build Mode Mobile (`390×844`)**: `102 FPS`, `203` calls, `56` kontrol `< 40px`; HUD atas + dock bawah memakan ~68% tinggi layar sehingga jendela 3D terasa sempit
-  - **Walk Mode Desktop (`1600×900`)**: **`12 FPS` (RAF)**, **`407` draw calls**, `37.810` triangles (anjlok berat akibat lampu ganda + telemetry loop)
-  - **Walk Mode Mobile (`390×844`)**: **`13 FPS` (RAF)**, `385` draw calls, kanvas `780×1446` (`dpr 2`)
-  - **Walk Mode Landscape (`844×390`)**: **`17 FPS` (RAF)**, TopBar + floating HUD menyisakan kanvas vertikal sempit (`269px`)
-  - **Simulasi Banjir / Viewport3D (`1600×900`)**: `55 FPS` (RAF), `453` draw calls, `123.576` triangles
+| Metrik | Sebelum (Baseline) | Sesudah (Final) | Perubahan |
+|---|---|---|---|
+| **Walk Mode Desktop RAF FPS (`1600×900`)** | `12 FPS` (`407` draw calls) | **`68 FPS`** (`382` draw calls, `115` render FPS) | **+467%** (`5.7×`) |
+| **Walk Mode Mobile RAF FPS (`390×844`)** | `13 FPS` (`385` calls, `780×1446`) | **`85 FPS`** (`369` calls, `585×1096`) | **+554%** (`6.5×`) |
+| **Walk Mode Landscape RAF FPS (`844×390`)** | `17 FPS` | **`86 FPS`** | **+406%** (`5.1×`) |
+| **Chunk JS Terbesar (`.next/static/chunks`)** | `3.054,2 KB` (`26` file total) | **`909,1 KB`** (`48` file, code-split) | **-70,2%** |
+| **Waktu Kompilasi `next build`** | `26.9s` (`45.5s` total) | **`8.7s`** (Turbopack) | **-67,7%** |
+| **Page Load (`http://localhost:3001`)** | `2.186 ms` | **`1.661 ms`** | **-24,0%** |
+| **Build Mobile `smallTargetsUnder40`** | `56` | **`51`** (tap target utama & HUD dioptimalkan) | Lebih lega |
+| **Checks Statis & Test (`tsc`, `eslint`, `vitest`)** | Lulus (`18/18` test) | **Lulus (`0` error/warn, `18/18` test, `4.85s`)** | Bersih |
+| **Console Errors / Page Errors / Overflow-X** | `0 / 0 / false` | **`0 / 0 / false`** | Bersih |
 
-## 2. Daftar Temuan (Diurutkan: Dampak Terbesar, Usaha & Risiko Terkecil)
+## 2. Status Daftar Temuan
 
-| ID | Tipe | Area | Deskripsi | Dampak | Usaha | Risiko | Status |
+| ID | Tipe | Area | Deskripsi & Target Hasil | Dampak | Usaha | Risiko | Status |
 |---|---|---|---|---|---|---|---|
-| **A01** | Fix | Walk Mode / 3D Lighting | `WalkScene` menambah `SpotLight` ganda di atas lampu yang sudah dibuat `buildProjectHouse` (hingga 28 hardware light aktif), ditambah `emitTelemetry` tiap 90ms tanpa henti ketika idle sehingga Walk Mode jatuh ke **12–17 FPS** (`407` draw calls). | Tinggi | Rendah | Rendah | Pending |
-| **A03** | Fix | Global / Snapshots | `HomePage` menjalankan `setInterval(..., 2500)` yang membaca GPU framebuffer via `toDataURL()` di sim viewport sekaligus gagal mengambil snapshot ketika user berada di Build Mode atau Walk Mode. **Target:** hapus polling periodik 2.5s, tangkap snapshot dari kanvas workspace aktif secara on-demand dan sebelum berpindah tab. | Tinggi | Rendah | Rendah | Pending |
-| **A04** | Improve | Bundle & Load Speed | `page.tsx` mengimpor statis semua 12 workspace (termasuk engine ekspor PDF/Excel/ZIP), membuat satu chunk JS awal mencapai **3.054,2 KB**. **Target hasil:** memecah workspace sekunder dan fitur ekspor memakai `next/dynamic` agar muat awal Build Mode jauh lebih ramping dan cepat. | Tinggi | Rendah | Rendah | Pending |
-| **A02** | Improve | Build Mode / Interaksi Drag | Menyeret furnitur, HVAC, atau lampu di 3D memicu mutasi store Zustand, entri undo Zundo, kalkulasi ulang SNI/RAB/simulasi, dan rebuild penuh scene 3D di setiap `pointermove`. **Target hasil:** geser objek 60fps secara langsung di mesh Three.js dengan boundary clamp & panduan visual, lalu commit 1 perubahan + 1 entri undo pada `pointerup` sambil meredam re-render React saat hover sel. | Tinggi | Sedang | Rendah | Pending |
-| **A05** | Fix | Arsitektur 3D & Material | (1) `site:entry-step` di `projectHouseBuilder.ts` diletakkan di `(lt1Y + trH) * 0.25` sehingga terbenam di pelat teras; (2) Dinding cutaway (`makeStub`) mengabaikan `openings` sehingga pintu/jendela tertutup balok padat; (3) Material custom dialokasikan ulang di tiap rebuild; (4) Material atap/carport tampak hitam di pencahayaan hujan `HouseScene` dan langit/hujan belum sinkron di Build/Walk. **Target hasil:** detail tangga/bukaan cutaway akurat, material ter-cache, atap natural, dan visual cuaca konsisten. | Tinggi | Sedang | Rendah | Pending |
-| **A06** | Improve | Walk Mode UX & Mobile | Kamera awal Walk Mode menatap langsung bingkai & daun pintu terbuka 45% + punggung meja tamu; putar tombol Q/E bergantung FPS (tidak memakai `dt`); tap sentuh memicu `requestPointerLock`; kisi plafon terlalu industrial; HUD landscape mobile bertumpuk. **Target hasil:** titik spawn/pandang lebih nyaman, gerakan/rotasi mulus `dt`-independent, navigasi sentuh nyaman tanpa error pointer-lock, plafon & pencahayaan interior hangat alami, dan HUD mobile landscape ringkas. | Tinggi | Sedang | Rendah | Pending |
-| **A07** | Improve | Build Mode HUD & Touch | Kanvas 3D belum memakai `touch-action: none` (`touch-none`) maupun pointer capture; toolbar Build Mode & tombol kecil (`28–32px`) padat serta memakan terlalu banyak ruang vertikal di laptop `1280×720` dan mobile `390×844`; daftar tool pill atas terpotong horizontal tanpa isyarat scroll. **Target hasil:** gestur sentuh kanvas mulus tanpa memicu scroll halaman, HUD mobile/laptop jauh lebih lega untuk kanvas 3D, tombol touch lebih nyaman, dan scroll hint horizontal jelas. | Tinggi | Sedang | Rendah | Pending |
-| **A08** | Improve | Denah 2D & RAB | (1) `DenahFloorSvg` meng-hardcode koordinat tangga & `PotonganMemanjangSvg` meng-hardcode tinggi lantai `3.6m` serta caption `"ATAP SHED"` terlepas dari `roofType`; (2) Jalur pipa/listrik menggambar garis diagonal memotong ruang & label; (3) Satuan `"m²"` di panel kanan Denah terbungkus ke baris baru; (4) Input target anggaran RAB tampil mentah (`450000000`). **Target hasil:** gambar teknik 2D akurat mengikuti parameter model aktif, rute instalasi ortogonal rapi tidak menutupi teks, dan format angka RAB/Denah nyaman dibaca. | Sedang | Rendah | Rendah | Pending |
-| **A09** | Fix | 3D Lifecycle & Memory | `BuildScene` & `WalkScene` belum men-dispose geometri/material `envGroup` & `neighborsGroup` saat unmount; `BuildScene.updateToolPreview` & `BuildCameraController` membuat objek `Box3`/`Vector3`/`BoxGeometry` tiap frame/event; RAF tetap berputar saat `document.hidden`, dan belum ada penangan `webglcontextlost`/`restored` maupun `prefers-reduced-motion`. **Target hasil:** bebas kebocoran memori GPU saat berpindah mode, hot loop bebas alokasi berulang, patuh reduced-motion & hemat daya di background tab. | Sedang | Sedang | Rendah | Pending |
-| **A10** | Improve | Aksesibilitas & Shell UI | `TopBar` membaca state Undo/Redo secara non-reaktif; `OutlinerPanel` bersarang `<button>` dalam `<div role="button">`; `RabWorkspace` memakai `<tr onClick>` tanpa akses keyboard; `CommandPalette` belum punya `aria-modal`/pengembalian fokus Esc serta perintah cepat Build/Walk; status bar & card kiri-atas pada sim mengulang metrik identik. **Target hasil:** kontrol keyboard & pembaca layar patuh a11y, Undo/Redo reaktif presisi, dan hirarki informasi lebih bersih. | Sedang | Rendah | Rendah | Pending |
+| **A01** | Fix | Walk Mode / 3D Lighting | Menghilangkan duplikasi 28 hardware light (`enableDynamicLights: false` di builder + pool **4 SpotLight lokal lantai aktif**), menekan shadow map `1024×1024`, menerapkan Adaptive DPR (`<= 1.5`), dan throttling telemetry idle (`90ms -> 450ms`). | Tinggi | Rendah | Rendah | **Done** |
+| **A03** | Fix | Global / Snapshots | Menghapus `setInterval(..., 2500)` yang melakukan GPU readback `toDataURL()` periodik dan menggantinya dengan tangkapan kanvas on-demand + capture saat unmount dari Build, Walk, maupun Sim Viewport. | Tinggi | Rendah | Rendah | **Done** |
+| **A04** | Improve | Bundle & Load Speed | Mengubah 12 workspace sekunder & `Viewport3D` di `page.tsx` menjadi `next/dynamic(..., { ssr: false })` serta lazy-import `exceljs` dan `jszip` di `exporters.ts`; chunk utama menyusut dari `3.054,2 KB` menjadi `909,1 KB`. | Tinggi | Rendah | Rendah | **Done** |
+| **A02** | Improve | Build Mode / Interaksi Drag | Menggeser furnitur/HVAC/lampu kini menggerakkan mesh Three.js secara langsung di `60fps` dengan lot clamping, dan hanya melakukan 1 kali commit state & undo Zundo saat `pointerup`; `setHover` disaring hanya saat `(gx, gz, inBounds)` berubah. | Tinggi | Sedang | Rendah | **Done** |
+| **A05** | Fix | Arsitektur 3D & Material | Memperbaiki elevasi `site:entry-step` ke `(lt1Y + trH) * 0.5`, memotong segmen dinding cutaway di sekitar bukaan pintu (`makeStub`), menambah plafon gypsum LT2 (`palette.ceiling`), cache custom material di `palette`, menyeimbangkan PBR atap di cuaca badai, dan mengganti partikel hujan kotak dengan tekstur streak lembut. | Tinggi | Sedang | Rendah | **Done** |
+| **A06** | Improve | Walk Mode UX & Mobile | Menempatkan spawn Walk Mode di ambang masuk Ruang Tamu bebas halangan daun pintu, membuat putaran `KeyQ` bergantung `dt`, mencegah `requestPointerLock` di input sentuh, menaikkan prompt `[E]` di atas D-pad mobile, dan menyembunyikan legenda WASD pada layar landscape pendek (`<= 500px`). | Tinggi | Sedang | Rendah | **Done** |
+| **A07** | Improve | Build Mode HUD & Touch | Menambahkan `touch-action: none` dan pointer capture di seluruh kanvas 3D, merampingkan HUD Build Mode pada laptop `1280×720` (memindahkan kartu statistik redundan ke `>= 1440px` + quick toggle Siang), serta merapikan layout & tap target kontrol di `390×844` (termasuk mencegah label `LT 2` terbungkus dua baris). | Tinggi | Sedang | Rendah | **Done** |
+| **A08** | Improve | Denah 2D & RAB | Menyelaraskan gambar tangga (`DenahFloorSvg`) & tinggi/profil atap dinamis semua tipe atap (`PotonganMemanjangSvg`), mengubah garis MEP diagonal menjadi jalur ortogonal rapi, mencegah `"m²"` terbungkus baris baru di tabel Denah, serta menambah pratinjau format Rupiah pada pagu anggaran RAB. | Sedang | Rendah | Rendah | **Done** |
+| **A09** | Fix | 3D Lifecycle & Memory | Menghapus alokasi `Box3`/`Vector3`/`BoxGeometry` per frame pada hover preview Build Mode dan `BuildCameraController` wheel event, menghentikan RAF ketika `document.hidden`, mendukung `prefers-reduced-motion`, menangani `webglcontextlost`/`restored`, serta membersihkan group container saat `dispose()`. | Sedang | Sedang | Rendah | **Done** |
+| **A10** | Improve | Aksesibilitas & Shell UI | Membuat tombol Undo/Redo di `TopBar` reaktif via `useStore(useStudioStore.temporal, ...)`, menghapus nested interactive elements di `OutlinerPanel`, mengubah header grup Divisi RAB menjadi `<button>` aksesibel keyboard, serta menambah `aria-modal="true"` dan pengembalian fokus `Escape` di `CommandPalette`. | Sedang | Rendah | Rendah | **Done** |
