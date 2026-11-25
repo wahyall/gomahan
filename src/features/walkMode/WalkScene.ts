@@ -54,7 +54,18 @@ export class WalkScene {
   private readonly neighborsGroup = new THREE.Group();
   private readonly houseContainer = new THREE.Group();
   private readonly lightsGroup = new THREE.Group();
-  private readonly pointLights: THREE.PointLight[] = [];
+  private readonly spotLightPool: THREE.SpotLight[] = [];
+  private lastLightLevel = -1;
+  private lastLightX = Number.NaN;
+  private lastLightZ = Number.NaN;
+  private lastSimNight = false;
+  private baseDpr = 1;
+  private currentDpr = 1;
+  private lastDprCheckMs = 0;
+  private contextLost = false;
+  private lastEmittedState = "";
+  private readonly reducedMotion =
+    typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
 
   private staticDisposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private dynResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
@@ -105,8 +116,23 @@ export class WalkScene {
   private readonly onKeyUpBound = (e: KeyboardEvent) => this.handleKeyUp(e);
   private readonly onPointerDownBound = (e: PointerEvent) => this.handlePointerDown(e);
   private readonly onPointerMoveBound = (e: PointerEvent) => this.handlePointerMove(e);
-  private readonly onPointerUpBound = () => {
+  private readonly onPointerUpBound = (e: PointerEvent) => {
     this.dragLookActive = false;
+    try {
+      if (this.canvas.hasPointerCapture?.(e.pointerId)) {
+        this.canvas.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // ignore
+    }
+  };
+  private readonly onContextLostBound = (e: Event) => {
+    e.preventDefault();
+    this.contextLost = true;
+  };
+  private readonly onContextRestoredBound = () => {
+    this.contextLost = false;
+    this.lastFrameMs = performance.now();
   };
   private readonly onWheelBound = (e: WheelEvent) => this.handleWheel(e);
   private readonly onPointerLockChangeBound = () => {
@@ -125,7 +151,9 @@ export class WalkScene {
     this.actions = actions;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.baseDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    this.currentDpr = this.baseDpr;
+    this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -146,7 +174,7 @@ export class WalkScene {
     this.sunLight = new THREE.DirectionalLight(0xfff5e0, 2.3);
     this.sunLight.position.set(14, 22, -10);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.mapSize.set(1024, 1024);
     this.sunLight.shadow.camera.near = 1.5;
     this.sunLight.shadow.camera.far = 56;
     this.sunLight.shadow.camera.left = -10.5;
@@ -204,6 +232,15 @@ export class WalkScene {
     window.addEventListener("pointermove", this.onPointerMoveBound);
     window.addEventListener("pointerup", this.onPointerUpBound);
     canvas.addEventListener("wheel", this.onWheelBound, { passive: false });
+    canvas.addEventListener("webglcontextlost", this.onContextLostBound);
+    canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
+
+    // Pre-allocate 4 reusable floor-local SpotLights (avoids 14-28 shader light loops & per-rebuild allocations)
+    for (let i = 0; i < 4; i++) {
+      const spot = new THREE.SpotLight(0xffe7bd, 0, 3.85, Math.PI * 0.34, 0.78, 1.4);
+      this.lightsGroup.add(spot, spot.target);
+      this.spotLightPool.push(spot);
+    }
 
     this.updateProjectData(derived, struct);
     this.startLoop();
@@ -267,8 +304,6 @@ export class WalkScene {
     for (const r of this.dynResources) r.dispose();
     this.dynResources = [];
     this.houseContainer.clear();
-    this.lightsGroup.clear();
-    this.pointLights.length = 0;
 
     const built = buildProjectHouse(derived, struct, this.palette, this.contactShadowMat, {
       stage: 0,
@@ -285,38 +320,67 @@ export class WalkScene {
       supportWallCutaway: false,
       hideUpperPropsInLt1: false,
       walkOpenDoorsFull: true,
+      enableDynamicLights: false,
     });
     this.houseContainer.add(built.houseRoot);
     this.dynResources = built.resources;
     this.animatedFans = built.animatedFans;
 
-    // Active warm interior lighting isolated per floor (downward SpotLights prevent LT1<->LT2 light bleed)
-    const lt1Y = derived.project.site.peil.floor1PeilM;
-    const lt2Y = lt1Y + derived.project.levels[0]!.height;
-    const simNightBoost = derived.project.simulation.hourOfDay < 6.5 || derived.project.simulation.hourOfDay > 17.2 ? 2.1 : 0.95;
-    for (const lvIdx of [0, 1] as const) {
-      const lv = derived.project.levels[lvIdx];
-      if (!lv) continue;
-      const baseY = lvIdx === 0 ? lt1Y : lt2Y;
-      const activeLights = lv.lights.filter((l) => l.on && l.dimmer > 0).slice(-7);
-      for (const l of activeLights) {
-        const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xffe7bd;
-        const rotY = l.rotationY ?? 0;
-        const fwdOff = l.type === "wall" ? 1.15 : 0;
-        const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
-        const spot = new THREE.SpotLight(
-          lightHex,
-          (l.lumens / 450) * l.dimmer * 2.2 * simNightBoost,
-          Math.min(3.85, lv.height + 0.15),
-          halfAngle,
-          0.78,
-          1.4,
-        );
-        spot.position.set(l.position.x, baseY + Math.min(lv.height - 0.25, l.position.y) - 0.05, l.position.z);
-        spot.target.position.set(l.position.x + Math.sin(rotY) * fwdOff, baseY, l.position.z + Math.cos(rotY) * fwdOff);
-        this.lightsGroup.add(spot, spot.target);
-        this.pointLights.push(spot as unknown as THREE.PointLight);
+    this.updatePooledLights(true);
+  }
+
+  private updatePooledLights(force: boolean): void {
+    if (!this.derived || this.spotLightPool.length === 0) return;
+    const lvIdx = Math.min(1, Math.max(0, this.ctrl.currentLevel)) as 0 | 1;
+    const px = this.ctrl.x;
+    const pz = this.ctrl.z;
+    const simNight = this.derived.project.simulation.hourOfDay < 6.5 || this.derived.project.simulation.hourOfDay > 17.2;
+    const distSq = (px - this.lastLightX) ** 2 + (pz - this.lastLightZ) ** 2;
+    if (!force && lvIdx === this.lastLightLevel && simNight === this.lastSimNight && distSq < 0.56) {
+      return;
+    }
+
+    this.lastLightLevel = lvIdx;
+    this.lastLightX = px;
+    this.lastLightZ = pz;
+    this.lastSimNight = simNight;
+
+    const lv = this.derived.project.levels[lvIdx];
+    const baseY =
+      lvIdx === 0
+        ? this.derived.project.site.peil.floor1PeilM
+        : this.derived.project.site.peil.floor1PeilM + (this.derived.project.levels[0]?.height ?? 3.6);
+    const simNightBoost = simNight ? 2.2 : 1.05;
+
+    const candidates = lv
+      ? lv.lights
+          .filter((l) => l.on && l.dimmer > 0)
+          .map((l) => ({
+            l,
+            d2: (l.position.x - px) ** 2 + (l.position.z - pz) ** 2,
+          }))
+          .sort((a, b) => a.d2 - b.d2)
+          .slice(0, this.spotLightPool.length)
+      : [];
+
+    for (let i = 0; i < this.spotLightPool.length; i++) {
+      const spot = this.spotLightPool[i]!;
+      const item = candidates[i];
+      if (!item || !lv) {
+        spot.intensity = 0;
+        continue;
       }
+      const { l } = item;
+      const rotY = l.rotationY ?? 0;
+      const fwdOff = l.type === "wall" ? 1.15 : 0;
+      const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
+      spot.color.setHex(l.colorTempK <= 3200 ? 0xffcb85 : 0xffe7bd);
+      spot.intensity = (l.lumens / 450) * l.dimmer * 2.4 * simNightBoost;
+      spot.distance = Math.min(4.1, lv.height + 0.35);
+      spot.angle = halfAngle;
+      spot.position.set(l.position.x, baseY + Math.min(lv.height - 0.25, l.position.y) - 0.05, l.position.z);
+      spot.target.position.set(l.position.x + Math.sin(rotY) * fwdOff, baseY, l.position.z + Math.cos(rotY) * fwdOff);
+      spot.target.updateMatrixWorld();
     }
   }
 
@@ -417,9 +481,19 @@ export class WalkScene {
     this.dragLookActive = true;
     this.pointerDownPos = { x: e.clientX, y: e.clientY };
     this.lastDragPos = { x: e.clientX, y: e.clientY };
+    try {
+      this.canvas.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore synthetic events
+    }
 
-    // Request Pointer Lock smoothly on primary canvas click in 1st-person mode (with drag fallback if declined)
-    if (e.button === 0 && this.cameraMode === "first_person" && document.pointerLockElement !== this.canvas) {
+    // Request Pointer Lock smoothly on mouse click in 1st-person mode (never on touch screens)
+    if (
+      e.pointerType !== "touch" &&
+      e.button === 0 &&
+      this.cameraMode === "first_person" &&
+      document.pointerLockElement !== this.canvas
+    ) {
       try {
         const res = this.canvas.requestPointerLock?.() as unknown as Promise<void> | undefined;
         res?.catch?.(() => {});
@@ -495,15 +569,15 @@ export class WalkScene {
     }
   }
 
-  private readMoveInput(): { forward: number; strafe: number; sprint: boolean } {
+  private readMoveInput(dt: number): { forward: number; strafe: number; sprint: boolean } {
     let forward = this.virtualMove.forward;
     let strafe = this.virtualMove.strafe;
     if (this.keysDown.has("KeyW") || this.keysDown.has("ArrowUp")) forward += 1;
     if (this.keysDown.has("KeyS") || this.keysDown.has("ArrowDown")) forward -= 1;
     if (this.keysDown.has("KeyD") || this.keysDown.has("ArrowRight")) strafe += 1;
     if (this.keysDown.has("KeyA") || this.keysDown.has("ArrowLeft")) strafe -= 1;
-    // Note: Q/E still work cleanly: E interacts door, Q rotates left slowly if keyboard turning desired
-    if (this.keysDown.has("KeyQ")) this.ctrl.yaw += 0.03;
+    // Frame-rate independent keyboard turn when Q is held
+    if (this.keysDown.has("KeyQ")) this.ctrl.yaw += dt * 1.9;
 
     const sprint =
       this.virtualMove.sprint || this.keysDown.has("ShiftLeft") || this.keysDown.has("ShiftRight");
@@ -519,16 +593,22 @@ export class WalkScene {
     if (this.rafId !== null || this.disposed) return;
     const tick = (now: number) => {
       if (this.disposed) return;
+      if (this.contextLost) {
+        this.rafId = requestAnimationFrame(tick);
+        return;
+      }
       const dt = Math.min(0.1, Math.max(0.001, (now - this.lastFrameMs) / 1000));
       this.lastFrameMs = now;
 
-      // Spin ceiling/stand fans gently
-      for (const fan of this.animatedFans) {
-        fan.rotation.y += dt * 4.5;
+      // Spin ceiling/stand fans gently (skipped if user prefers reduced motion)
+      if (!this.reducedMotion) {
+        for (const fan of this.animatedFans) {
+          fan.rotation.y += dt * 4.5;
+        }
       }
 
       // Advance kinematic capsule controller
-      const move = this.readMoveInput();
+      const move = this.readMoveInput(dt);
       const prevDist = this.ctrl.distanceTraveledM;
       const snap = this.ctrl.step(dt, {
         forward: move.forward,
@@ -566,15 +646,31 @@ export class WalkScene {
       // Update debug wireframe overlay
       this.debugOverlay.update(this.ctrl);
 
+      // Update pooled floor-local lights as player moves across rooms/floors
+      this.updatePooledLights(false);
+
       // Update camera (1st-person or 3rd-person spring-arm collision)
       this.updateCamera(dt, snap, move.sprint);
 
       this.renderer.render(this.scene, this.camera);
 
-      // FPS & Stats Telemetry
+      // FPS, Adaptive DPR Governor & Stats Telemetry
       const fpsInst = 1 / Math.max(0.001, dt);
       this.fpsSamples.push(fpsInst);
       if (this.fpsSamples.length > 24) this.fpsSamples.shift();
+      if (this.fpsSamples.length >= 20 && now - this.lastDprCheckMs > 2000) {
+        this.lastDprCheckMs = now;
+        const avg = this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length;
+        if (avg < 36 && this.currentDpr > 1) {
+          this.currentDpr = 1;
+          this.renderer.setPixelRatio(1);
+          this.handleResize();
+        } else if (avg > 54 && this.currentDpr < this.baseDpr) {
+          this.currentDpr = this.baseDpr;
+          this.renderer.setPixelRatio(this.currentDpr);
+          this.handleResize();
+        }
+      }
       this.emitTelemetry(false);
 
       this.rafId = requestAnimationFrame(tick);
@@ -594,7 +690,7 @@ export class WalkScene {
     if (this.cameraMode === "first_person") {
       let bobY = 0;
       let bobX = 0;
-      if (snap.speed > 0.25 && snap.grounded) {
+      if (!this.reducedMotion && snap.speed > 0.25 && snap.grounded) {
         this.bobPhase += dt * (sprint ? 2.9 : 2.1) * WALK_CONFIG.firstPerson.headBobFreqHz;
         bobY = Math.sin(this.bobPhase * 2) * WALK_CONFIG.firstPerson.headBobAmpY * Math.min(1, snap.speed / WALK_CONFIG.walkSpeed);
         bobX = Math.cos(this.bobPhase) * WALK_CONFIG.firstPerson.headBobAmpX * Math.min(1, snap.speed / WALK_CONFIG.walkSpeed);
@@ -652,14 +748,17 @@ export class WalkScene {
 
   private emitTelemetry(force: boolean): void {
     const now = performance.now();
-    if (!force && now - this.lastSnapshotEmitAt < 90) return;
-    this.lastSnapshotEmitAt = now;
-
     const avgFps =
       this.fpsSamples.length > 0
         ? Math.round(this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length)
         : 60;
     const snap = this.ctrl.getSnapshot();
+    const stateSig = `${snap.x.toFixed(2)}|${snap.y.toFixed(2)}|${snap.z.toFixed(2)}|${snap.yaw.toFixed(2)}|${snap.currentLevel}|${snap.roomName}|${snap.nearestDoor?.opId ?? ""}|${snap.nearestDoor?.openPct ?? -1}|${snap.collidedLastTick}|${this.cameraMode}|${this.pointerLocked}|${this.debugOverlay.isVisible()}|${Math.round(avgFps / 5)}`;
+    const minGap = stateSig !== this.lastEmittedState ? 90 : 450;
+    if (!force && now - this.lastSnapshotEmitAt < minGap) return;
+    this.lastSnapshotEmitAt = now;
+    this.lastEmittedState = stateSig;
+
     const telemetry: WalkHudTelemetry = {
       ...snap,
       cameraMode: this.cameraMode,
@@ -694,7 +793,13 @@ export class WalkScene {
     window.removeEventListener("pointermove", this.onPointerMoveBound);
     window.removeEventListener("pointerup", this.onPointerUpBound);
     this.canvas.removeEventListener("wheel", this.onWheelBound);
+    this.canvas.removeEventListener("webglcontextlost", this.onContextLostBound);
+    this.canvas.removeEventListener("webglcontextrestored", this.onContextRestoredBound);
 
+    this.envGroup.clear();
+    this.neighborsGroup.clear();
+    this.lightsGroup.clear();
+    this.houseContainer.clear();
     this.avatar.dispose();
     this.debugOverlay.dispose();
     for (const r of this.dynResources) r.dispose();

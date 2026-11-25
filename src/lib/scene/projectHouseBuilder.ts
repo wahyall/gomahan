@@ -45,6 +45,7 @@ export interface ProjectHouseBuildOptions {
   supportWallCutaway?: boolean;
   hideUpperPropsInLt1?: boolean;
   walkOpenDoorsFull?: boolean;
+  enableDynamicLights?: boolean;
   onExplodePiece?: (obj: THREE.Object3D, off: THREE.Vector3) => void;
   onExplodeInstanced?: (im: THREE.InstancedMesh, off: Float32Array) => void;
 }
@@ -1283,7 +1284,8 @@ export function buildProjectHouse(
       }
 
       // Per-level lighting budget (7 per level max so LT1 never starves LT2) + downward SpotLights so light never bleeds across floors!
-      const activeLightsOnLevel = lv.lights.filter((x) => x.on && x.dimmer > 0);
+      const emitDynamicLights = opts.enableDynamicLights !== false;
+      const activeLightsOnLevel = emitDynamicLights ? lv.lights.filter((x) => x.on && x.dimmer > 0) : [];
       const maxHardwareLightsPerLevel = 7;
       const activeIdSet = new Set(activeLightsOnLevel.slice(-maxHardwareLightsPerLevel).map((x) => x.id));
 

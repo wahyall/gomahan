@@ -77,11 +77,11 @@ export const WALK_CONFIG = {
     maxZ: 17.2,
   },
 
-  // Default Safe Spawn (Teras Depan facing wide-open Pintu Utama at x=1.58 into Ruang Tamu)
+  // Default Safe Spawn (just inside open Pintu Utama facing down Ruang Tamu interior vista)
   defaultSpawn: {
-    x: 1.58,
-    z: 3.18,
-    yaw: 0, // facing +Z through front doorway into Ruang Tamu
+    x: 1.63,
+    z: 4.35,
+    yaw: 0, // facing +Z through Ruang Tamu
   },
 } as const;
 

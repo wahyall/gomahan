@@ -120,7 +120,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-[#10161e] select-none">
-      <canvas ref={canvasRef} className="block h-full w-full cursor-crosshair outline-none" />
+      <canvas ref={canvasRef} className="block h-full w-full cursor-crosshair touch-none select-none outline-none" />
 
       {/* Crisp 1st-Person Reticle */}
       {isFirst && (
