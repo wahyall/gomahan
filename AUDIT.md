@@ -325,12 +325,15 @@ Mohon konfirmasi untuk 3 keputusan produk berikut (jika tidak ada preferensi khu
 
 1. **Cakupan Ukuran Kavling & Jumlah Lantai**: Apakah aplikasi memang ditujukan untuk mendukung **kavling & denah dinamis (1–2 lantai, ukuran bebas)** dari Build Mode, atau memang dikunci khusus untuk studi kasus kavling 5×17 m 2 lantai?
    - *Asumsi Default*: Mendukung **kavling dinamis 1–2 lantai** — seluruh engine (RAB, Struktur, Simulasi, Denah 2D, Ekspor) dibuat membaca geometri & ukuran kavling aktual tanpa hardcode 5×17 m, dan skema dibatasi 1–2 lantai agar konsisten.
+   - *Jawaban*: dikunci khusus kavling 5×17 m 2 lantai
 2. **Penyederhanaan Workspace (`Lapangan / Site Mode`, `Panduan`, & `Gamifikasi`)**: Apakah Anda setuju menggabungkan `SiteModeWorkspace` ke dalam `TimelineWorkspace` (sebagai toggle *"Mode Lapangan"* dengan 1 sumber 12 tahap), mengubah `GuideWorkspace` menjadi drawer bantuan kontekstual, dan menambahkan popover detail untuk skor/lencana (atau menghapus gamifikasi dari `StatusBar`)?
    - *Asumsi Default*: Gabungkan `SiteMode` ke `Timeline`, jadikan `Guide` drawer bantuan, dan ubah indikator gamifikasi di `StatusBar` menjadi popover detail misi/lencana yang sinkron dengan kelayakan teknis sebenarnya.
+   - *Jawaban*: Ya setuju dan hapus gamifikasi
 3. **Status Pintu Walk Mode (`[E]`) & Kolam/Lantai Kustom (`buildExtras`) di RAB**:
    - Apakah buka/tutup pintu `[E]` di Walk Mode sebaiknya hanya **sementara di sesi jalan** (tidak mengubah desain permanen / Undo)?
    - Apakah `buildExtras` (kolam renang & ubin lantai kustom di Build Mode) harus **masuk perhitungan RAB** (atau cukup visual dengan label *"belum termasuk RAB"*)?
    - *Asumsi Default*: Pintu Walk Mode bersifat sesi lokal (tidak masuk Undo), sedangkan `buildExtras` (kolam & lantai kustom) bisa dipilih/dihapus dan masuk perhitungan RAB.
+   - *Jawaban*: Ya setuju
 
 ---
 

@@ -11,6 +11,7 @@ import { WalkController, type WalkSnapshotState } from "@/features/walkMode/Walk
 import { WalkDebugOverlay } from "@/features/walkMode/WalkDebugOverlay";
 import { WALK_CONFIG, type WalkCameraMode } from "@/features/walkMode/walkConfig";
 import { simsAudio } from "@/lib/audio/simsAudio";
+import { AdaptiveRenderGovernor } from "@/lib/scene/adaptiveQuality";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { createContactShadowTexture } from "@/lib/scene/geometryHelpers";
 import {
@@ -91,6 +92,23 @@ export class WalkScene {
   private baseDpr = 1;
   private currentDpr = 1;
   private lastDprCheckMs = 0;
+  /**
+   * Hysteresis governor for the adaptive DPR. The naive 36/54fps thresholds
+   * oscillated (dpr 1 ↔ baseDpr) on GPUs sitting between them with the cinematic
+   * stack on, and every switch reset `canvas.width` → black flicker.
+   */
+  private readonly dprGovernor = new AdaptiveRenderGovernor({
+    lowFps: 36,
+    highFps: 54,
+    downWindows: 2,
+    upWindows: 3,
+    downCooldownMs: 8_000,
+    upCooldownMs: 30_000,
+  });
+  /** Last size/DPR actually pushed to the renderer — redundant setSize calls reset the canvas to black. */
+  private lastAppliedSize = { w: 0, h: 0, dpr: 0 };
+  /** Set once the first frame has been painted; lets handleResize repaint synchronously after a real resize. */
+  private hasRenderedOnce = false;
   private contextLost = false;
   private lastEmittedState = "";
   private readonly reducedMotion =
@@ -324,6 +342,8 @@ export class WalkScene {
   /** Apply the shared render-quality tier (Auto / Tinggi / Sedang / Hemat). */
   public setQualityOverride(tier: BuildQualityTier): void {
     this.qualityOverride = tier;
+    // Explicit user pick resets the adaptive memory so auto logic cannot fight it.
+    this.dprGovernor.reset();
     const effective: "high" | "medium" | "low" =
       tier === "auto"
         ? this.softwareGpu
@@ -373,8 +393,11 @@ export class WalkScene {
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(this.outputPass);
-    this.composer.setPixelRatio(this.currentDpr);
+    // Custom-target composers start with _width/_height in *pixels*; setSize must run
+    // before setPixelRatio or the targets transiently resize to w·dpr² (~4x the VRAM).
     this.composer.setSize(w, h);
+    this.composer.setPixelRatio(this.currentDpr);
+    this.lastAppliedSize = { w, h, dpr: this.currentDpr };
     this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
   }
 
@@ -407,10 +430,8 @@ export class WalkScene {
     if (Math.abs(targetDpr - this.baseDpr) > 0.04) {
       this.baseDpr = targetDpr;
       this.currentDpr = Math.min(this.currentDpr, this.baseDpr);
-      this.renderer.setPixelRatio(this.currentDpr);
-      if (this.composer) {
-        this.composer.setPixelRatio(this.currentDpr);
-      }
+      // handleResize applies pixelRatio + size exactly once (guarded) and repaints
+      // immediately, so a tier switch never flashes a reset (black) canvas.
       this.handleResize();
     }
     const wantShadow = tier === "high" ? (this.mobileViewport ? 1024 : 2048) : tier === "medium" ? 1024 : 512;
@@ -778,14 +799,29 @@ export class WalkScene {
     const parent = this.canvas.parentElement;
     const w = Math.max(1, parent ? parent.clientWidth : this.canvas.clientWidth);
     const h = Math.max(1, parent ? parent.clientHeight : this.canvas.clientHeight);
+    const dprChanged = Math.abs(this.currentDpr - this.lastAppliedSize.dpr) > 0.001;
+    const sizeChanged = w !== this.lastAppliedSize.w || h !== this.lastAppliedSize.h;
+    if (!dprChanged && !sizeChanged) return; // same-value setSize still wipes the canvas to black
+    this.lastAppliedSize = { w, h, dpr: this.currentDpr };
+    if (dprChanged) this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     if (this.composer) {
-      this.composer.setPixelRatio(this.currentDpr);
-      this.composer.setSize(w, h);
+      if (dprChanged) this.composer.setPixelRatio(this.currentDpr);
+      if (sizeChanged || dprChanged) this.composer.setSize(w, h);
     }
     if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    // A real resize just reset the drawing buffer; paint one frame right now so the
+    // user never sees the cleared (black) canvas waiting for the next RAF.
+    if (this.hasRenderedOnce && !this.contextLost && !this.disposed) {
+      if (this.postActive && this.composer) {
+        this.updateAtmosphere(this.camera);
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
+    }
   }
 
   private handleVisibility(): void {
@@ -898,6 +934,7 @@ export class WalkScene {
       } else {
         this.renderer.render(this.scene, this.camera);
       }
+      this.hasRenderedOnce = true;
 
       // FPS, Adaptive DPR Governor & Stats Telemetry
       const fpsInst = 1 / Math.max(0.001, dt);
@@ -906,15 +943,14 @@ export class WalkScene {
       if (this.fpsSamples.length >= 20 && now - this.lastDprCheckMs > 2000) {
         this.lastDprCheckMs = now;
         const avg = this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length;
-        if (avg < 36 && this.currentDpr > 1) {
+        // Hysteresis governor: consecutive windows + cooldowns, so a GPU hovering
+        // between thresholds settles instead of thrashing DPR (and black-flashing).
+        const decision = this.dprGovernor.sample(avg, now);
+        if (decision === "downgrade" && this.currentDpr > 1) {
           this.currentDpr = 1;
-          this.renderer.setPixelRatio(1);
-          if (this.composer) this.composer.setPixelRatio(1);
           this.handleResize();
-        } else if (avg > 54 && this.currentDpr < this.baseDpr) {
+        } else if (decision === "upgrade" && this.currentDpr < this.baseDpr) {
           this.currentDpr = this.baseDpr;
-          this.renderer.setPixelRatio(this.currentDpr);
-          if (this.composer) this.composer.setPixelRatio(this.currentDpr);
           this.handleResize();
         }
       }

@@ -27,6 +27,7 @@ import type {
   WallVisibilityMode,
 } from "@/features/buildMode/types";
 import { simsAudio } from "@/lib/audio/simsAudio";
+import { AdaptiveRenderGovernor } from "@/lib/scene/adaptiveQuality";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { FurnitureItem, HvacType, HvacUnit, LightFixture, LightType, Room, Stair, Wall } from "@/lib/model/types";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
@@ -240,6 +241,23 @@ export class BuildScene {
   private postActive = false;
   /** Cinematic "ray-traced look" stack: HDR MSAA → GTAO → sun shafts → bloom → ACES. */
   private rayTracingEnabled = true;
+  /**
+   * Hysteresis governor for the auto quality tier. The naive threshold logic
+   * ping-ponged high↔medium on GPUs that sit between 34 and 54fps with the stack
+   * on, and every switch reset `canvas.width` → black flicker.
+   */
+  private readonly tierGovernor = new AdaptiveRenderGovernor({
+    lowFps: 34,
+    highFps: 54,
+    downWindows: 2,
+    upWindows: 3,
+    downCooldownMs: 8_000,
+    upCooldownMs: 30_000,
+  });
+  /** Last size/DPR actually pushed to the renderer — redundant setSize calls reset the canvas to black. */
+  private lastAppliedSize = { w: 0, h: 0, dpr: 0 };
+  /** Set once the first frame has been painted; lets handleResize repaint synchronously after a real resize. */
+  private hasRenderedOnce = false;
   private godRayStrength = 0;
   private sunCore: THREE.Sprite | null = null;
   private sunHalo: THREE.Sprite | null = null;
@@ -515,6 +533,8 @@ export class BuildScene {
 
   public setQualityOverride(tier: BuildQualityTier): void {
     this.qualityOverride = tier;
+    // Explicit user pick resets the adaptive memory so auto logic cannot fight it.
+    this.tierGovernor.reset();
     const effective: "high" | "medium" | "low" =
       tier === "auto"
         ? this.softwareGpu
@@ -572,8 +592,11 @@ export class BuildScene {
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(this.outputPass);
-    this.composer.setPixelRatio(this.currentDpr);
+    // Custom-target composers start with _width/_height in *pixels*; setSize must run
+    // before setPixelRatio or the targets transiently resize to w·dpr² (~4x the VRAM).
     this.composer.setSize(w, h);
+    this.composer.setPixelRatio(this.currentDpr);
+    this.lastAppliedSize = { w, h, dpr: this.currentDpr };
     this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
     if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
       (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__ = {
@@ -642,13 +665,9 @@ export class BuildScene {
           : 1;
     if (Math.abs(targetDpr - this.currentDpr) > 0.04) {
       this.currentDpr = targetDpr;
-      this.renderer.setPixelRatio(this.currentDpr);
-      if (this.composer) {
-        this.composer.setPixelRatio(this.currentDpr);
-        this.handleResize();
-      } else {
-        this.handleResize();
-      }
+      // handleResize applies pixelRatio + size exactly once (guarded) and repaints
+      // immediately, so a tier switch never flashes a reset (black) canvas.
+      this.handleResize();
     }
     const wantShadow = tier === "high" ? (this.mobileViewport ? 2048 : 4096) : tier === "medium" ? 1024 : 512;
     this.renderer.shadowMap.enabled = tier !== "low";
@@ -2311,13 +2330,31 @@ export class BuildScene {
     const parent = this.canvas.parentElement;
     const w = Math.max(1, parent?.clientWidth ?? this.canvas.clientWidth);
     const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
+    const dprChanged = Math.abs(this.currentDpr - this.lastAppliedSize.dpr) > 0.001;
+    const sizeChanged = w !== this.lastAppliedSize.w || h !== this.lastAppliedSize.h;
+    if (!dprChanged && !sizeChanged) return; // same-value setSize still wipes the canvas to black
+    this.lastAppliedSize = { w, h, dpr: this.currentDpr };
+    if (dprChanged) this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.setSize(w, h, false);
     this.cameraCtrl.setAspect(w / h);
     if (this.composer) {
-      this.composer.setPixelRatio(this.currentDpr);
-      this.composer.setSize(w, h);
+      if (dprChanged) this.composer.setPixelRatio(this.currentDpr);
+      if (sizeChanged || dprChanged) this.composer.setSize(w, h);
     }
     if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    // A real resize just reset the drawing buffer; paint one frame right now so the
+    // user never sees the cleared (black) canvas waiting for the next RAF.
+    if (this.hasRenderedOnce && !this.contextLost && !this.disposed) {
+      const cam = this.cameraCtrl.activeCamera;
+      if (this.postActive && this.composer) {
+        if (this.renderPass) this.renderPass.camera = cam;
+        if (this.gtaoPass) this.gtaoPass.camera = cam;
+        this.updateAtmosphere(cam);
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, cam);
+      }
+    }
   }
 
   private handleVisibility(): void {
@@ -2432,7 +2469,17 @@ export class BuildScene {
       const cam = this.cameraCtrl.activeCamera;
       if (this.postActive && this.composer) {
         if (this.renderPass) this.renderPass.camera = cam;
-        if (this.gtaoPass && this.gtaoPass.camera !== cam) this.gtaoPass.camera = cam;
+        if (this.gtaoPass && this.gtaoPass.camera !== cam) {
+          this.gtaoPass.camera = cam;
+          // GTAO bakes PERSPECTIVE_CAMERA into its shader defines at construction;
+          // switching to the orthographic plan/elevation views without refreshing it
+          // evaluates AO with the wrong projection and smears the frame.
+          const gm = (this.gtaoPass as unknown as { gtaoMaterial?: THREE.ShaderMaterial }).gtaoMaterial;
+          if (gm) {
+            gm.defines.PERSPECTIVE_CAMERA = (cam as THREE.PerspectiveCamera).isPerspectiveCamera ? 1 : 0;
+            gm.needsUpdate = true;
+          }
+        }
         // Skip GTAO while the section cut or rain streaks would write ghosts into the AO gbuffer
         if (this.gtaoPass) {
           const cutActive = (this.studioView?.cutH ?? 100) < 9.15;
@@ -2444,6 +2491,7 @@ export class BuildScene {
       } else {
         this.renderer.render(this.scene, cam);
       }
+      this.hasRenderedOnce = true;
 
       if (dt > 0 && dt < 0.25) {
         this.fpsSamples.push(1 / dt);
@@ -2452,9 +2500,12 @@ export class BuildScene {
           this.fpsSamples = [];
           if (this.qualityOverride === "auto" && now - this.lastDprCheckMs > 2000) {
             this.lastDprCheckMs = now;
-            if (avg < 34 && this.activeTier === "high") {
+            // Hysteresis governor: consecutive windows + cooldowns, so a GPU hovering
+            // between tiers settles instead of thrashing tiers (and black-flashing).
+            const decision = this.tierGovernor.sample(avg, now);
+            if (decision === "downgrade" && this.activeTier === "high") {
               this.applyQualityTier("medium");
-            } else if (avg > 54 && this.activeTier === "medium") {
+            } else if (decision === "upgrade" && this.activeTier === "medium") {
               this.applyQualityTier("high");
             }
           }
