@@ -54,6 +54,8 @@ import {
 import { createDefaultProject } from "@/lib/model/defaultProject";
 import { BRICK_PRESETS } from "@/lib/model/priceBook";
 import { simsAudio } from "@/lib/audio/simsAudio";
+import { pointInPolygon } from "@/lib/geometry/rooms";
+import { pushPullWall as applyPushPullWall, reconcileLevelTopology } from "@/features/buildMode/wallGraph";
 
 export type WorkspaceId =
   | "build"
@@ -71,6 +73,8 @@ export type SelectionTarget =
   | { kind: "part"; id: string }
   | { kind: "wall"; id: string; levelIndex: number }
   | { kind: "opening"; id: string; wallId: string; levelIndex: number }
+  | { kind: "room"; id: string; levelIndex: number }
+  | { kind: "floorTile"; id: string; levelIndex: number; gx: number; gz: number }
   | { kind: "furniture"; id: string; levelIndex: number }
   | { kind: "light"; id: string; levelIndex: number }
   | { kind: "hvac"; id: string; levelIndex: number }
@@ -157,6 +161,13 @@ export function reconcileSelection(project: Project, selected: SelectionTarget):
   if (selected.kind === "pool") {
     return (project.buildExtras?.pools ?? []).some((p) => p.id === selected.id) ? selected : null;
   }
+  if (selected.kind === "floorTile") {
+    return (project.buildExtras?.floorTiles ?? []).some(
+      (t) => t.levelIndex === selected.levelIndex && t.gx === selected.gx && t.gz === selected.gz,
+    )
+      ? selected
+      : null;
+  }
   const lv = project.levels[selected.levelIndex];
   if (!lv) return null;
   switch (selected.kind) {
@@ -166,6 +177,8 @@ export function reconcileSelection(project: Project, selected: SelectionTarget):
       const w = lv.walls.find((x) => x.id === selected.wallId);
       return w && w.openings.some((o) => o.id === selected.id) ? selected : null;
     }
+    case "room":
+      return lv.rooms.some((r) => r.id === selected.id) ? selected : null;
     case "furniture":
       return lv.furniture.some((f) => f.id === selected.id) ? selected : null;
     case "light":
@@ -230,12 +243,23 @@ export interface StudioStore {
   addWall: (levelIndex: 0 | 1, wall: Wall) => void;
   addRoomAndWalls: (levelIndex: 0 | 1, walls: Wall[], room?: Room) => void;
   updateWall: (levelIndex: 0 | 1, wallId: string, patch: Partial<Wall>) => void;
+  pushPullWall: (levelIndex: 0 | 1, wallId: string, deltaNormalM: number, altFree?: boolean) => { ok: boolean; reason?: string };
   deleteWall: (levelIndex: 0 | 1, wallId: string) => void;
+  deleteWallsBatch: (levelIndex: 0 | 1, wallIds: string[]) => void;
+  updateRoom: (
+    levelIndex: 0 | 1,
+    roomId: string,
+    patch: Partial<Pick<Room, "name" | "program" | "floorMaterialId" | "ceilingHeight">>,
+  ) => void;
+  deleteRoom: (levelIndex: 0 | 1, roomId: string) => void;
+  paintRoomWalls: (levelIndex: 0 | 1, roomId: string, materialId: string) => void;
   addOpening: (levelIndex: 0 | 1, wallId: string, opening: Opening) => void;
   updateOpening: (levelIndex: 0 | 1, wallId: string, openingId: string, patch: Partial<Opening>) => void;
   deleteOpening: (levelIndex: 0 | 1, wallId: string, openingId: string) => void;
   paintRoomFloor: (levelIndex: 0 | 1, roomId: string, floorMaterialId: string) => void;
   setFloorTileOverrides: (tiles: BuildTileOverride[]) => void;
+  deleteFloorTile: (levelIndex: 0 | 1, gx: number, gz: number) => void;
+  deleteFloorTilesBatch: (tiles: { levelIndex: number; gx: number; gz: number }[]) => void;
   addStairWithCutout: (levelIndex: 0 | 1, stair: Stair, voidPolygon?: { x: number; z: number }[]) => void;
   deleteStair: (levelIndex: 0 | 1, stairId: string) => void;
   addFurniture: (levelIndex: 0 | 1, item: FurnitureItem) => void;
@@ -273,7 +297,7 @@ function applyPanelOverlayView(view: ViewState, panel: StudioPanelId): void {
 
 export const useStudioStore = create<StudioStore>()(
   temporal(
-    immer((set) => ({
+    immer((set, get) => ({
       project: initialProject,
       baselineProject: structuredClone(initialProject),
       workspace: "build",
@@ -382,6 +406,7 @@ export const useStudioStore = create<StudioStore>()(
           const tI = state.project.systems.brick.innerThicknessMm / 1000;
           for (const lv of state.project.levels) {
             for (const w of lv.walls) {
+              if (w.kind === "fence") continue;
               w.thickness = w.exterior ? tO : tI;
             }
           }
@@ -404,6 +429,7 @@ export const useStudioStore = create<StudioStore>()(
           const tI = b.innerThicknessMm / 1000;
           for (const lv of state.project.levels) {
             for (const w of lv.walls) {
+              if (w.kind === "fence") continue;
               w.thickness = w.exterior ? tO : tI;
             }
           }
@@ -563,7 +589,15 @@ export const useStudioStore = create<StudioStore>()(
         set((state) => {
           const lv = state.project.levels[levelIndex];
           if (!lv) return;
-          lv.walls.push(wall);
+          const prevWalls = lv.walls.map((w) => ({ ...w, openings: [...w.openings] }));
+          const candidate = { ...lv, walls: [...lv.walls, wall] };
+          const rec = reconcileLevelTopology(candidate, levelIndex, prevWalls);
+          if (rec.blockedByOpening) {
+            simsAudio.play("warning");
+            return;
+          }
+          state.project.levels[levelIndex] = rec.level;
+          state.selected = reconcileSelection(state.project, state.selected);
           state.project.updatedAt = new Date().toISOString();
           simsAudio.play("place");
         }),
@@ -572,16 +606,20 @@ export const useStudioStore = create<StudioStore>()(
         set((state) => {
           const lv = state.project.levels[levelIndex];
           if (!lv) return;
-          const dup = (a: Wall, b: Wall) =>
-            (Math.hypot(a.start.x - b.start.x, a.start.z - b.start.z) < 0.08 &&
-              Math.hypot(a.end.x - b.end.x, a.end.z - b.end.z) < 0.08) ||
-            (Math.hypot(a.start.x - b.end.x, a.start.z - b.end.z) < 0.08 &&
-              Math.hypot(a.end.x - b.start.x, a.end.z - b.start.z) < 0.08);
-          for (const w of walls) {
-            if (Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) < 0.1) continue;
-            if (!lv.walls.some((existing) => dup(existing, w))) lv.walls.push(w);
+          const prevWalls = lv.walls.map((w) => ({ ...w, openings: [...w.openings] }));
+          const validNew = walls.filter((w) => Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) >= 0.1);
+          const candidate = {
+            ...lv,
+            walls: [...lv.walls, ...validNew],
+            rooms: room ? [...lv.rooms, room] : [...lv.rooms],
+          };
+          const rec = reconcileLevelTopology(candidate, levelIndex, prevWalls);
+          if (rec.blockedByOpening) {
+            simsAudio.play("warning");
+            return;
           }
-          if (room) lv.rooms.push(room);
+          state.project.levels[levelIndex] = rec.level;
+          state.selected = reconcileSelection(state.project, state.selected);
           state.project.updatedAt = new Date().toISOString();
           simsAudio.play("place");
         }),
@@ -600,19 +638,135 @@ export const useStudioStore = create<StudioStore>()(
           }
         }),
 
+      pushPullWall: (levelIndex, wallId, deltaNormalM, altFree = false) => {
+        const currLv = get().project.levels[levelIndex];
+        if (!currLv) return { ok: false, reason: "Lantai tidak ditemukan" };
+        const res = applyPushPullWall(currLv, levelIndex, wallId, deltaNormalM, get().project.site, altFree);
+        if (!res.ok || !res.level) return { ok: false, reason: res.reason };
+        set((state) => {
+          state.project.levels[levelIndex] = res.level!;
+          state.selected = reconcileSelection(state.project, state.selected);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("place");
+        });
+        return { ok: true };
+      },
+
       deleteWall: (levelIndex, wallId) =>
         set((state) => {
           const lv = state.project.levels[levelIndex];
           if (!lv) return;
-          lv.walls = lv.walls.filter((w) => w.id !== wallId);
-          if (
-            (state.selected?.kind === "wall" && state.selected.id === wallId) ||
-            (state.selected?.kind === "opening" && state.selected.wallId === wallId)
-          ) {
-            state.selected = null;
-          }
+          const prevWalls = lv.walls.map((w) => ({ ...w, openings: [...w.openings] }));
+          const candidate = { ...lv, walls: lv.walls.filter((w) => w.id !== wallId) };
+          const rec = reconcileLevelTopology(candidate, levelIndex, prevWalls);
+          state.project.levels[levelIndex] = rec.level;
+          state.selected = reconcileSelection(state.project, state.selected);
           state.project.updatedAt = new Date().toISOString();
           simsAudio.play("demolish");
+        }),
+
+      deleteWallsBatch: (levelIndex, wallIds) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv || wallIds.length === 0) return;
+          const dropSet = new Set(wallIds);
+          const prevWalls = lv.walls.map((w) => ({ ...w, openings: [...w.openings] }));
+          const candidate = { ...lv, walls: lv.walls.filter((w) => !dropSet.has(w.id)) };
+          const rec = reconcileLevelTopology(candidate, levelIndex, prevWalls);
+          state.project.levels[levelIndex] = rec.level;
+          state.selected = reconcileSelection(state.project, state.selected);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      updateRoom: (levelIndex, roomId, patch) =>
+        set((state) => {
+          const r = state.project.levels[levelIndex]?.rooms.find((x) => x.id === roomId);
+          if (!r) return;
+          Object.assign(r, patch);
+          if (r.ceilingHeight !== undefined) {
+            r.ceilingHeight = sanitizeNum(r.ceilingHeight, 3.1, 2, 12);
+          }
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("paint");
+        }),
+
+      deleteRoom: (levelIndex, roomId) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          if (!lv) return;
+          const target = lv.rooms.find((r) => r.id === roomId);
+          if (!target) return;
+          const prevWalls = lv.walls.map((w) => ({ ...w, openings: [...w.openings] }));
+          const otherRooms = lv.rooms.filter((r) => r.id !== roomId && r.program !== "garden" && r.program !== "carport" && r.program !== "void");
+          // Remove only walls belonging exclusively to this room (not bordering any other room)
+          const remainingWalls = lv.walls.filter((w) => {
+            if (w.kind === "fence") return true;
+            const dx = w.end.x - w.start.x;
+            const dz = w.end.z - w.start.z;
+            const len = Math.hypot(dx, dz) || 1;
+            const nx = -dz / len;
+            const nz = dx / len;
+            const mx = (w.start.x + w.end.x) * 0.5;
+            const mz = (w.start.z + w.end.z) * 0.5;
+            const pA = { x: mx + nx * 0.22, z: mz + nz * 0.22 };
+            const pB = { x: mx - nx * 0.22, z: mz - nz * 0.22 };
+            const touchesTarget = pointInPolygon(pA, target.polygon) || pointInPolygon(pB, target.polygon);
+            if (!touchesTarget) return true;
+            const touchesOther = otherRooms.some((r) => pointInPolygon(pA, r.polygon) || pointInPolygon(pB, r.polygon));
+            return touchesOther;
+          });
+          if (state.project.buildExtras) {
+            state.project.buildExtras.floorTiles = state.project.buildExtras.floorTiles.filter(
+              (t) => t.levelIndex !== levelIndex || !pointInPolygon({ x: (t.gx + 0.5) * 0.5, z: (t.gz + 0.5) * 0.5 }, target.polygon),
+            );
+          }
+          const candidate = {
+            ...lv,
+            walls: remainingWalls,
+            rooms: lv.rooms.filter((r) => r.id !== roomId),
+          };
+          const rec = reconcileLevelTopology(candidate, levelIndex, prevWalls);
+          state.project.levels[levelIndex] = rec.level;
+          state.selected = reconcileSelection(state.project, state.selected);
+          state.project.updatedAt = new Date().toISOString();
+          simsAudio.play("demolish");
+        }),
+
+      paintRoomWalls: (levelIndex, roomId, materialId) =>
+        set((state) => {
+          const lv = state.project.levels[levelIndex];
+          const room = lv?.rooms.find((r) => r.id === roomId);
+          if (!lv || !room) return;
+          let changed = false;
+          for (const w of lv.walls) {
+            if (w.kind === "fence") continue;
+            const dx = w.end.x - w.start.x;
+            const dz = w.end.z - w.start.z;
+            const len = Math.hypot(dx, dz);
+            if (len < 0.05) continue;
+            const nx = -dz / len;
+            const nz = dx / len;
+            const mx = (w.start.x + w.end.x) * 0.5;
+            const mz = (w.start.z + w.end.z) * 0.5;
+            const frontIn = pointInPolygon({ x: mx + nx * 0.22, z: mz + nz * 0.22 }, room.polygon);
+            const backIn = pointInPolygon({ x: mx - nx * 0.22, z: mz - nz * 0.22 }, room.polygon);
+            if (frontIn && !backIn) {
+              w.frontMaterialId = materialId;
+              changed = true;
+            } else if (backIn && !frontIn) {
+              w.backMaterialId = materialId;
+              changed = true;
+            } else if (frontIn && backIn) {
+              w.frontMaterialId = materialId;
+              w.backMaterialId = materialId;
+              changed = true;
+            }
+          }
+          if (changed) {
+            state.project.updatedAt = new Date().toISOString();
+            simsAudio.play("paint");
+          }
         }),
 
       addOpening: (levelIndex, wallId, opening) =>
@@ -652,6 +806,14 @@ export const useStudioStore = create<StudioStore>()(
           const r = state.project.levels[levelIndex]?.rooms.find((x) => x.id === roomId);
           if (r) {
             r.floorMaterialId = floorMaterialId;
+            // Clear custom 0.5m floorTiles inside this room so the newly painted floor isn't occluded (BM-06)
+            if (state.project.buildExtras?.floorTiles?.length) {
+              state.project.buildExtras.floorTiles = state.project.buildExtras.floorTiles.filter(
+                (t) =>
+                  t.levelIndex !== levelIndex ||
+                  !pointInPolygon({ x: (t.gx + 0.5) * 0.5, z: (t.gz + 0.5) * 0.5 }, r.polygon),
+              );
+            }
             state.project.updatedAt = new Date().toISOString();
             simsAudio.play("paint");
           }
@@ -667,6 +829,35 @@ export const useStudioStore = create<StudioStore>()(
           simsAudio.play("paint");
         }),
 
+      deleteFloorTile: (levelIndex, gx, gz) =>
+        set((state) => {
+          if (!state.project.buildExtras) return;
+          const prevLen = state.project.buildExtras.floorTiles.length;
+          state.project.buildExtras.floorTiles = state.project.buildExtras.floorTiles.filter(
+            (t) => !(t.levelIndex === levelIndex && t.gx === gx && t.gz === gz),
+          );
+          if (state.project.buildExtras.floorTiles.length !== prevLen) {
+            state.selected = reconcileSelection(state.project, state.selected);
+            state.project.updatedAt = new Date().toISOString();
+            simsAudio.play("demolish");
+          }
+        }),
+
+      deleteFloorTilesBatch: (tiles) =>
+        set((state) => {
+          if (!state.project.buildExtras || tiles.length === 0) return;
+          const drop = new Set(tiles.map((t) => `${t.levelIndex}:${t.gx}:${t.gz}`));
+          const prevLen = state.project.buildExtras.floorTiles.length;
+          state.project.buildExtras.floorTiles = state.project.buildExtras.floorTiles.filter(
+            (t) => !drop.has(`${t.levelIndex}:${t.gx}:${t.gz}`),
+          );
+          if (state.project.buildExtras.floorTiles.length !== prevLen) {
+            state.selected = reconcileSelection(state.project, state.selected);
+            state.project.updatedAt = new Date().toISOString();
+            simsAudio.play("demolish");
+          }
+        }),
+
       addStairWithCutout: (levelIndex, stair, voidPolygon) =>
         set((state) => {
           const lv = state.project.levels[levelIndex];
@@ -680,6 +871,7 @@ export const useStudioStore = create<StudioStore>()(
               thickness: 0.12,
               materialId: "void",
               isVoid: true,
+              linkedStairId: stair.id,
             });
           }
           state.project.updatedAt = new Date().toISOString();
@@ -693,7 +885,7 @@ export const useStudioStore = create<StudioStore>()(
           lv.stairs = lv.stairs.filter((s) => s.id !== stairId);
           const lt2 = state.project.levels[1];
           if (lt2) {
-            lt2.slabs = lt2.slabs.filter((s) => s.id !== `slab-void-${stairId}`);
+            lt2.slabs = lt2.slabs.filter((s) => s.id !== `slab-void-${stairId}` && s.linkedStairId !== stairId);
           }
           if (state.selected?.kind === "stair" && state.selected.id === stairId) state.selected = null;
           state.project.updatedAt = new Date().toISOString();

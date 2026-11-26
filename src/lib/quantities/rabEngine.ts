@@ -127,13 +127,14 @@ export function buildRabSummary(derived: DerivedProjectModel, struct: Structural
   const lotArea = project.site.width * project.site.depth;
   const perimeterLot = 2 * (project.site.width + project.site.depth);
   const peilHeight = project.site.peil.floor1PeilM;
-  const lt1Walls = project.levels[0]?.walls ?? [];
-  const lt2Walls = project.levels[1]?.walls ?? [];
+  const lt1Walls = (project.levels[0]?.walls ?? []).filter((w) => w.kind !== "fence");
+  const lt2Walls = (project.levels[1]?.walls ?? []).filter((w) => w.kind !== "fence");
   const allWalls = [...lt1Walls, ...lt2Walls];
+  const allFences = [...(project.levels[0]?.walls ?? []), ...(project.levels[1]?.walls ?? [])].filter((w) => w.kind === "fence");
   const allRooms = floors.flatMap((f) => f.rooms);
   const pools = project.buildExtras?.pools ?? [];
   const customTiles = project.buildExtras?.floorTiles ?? [];
-  const hasBuilding = allWalls.length > 0 || allRooms.length > 0 || pools.length > 0 || customTiles.length > 0;
+  const hasBuilding = allWalls.length > 0 || allFences.length > 0 || allRooms.length > 0 || pools.length > 0 || customTiles.length > 0;
 
   if (hasBuilding) {
     // Divisi I: Persiapan
@@ -297,7 +298,10 @@ export function buildRabSummary(derived: DerivedProjectModel, struct: Structural
       push("rabat_carport", "d6", "rabat_carport", "Rabat beton carport + batu sikat anti-slip", `Area parkir ${carportArea.toFixed(1)} m²`, Math.ceil(carportArea * 10) / 10, true, "st-10", "Luas zona carport LT1");
     }
     if (derived.totalWallLengthM > 0) {
-      push("plint_lantai", "d6", "plint_lantai", "Plint (skirting) keramik 10 cm keliling dinding", "Pelindung pertemuan lantai-dinding", Math.ceil(derived.totalWallLengthM * 1.15), true, "st-10", "Keliling dalam ruangan");
+      const nonFenceWallLen = allWalls.reduce((s, w) => s + Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z), 0);
+      if (nonFenceWallLen > 0) {
+        push("plint_lantai", "d6", "plint_lantai", "Plint (skirting) keramik 10 cm keliling dinding", "Pelindung pertemuan lantai-dinding", Math.ceil(nonFenceWallLen * 1.15), true, "st-10", "Keliling dalam ruangan");
+      }
     }
 
     // Kolam Renang / Fish Pond (`buildExtras.pools`)

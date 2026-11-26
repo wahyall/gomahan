@@ -40,7 +40,9 @@ export function StatusBar({
   const selectedLabel = selected
     ? selected.kind === "part"
       ? `Elemen: ${selected.id}`
-      : `${selected.kind.toUpperCase()} · ${selected.id}`
+      : selected.kind === "floorTile"
+        ? `UBIN (${selected.gx}, ${selected.gz})`
+        : `${selected.kind.toUpperCase()} · ${selected.id}`
     : "Siap pilih objek";
 
   const floodDanger = flood.lt1FloorFloodCm > 0 || flood.electricalHazardMcb || flood.electricalHazardOutlets;

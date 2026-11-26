@@ -8,6 +8,7 @@ import type {
   RoofVisibilityMode,
   WallVisibilityMode,
 } from "@/features/buildMode/types";
+import type { RoofType } from "@/lib/model/types";
 
 export interface BuildHoverState {
   gx: number;
@@ -24,7 +25,24 @@ export interface BuildPreviewHud {
 
 export type FloorBrushMode = "tile" | "rect" | "fill";
 export type TerrainBrushMode = "raise" | "lower" | "flatten";
+export type WallPaintMode = "side" | "room";
+export type FurnitureSubcategory = "all" | "living" | "bedroom" | "kitchen" | "bath" | "outdoor";
 export type BuildRenderTier = "auto" | "high" | "medium" | "low";
+
+const INTERIOR_TOOLS = new Set<BuildToolId>([
+  "wall_straight",
+  "wall_room",
+  "wall_diagonal",
+  "wall_paint",
+  "fence",
+  "floor_tile",
+  "opening",
+  "stair",
+  "pool",
+  "furniture",
+  "hvac",
+  "light",
+]);
 
 interface BuildModeViewState {
   activeLevel: 0 | 1 | 2;
@@ -38,9 +56,14 @@ interface BuildModeViewState {
   activeCategory: BuildCategoryId;
   activeTool: BuildToolId;
   selectedCatalogId: string;
+  selectedSwatchHex: string | null;
+  activeFurnitureSubcat: FurnitureSubcategory;
   floorBrushMode: FloorBrushMode;
   terrainBrushMode: TerrainBrushMode;
-  placementRotationQuarter: 0 | 1 | 2 | 3;
+  wallPaintMode: WallPaintMode;
+  placementRotationStep: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  placementFlipSwing: 1 | -1;
+  pendingRoofType: RoofType | null;
   hover: BuildHoverState | null;
   previewHud: BuildPreviewHud | null;
   savedCameraSnapshot: BuildCameraSnapshot | null;
@@ -63,10 +86,15 @@ interface BuildModeViewState {
   toggleBricksOverlay: () => void;
   setCategory: (category: BuildCategoryId) => void;
   selectCatalogItem: (item: BuildCatalogEntry) => void;
-  selectCatalogById: (id: string) => void;
+  selectCatalogById: (id: string, swatchHex?: string | null) => void;
+  setSelectedSwatchHex: (hex: string | null) => void;
+  setActiveFurnitureSubcat: (sub: FurnitureSubcategory) => void;
   setFloorBrushMode: (mode: FloorBrushMode) => void;
   setTerrainBrushMode: (mode: TerrainBrushMode) => void;
-  rotatePlacementQuarter: (delta: -1 | 1) => void;
+  setWallPaintMode: (mode: WallPaintMode) => void;
+  rotatePlacementStep: (delta: -1 | 1) => void;
+  togglePlacementFlipSwing: () => void;
+  setPendingRoofType: (roofType: RoofType | null) => void;
   setHover: (hover: BuildHoverState | null) => void;
   setPreviewHud: (hud: BuildPreviewHud | null) => void;
   saveCameraSnapshot: (snap: BuildCameraSnapshot) => void;
@@ -84,9 +112,14 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
   activeCategory: "build",
   activeTool: "select",
   selectedCatalogId: UNIFIED_BUILD_CATALOG[0]!.id,
+  selectedSwatchHex: null,
+  activeFurnitureSubcat: "all",
   floorBrushMode: "fill",
   terrainBrushMode: "raise",
-  placementRotationQuarter: 0,
+  wallPaintMode: "side",
+  placementRotationStep: 0,
+  placementFlipSwing: 1,
+  pendingRoofType: null,
   hover: null,
   previewHud: null,
   savedCameraSnapshot: null,
@@ -114,41 +147,69 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
   toggleNeighbors: () => set((s) => ({ neighborsVisible: !s.neighborsVisible })),
   toggleBricksOverlay: () => set((s) => ({ showBricksOverlay: !s.showBricksOverlay })),
 
-  setCategory: (activeCategory) => {
-    const first = UNIFIED_BUILD_CATALOG.find((c) => c.category === activeCategory);
-    set((s) => ({
-      activeCategory,
-      selectedCatalogId: first ? first.id : s.selectedCatalogId,
-      activeTool: s.activeTool === "select" ? "select" : first ? first.toolId : s.activeTool,
-      previewHud: null,
-    }));
-  },
-
-  selectCatalogItem: (item) =>
+  // Clicking a category tab only shows its catalog items without mutating activeTool (BM-15)
+  setCategory: (activeCategory) =>
     set({
-      selectedCatalogId: item.id,
-      activeTool: item.toolId,
-      activeCategory: item.category,
+      activeCategory,
+      pendingRoofType: null,
       previewHud: null,
     }),
 
-  selectCatalogById: (id) => {
+  selectCatalogItem: (item) =>
+    set((s) => {
+      let nextLevel = s.activeLevel;
+      if (s.activeLevel === 2 && INTERIOR_TOOLS.has(item.toolId)) {
+        nextLevel = item.toolId === "pool" || item.toolId === "stair" ? 0 : 1;
+      } else if (item.toolId === "pool" || item.toolId === "stair") {
+        nextLevel = 0;
+      }
+      return {
+        activeLevel: nextLevel,
+        selectedCatalogId: item.id,
+        activeTool: item.toolId,
+        activeCategory: item.category,
+        selectedSwatchHex: item.swatches?.[0]?.hex ?? null,
+        pendingRoofType: item.toolId === "roof" ? (item.roofType ?? null) : null,
+        previewHud: null,
+      };
+    }),
+
+  selectCatalogById: (id, swatchHex) => {
     const found = UNIFIED_BUILD_CATALOG.find((c) => c.id === id);
     if (!found) return;
-    set({
-      selectedCatalogId: found.id,
-      activeTool: found.toolId,
-      activeCategory: found.category,
-      previewHud: null,
+    set((s) => {
+      let nextLevel = s.activeLevel;
+      if (s.activeLevel === 2 && INTERIOR_TOOLS.has(found.toolId)) {
+        nextLevel = found.toolId === "pool" || found.toolId === "stair" ? 0 : 1;
+      } else if (found.toolId === "pool" || found.toolId === "stair") {
+        nextLevel = 0;
+      }
+      return {
+        activeLevel: nextLevel,
+        selectedCatalogId: found.id,
+        activeTool: found.toolId,
+        activeCategory: found.category,
+        selectedSwatchHex: swatchHex !== undefined ? swatchHex : (found.swatches?.[0]?.hex ?? null),
+        pendingRoofType: found.toolId === "roof" ? (found.roofType ?? null) : null,
+        previewHud: null,
+      };
     });
   },
 
+  setSelectedSwatchHex: (selectedSwatchHex) => set({ selectedSwatchHex }),
+  setActiveFurnitureSubcat: (activeFurnitureSubcat) => set({ activeFurnitureSubcat }),
   setFloorBrushMode: (floorBrushMode) => set({ floorBrushMode }),
   setTerrainBrushMode: (terrainBrushMode) => set({ terrainBrushMode }),
-  rotatePlacementQuarter: (delta) =>
+  setWallPaintMode: (wallPaintMode) => set({ wallPaintMode }),
+  rotatePlacementStep: (delta) =>
     set((s) => ({
-      placementRotationQuarter: (((s.placementRotationQuarter + delta + 4) % 4) as 0 | 1 | 2 | 3),
+      placementRotationStep: (((s.placementRotationStep + delta + 8) % 8) as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7),
     })),
+  togglePlacementFlipSwing: () =>
+    set((s) => ({
+      placementFlipSwing: s.placementFlipSwing === 1 ? -1 : 1,
+    })),
+  setPendingRoofType: (pendingRoofType) => set({ pendingRoofType }),
 
   setHover: (hover) =>
     set((s) => {

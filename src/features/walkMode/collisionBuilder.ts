@@ -337,7 +337,7 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
           (op) => op.kind === "window" && op.offset + op.width * 0.5 >= a && op.offset - op.width * 0.5 <= b,
         );
         const kind: WalkColliderKind =
-          wall.height <= 1.45 ? "fence" : hasWin ? "window" : "wall";
+          wall.kind === "fence" || wall.height <= 1.45 ? "fence" : hasWin ? "window" : "wall";
 
         // Clamp under-stair interior partition tops below stair soffit so upper stair treads remain walkable
         let segYMax = yMax;
@@ -418,77 +418,80 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
     });
   }
 
-  // Railings matching projectHouseBuilder.ts LT2 stairwell & balcony
-  addObbToWorld(colliders, spatial, {
-    id: "rail:stair-east",
-    kind: "railing",
-    label: "Railing Kaca Tangga",
-    cx: 1.35,
-    cz: 10.0,
-    halfW: 0.04,
-    halfD: 2.45,
-    rotY: 0,
-    yMin: lt2Y,
-    yMax: lt2Y + 1.15,
-    levelIndex: 1,
-    blocksCamera: false,
-  });
-  addObbToWorld(colliders, spatial, {
-    id: "rail:stair-south",
-    kind: "railing",
-    label: "Batas Lubang Tangga Selatan",
-    cx: 0.7,
-    cz: 12.48,
-    halfW: 0.65,
-    halfD: 0.04,
-    rotY: 0,
-    yMin: lt2Y + 0.05,
-    yMax: lt2Y + 1.15,
-    levelIndex: 1,
-    blocksCamera: false,
-  });
-  addObbToWorld(colliders, spatial, {
-    id: "rail:balcony-front",
-    kind: "railing",
-    label: "Railing Balkon Depan",
-    cx: 1.25,
-    cz: 3.04,
-    halfW: 1.24,
-    halfD: 0.04,
-    rotY: 0,
-    yMin: lt2Y,
-    yMax: lt2Y + 1.15,
-    levelIndex: 1,
-    blocksCamera: false,
-  });
-  addObbToWorld(colliders, spatial, {
-    id: "rail:balcony-left",
-    kind: "railing",
-    label: "Railing Sisi Kiri Balkon",
-    cx: 0.04,
-    cz: 3.5,
-    halfW: 0.04,
-    halfD: 0.48,
-    rotY: 0,
-    yMin: lt2Y,
-    yMax: lt2Y + 1.15,
-    levelIndex: 1,
-    blocksCamera: false,
-  });
-  addObbToWorld(colliders, spatial, {
-    id: "rail:balcony-right",
-    kind: "railing",
-    label: "Railing Sisi Kanan Balkon",
-    cx: 2.46,
-    cz: 3.5,
-    halfW: 0.04,
-    halfD: 0.48,
-    rotY: 0,
-    yMin: lt2Y,
-    yMax: lt2Y + 1.15,
-    levelIndex: 1,
-    blocksCamera: false,
-  });
+  // Dynamic Railings matching projectHouseBuilder.ts LT2 stairwell voids & balconies
+  const lt2VoidSlabs = (project.levels[1]?.slabs ?? []).filter((s) => s.isVoid && s.polygon.length >= 3);
+  const lt2SolidSlabs = (project.levels[1]?.slabs ?? []).filter((s) => !s.isVoid);
+  const lt2Walls = project.levels[1]?.walls ?? [];
+  const hasLt2WallNearEdge = (ax: number, az: number, bx: number, bz: number) => {
+    const mx = (ax + bx) * 0.5;
+    const mz = (az + bz) * 0.5;
+    const edgeLen = Math.hypot(bx - ax, bz - az) || 1;
+    const eux = (bx - ax) / edgeLen;
+    const euz = (bz - az) / edgeLen;
+    for (const w of lt2Walls) {
+      const wdx = w.end.x - w.start.x;
+      const wdz = w.end.z - w.start.z;
+      const wLen = Math.hypot(wdx, wdz) || 1;
+      if (Math.abs(eux * (wdx / wLen) + euz * (wdz / wLen)) < 0.85) continue;
+      const t = Math.max(0, Math.min(wLen, (mx - w.start.x) * (wdx / wLen) + (mz - w.start.z) * (wdz / wLen)));
+      const px = w.start.x + (wdx / wLen) * t;
+      const pz = w.start.z + (wdz / wLen) * t;
+      if (Math.hypot(mx - px, mz - pz) < 0.16) return true;
+    }
+    return false;
+  };
+  const emitRailCollider = (id: string, label: string, ax: number, az: number, bx: number, bz: number, yBase: number) => {
+    const rLen = Math.hypot(bx - ax, bz - az);
+    if (rLen < 0.3) return;
+    addObbToWorld(colliders, spatial, {
+      id,
+      kind: "railing",
+      label,
+      cx: (ax + bx) * 0.5,
+      cz: (az + bz) * 0.5,
+      halfW: rLen * 0.5,
+      halfD: 0.04,
+      rotY: -Math.atan2(bz - az, bx - ax),
+      yMin: yBase,
+      yMax: lt2Y + 1.15,
+      levelIndex: 1,
+      blocksCamera: false,
+    });
+  };
+
+  for (const st of project.levels[0]?.stairs ?? []) {
+    const vSlab = lt2VoidSlabs.find((s) => s.linkedStairId === st.id || s.id === `slab-void-${st.id}`);
+    if (!vSlab) continue;
+    for (let i = 0; i < vSlab.polygon.length; i++) {
+      const a = vSlab.polygon[i]!;
+      const b = vSlab.polygon[(i + 1) % vSlab.polygon.length]!;
+      const mx = (a.x + b.x) * 0.5;
+      const mz = (a.z + b.z) * 0.5;
+      if (Math.hypot(mx - st.end.x, mz - st.end.z) < st.width * 0.65) continue;
+      if (hasLt2WallNearEdge(a.x, a.z, b.x, b.z)) continue;
+      const edx = b.x - a.x;
+      const edz = b.z - a.z;
+      const elen = Math.hypot(edx, edz) || 1;
+      const enx = -edz / elen;
+      const enz = edx / elen;
+      const pPos = { x: mx + enx * 0.25, z: mz + enz * 0.25 };
+      const pNeg = { x: mx - enx * 0.25, z: mz - enz * 0.25 };
+      const outPt = pointInPoly2D(pPos.x, pPos.z, vSlab.polygon) ? pNeg : pPos;
+      if (lt2SolidSlabs.some((sl) => pointInPoly2D(outPt.x, outPt.z, sl.polygon))) {
+        emitRailCollider(`rail:stair-${st.id}-${i}`, "Railing Kaca Tangga", a.x, a.z, b.x, b.z, lt2Y + 0.02);
+      }
+    }
+  }
+  for (const r of project.levels[1]?.rooms ?? []) {
+    if (r.program !== "balcony" || r.polygon.length < 3) continue;
+    for (let i = 0; i < r.polygon.length; i++) {
+      const a = r.polygon[i]!;
+      const b = r.polygon[(i + 1) % r.polygon.length]!;
+      if (!hasLt2WallNearEdge(a.x, a.z, b.x, b.z)) {
+        emitRailCollider(`rail:balc-${r.id}-${i}`, `Railing ${r.name}`, a.x, a.z, b.x, b.z, lt2Y);
+      }
+    }
+  }
 
   // 3. Furniture, Floor HVAC, Trees & Outdoor AC Condensers
   const lt1FurnitureBaseY = (x: number, z: number, cat: string): number => {
@@ -669,7 +672,6 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
   }
 
   const lt2Slabs = (project.levels[1]?.slabs ?? []).filter((s) => !s.isVoid && s.polygon.length >= 3);
-  const lt2VoidSlabs = (project.levels[1]?.slabs ?? []).filter((s) => s.isVoid && s.polygon.length >= 3);
 
   const floorTileMap = new Map<string, string>();
   for (const ct of project.buildExtras?.floorTiles ?? []) {

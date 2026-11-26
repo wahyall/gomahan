@@ -138,7 +138,9 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
   let totalWindowAreaM2 = 0;
   for (const lv of project.levels) {
     for (const w of lv.walls) {
-      totalWallLengthM += Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
+      if (w.kind !== "fence") {
+        totalWallLengthM += Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
+      }
       for (const o of w.openings) {
         if (o.kind === "door") totalDoors++;
         else if (o.kind === "window") {

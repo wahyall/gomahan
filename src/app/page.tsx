@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
 import { computeStructuralReport } from "@/lib/structure/sniEngine";
@@ -172,6 +172,7 @@ export default function HomePage() {
         if (typeof document !== "undefined" && document.pointerLockElement) return;
         const st = useStudioStore.getState();
         if (st.commandPaletteOpen || st.guideOpen || pendingImport || snapshotsOpen) return;
+        if (typeof document !== "undefined" && document.querySelector("[data-build-modal='1']")) return;
         if (st.selected !== null) {
           setSelected(null);
         } else if (st.studioPanel !== "none") {
@@ -185,14 +186,17 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [pendingImport, setSelected, setWorkspace, snapshotsOpen]);
 
-  // Core reactive computation pipeline
+  // Core reactive computation pipeline: synchronous structure for 3D edit responsiveness, deferred heavy sims
   const derived = useMemo(() => buildDerivedModel(project), [project]);
   const struct = useMemo(() => computeStructuralReport(derived), [derived]);
-  const rab = useMemo(() => buildRabSummary(derived, struct), [derived, struct]);
-  const schedule = useMemo(() => buildScheduleSummary(project, rab, scheduleScenario), [project, rab, scheduleScenario]);
-  const lighting = useMemo(() => runLightingSimulation(derived), [derived]);
-  const airflow = useMemo(() => runAirflowSimulation(derived), [derived]);
-  const flood = useMemo(() => runFloodSimulation(derived), [derived]);
+  const deferredProject = useDeferredValue(project);
+  const deferredDerived = useMemo(() => buildDerivedModel(deferredProject), [deferredProject]);
+  const deferredStruct = useMemo(() => computeStructuralReport(deferredDerived), [deferredDerived]);
+  const rab = useMemo(() => buildRabSummary(deferredDerived, deferredStruct), [deferredDerived, deferredStruct]);
+  const schedule = useMemo(() => buildScheduleSummary(deferredProject, rab, scheduleScenario), [deferredProject, rab, scheduleScenario]);
+  const lighting = useMemo(() => runLightingSimulation(deferredDerived), [deferredDerived]);
+  const airflow = useMemo(() => runAirflowSimulation(deferredDerived), [deferredDerived]);
+  const flood = useMemo(() => runFloodSimulation(deferredDerived), [deferredDerived]);
 
   const handleExportJson = useCallback(() => {
     const check = validateProjectImport(project);

@@ -52,16 +52,67 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
   const rad = (effectiveSlopeDeg * Math.PI) / 180;
   const pitch = Math.tan(rad);
 
-  const minX = 0 - (project.site.partyWallLeft ? 0 : sys.overhangSideM);
-  const maxX = project.site.width + (project.site.partyWallRight ? 0 : sys.overhangSideM);
+  // Derive building footprint dynamically from actual structural walls (>= 2.4m) & indoor/balcony rooms
+  const structWalls = project.levels
+    .flatMap((l) => l.walls)
+    .filter((w) => w.kind !== "fence" && w.height >= 2.4);
+  const coveredRooms = project.levels
+    .flatMap((l) => l.rooms)
+    .filter((r) => r.program !== "garden" && r.program !== "carport" && r.program !== "circulation");
+  const hasHouse = structWalls.length > 0 || coveredRooms.length > 0;
 
-  const roofStartZ = 3.0;
-  const roofEndZ = project.site.depth;
+  let bMinX = 0;
+  let bMaxX = project.site.width;
+  let bMinZ = 3.0;
+  let bMaxZ = project.site.depth;
+
+  if (hasHouse) {
+    bMinX = Infinity;
+    bMaxX = -Infinity;
+    bMinZ = Infinity;
+    bMaxZ = -Infinity;
+    for (const w of structWalls) {
+      bMinX = Math.min(bMinX, w.start.x, w.end.x);
+      bMaxX = Math.max(bMaxX, w.start.x, w.end.x);
+      bMinZ = Math.min(bMinZ, w.start.z, w.end.z);
+      bMaxZ = Math.max(bMaxZ, w.start.z, w.end.z);
+    }
+    for (const r of coveredRooms) {
+      for (const p of r.polygon) {
+        bMinX = Math.min(bMinX, p.x);
+        bMaxX = Math.max(bMaxX, p.x);
+        bMinZ = Math.min(bMinZ, p.z);
+        bMaxZ = Math.max(bMaxZ, p.z);
+      }
+    }
+    // Include balcony overhang in roof startZ on LT2 if present
+    const balconies = (project.levels[1]?.rooms ?? []).filter((r) => r.program === "balcony");
+    for (const b of balconies) {
+      for (const p of b.polygon) {
+        bMinX = Math.min(bMinX, p.x);
+        bMaxX = Math.max(bMaxX, p.x);
+        bMinZ = Math.min(bMinZ, p.z);
+        bMaxZ = Math.max(bMaxZ, p.z);
+      }
+    }
+    // Snap near-lot-edge wall centerlines flush to 0 / site.width / site.depth
+    if (bMinX <= 0.12) bMinX = 0;
+    if (bMaxX >= project.site.width - 0.12) bMaxX = project.site.width;
+    if (bMaxZ >= project.site.depth - 0.12) bMaxZ = project.site.depth;
+  }
+
+  const touchesLeftParty = project.site.partyWallLeft && bMinX <= 0.12;
+  const touchesRightParty = project.site.partyWallRight && bMaxX >= project.site.width - 0.12;
+  const minX = bMinX - (touchesLeftParty ? 0 : sys.overhangSideM);
+  const maxX = bMaxX + (touchesRightParty ? 0 : sys.overhangSideM);
+
+  const roofStartZ = Math.max(0, bMinZ);
+  const roofEndZ = Math.min(project.site.depth, bMaxZ);
   const minZ = roofStartZ - sys.overhangFrontM;
   const maxZ = roofEndZ + sys.overhangBackM;
 
-  const spanZ = maxZ - minZ;
-  const spanX = maxX - minX;
+  const spanZ = Math.max(0.5, maxZ - minZ);
+  const spanX = Math.max(0.5, maxX - minX);
 
   let ridgeElevationM = baseTop + 0.3;
   const heightAt = (x: number, z: number): number => {
@@ -101,9 +152,9 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
   // Subtract rear void (1.70..5.00, 15.35..17.00) and stair skylight area from opaque roof cover if open,
   // or keep transparent skylight frame on top
   const slopeFactor = Math.sqrt(1 + pitch * pitch);
-  // Main roof + Carport lower shed canopy (Z: -overhangFront..4.5, X: 0..5)
-  const mainArea = spanX * spanZ * slopeFactor;
-  const carportArea = project.site.width * (4.5 + sys.overhangFrontM) * 1.015;
+  const hasCarport = (project.levels[0]?.rooms ?? []).some((r) => r.program === "carport");
+  const mainArea = hasHouse ? spanX * spanZ * slopeFactor : 0;
+  const carportArea = hasHouse && hasCarport ? project.site.width * (4.5 + sys.overhangFrontM) * 1.015 : 0;
   const areaM2 = mainArea + carportArea;
 
   const trussCount = Math.max(6, Math.ceil(spanZ / 1.2) + 1);

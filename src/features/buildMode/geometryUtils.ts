@@ -1,4 +1,10 @@
-import type { Opening, Project, Room, Stair, Vec2, Wall } from "@/lib/model/types";
+import type { BuildPoolOverride, Opening, Project, Room, Stair, Vec2, Wall } from "@/lib/model/types";
+import {
+  getStairObb,
+  obbIntersectsObb,
+  validateObjectFootprint,
+  validateOpeningPlacement2D,
+} from "@/features/buildMode/placementValidator";
 
 export interface GridPoint {
   gx: number;
@@ -92,7 +98,8 @@ function edgeBlockedByProjectWall(walls: Wall[], gx: number, gz: number, nx: num
 }
 
 /**
- * Flood-fills contiguous tiles bounded by real `Project` walls on a level.
+ * Flood-fills contiguous tiles bounded by real `Project` walls on a level,
+ * excluding blocked regions (void slabs, pools).
  */
 export function computeProjectRoomFloodCells(
   walls: Wall[],
@@ -101,8 +108,18 @@ export function computeProjectRoomFloodCells(
   cellSize: number,
   startGx: number,
   startGz: number,
+  blockedPolys: Vec2[][] = [],
 ): GridPoint[] {
   if (startGx < 0 || startGx >= cols || startGz < 0 || startGz >= rows) return [];
+  const isBlockedCell = (gx: number, gz: number) => {
+    if (blockedPolys.length === 0) return false;
+    const cx = (gx + 0.5) * cellSize;
+    const cz = (gz + 0.5) * cellSize;
+    return blockedPolys.some((poly) => pointInPolygonXZ(cx, cz, poly));
+  };
+  if (isBlockedCell(startGx, startGz)) return [];
+
+  const solidWalls = walls.filter((w) => w.kind !== "fence");
   const visited = new Uint8Array(cols * rows);
   const queue: number[] = [startGx, startGz];
   visited[startGz * cols + startGx] = 1;
@@ -126,7 +143,8 @@ export function computeProjectRoomFloodCells(
       if (nx < 0 || nx >= cols || nz < 0 || nz >= rows) continue;
       const idx = nz * cols + nx;
       if (visited[idx]) continue;
-      if (edgeBlockedByProjectWall(walls, cx, cz, nx, nz, cellSize)) continue;
+      if (isBlockedCell(nx, nz)) continue;
+      if (edgeBlockedByProjectWall(solidWalls, cx, cz, nx, nz, cellSize)) continue;
       visited[idx] = 1;
       queue.push(nx, nz);
     }
@@ -172,57 +190,31 @@ export function snapOpeningToProjectWalls(
   if (!best) return null;
 
   const minMargin = 0.08;
-  if (best.len < openingWidth + minMargin * 2) {
-    return {
-      valid: false,
-      reason: `Dinding terlalu pendek (${best.len.toFixed(1)} m < ${openingWidth.toFixed(1)} m)`,
-      wall: best.wall,
-      offsetM: best.len * 0.5,
-      worldX: (best.wall.start.x + best.wall.end.x) * 0.5,
-      worldZ: (best.wall.start.z + best.wall.end.z) * 0.5,
-      yaw: best.yaw,
-    };
-  }
-
-  const clampedOff = Math.max(openingWidth * 0.5 + minMargin, Math.min(best.len - openingWidth * 0.5 - minMargin, best.offsetM));
+  const clampedOff = Math.max(
+    openingWidth * 0.5 + minMargin,
+    Math.min(Math.max(openingWidth * 0.5 + minMargin, best.len - openingWidth * 0.5 - minMargin), best.offsetM),
+  );
   const ux = (best.wall.end.x - best.wall.start.x) / best.len;
   const uz = (best.wall.end.z - best.wall.start.z) / best.len;
   const worldSnapX = best.wall.start.x + ux * clampedOff;
   const worldSnapZ = best.wall.start.z + uz * clampedOff;
 
-  if (openingSill + openingHeight > best.wall.height + 0.02) {
+  const check2d = validateOpeningPlacement2D(
+    best.wall,
+    { width: openingWidth, height: openingHeight, sill: openingSill },
+    clampedOff,
+    ignoreOpeningId,
+  );
+  if (!check2d.valid) {
     return {
       valid: false,
-      reason: `Tinggi bukaan (${(openingSill + openingHeight).toFixed(2)} m) > tinggi dinding (${best.wall.height.toFixed(2)} m)`,
+      reason: check2d.reason,
       wall: best.wall,
       offsetM: clampedOff,
       worldX: worldSnapX,
       worldZ: worldSnapZ,
       yaw: best.yaw,
     };
-  }
-
-  const cStart = clampedOff - openingWidth * 0.5;
-  const cEnd = clampedOff + openingWidth * 0.5;
-  const cBottom = openingSill;
-  const cTop = openingSill + openingHeight;
-  for (const sib of best.wall.openings) {
-    if (sib.id === ignoreOpeningId) continue;
-    const sStart = sib.offset - sib.width * 0.5;
-    const sEnd = sib.offset + sib.width * 0.5;
-    const horizOverlap = Math.min(cEnd, sEnd) - Math.max(cStart, sStart) > -0.05;
-    const vertOverlap = Math.min(cTop, sib.sill + sib.height) - Math.max(cBottom, sib.sill) > -0.04;
-    if (horizOverlap && vertOverlap) {
-      return {
-        valid: false,
-        reason: "Bertabrakan dengan pintu/jendela lain",
-        wall: best.wall,
-        offsetM: clampedOff,
-        worldX: worldSnapX,
-        worldZ: worldSnapZ,
-        yaw: best.yaw,
-      };
-    }
   }
 
   return {
@@ -254,6 +246,8 @@ export function validateProjectStairPlacement(
   cols: number,
   rows: number,
   cellSize: number,
+  existingWalls: Wall[] = [],
+  pools: BuildPoolOverride[] = [],
 ): { valid: boolean; reason?: string; start: Vec2; end: Vec2; voidPoly: Vec2[] } {
   const { spanCols, spanRows } = getStairSpan(widthCells, lengthCells, rotationQuarter);
   const x0 = gx * cellSize;
@@ -293,13 +287,56 @@ export function validateProjectStairPlacement(
     return { valid: false, reason: "Keluar batas kavling 5×17 m", start, end, voidPoly };
   }
 
+  const candObb = {
+    cx,
+    cz,
+    sizeX: x1 - x0,
+    sizeZ: z1 - z0,
+    rotationY: 0,
+  };
+
   for (const st of existingStairs) {
-    const sxMin = Math.min(st.start.x, st.end.x) - st.width * 0.5;
-    const sxMax = Math.max(st.start.x, st.end.x) + st.width * 0.5;
-    const szMin = Math.min(st.start.z, st.end.z) - st.width * 0.5;
-    const szMax = Math.max(st.start.z, st.end.z) + st.width * 0.5;
-    if (x0 < sxMax - 0.1 && x1 > sxMin + 0.1 && z0 < szMax - 0.1 && z1 > szMin + 0.1) {
+    if (obbIntersectsObb(candObb, getStairObb(st), 0.08)) {
       return { valid: false, reason: "Menumpuk tangga yang sudah ada", start, end, voidPoly };
+    }
+  }
+
+  for (const w of existingWalls) {
+    if (w.height < 1.5) continue;
+    const wdx = w.end.x - w.start.x;
+    const wdz = w.end.z - w.start.z;
+    const wLen = Math.hypot(wdx, wdz);
+    if (wLen < 0.1) continue;
+    if (
+      obbIntersectsObb(
+        candObb,
+        {
+          cx: (w.start.x + w.end.x) * 0.5,
+          cz: (w.start.z + w.end.z) * 0.5,
+          sizeX: wLen,
+          sizeZ: w.thickness,
+          rotationY: -Math.atan2(wdz, wdx),
+        },
+        0.08,
+      )
+    ) {
+      return { valid: false, reason: "Menabrak dinding", start, end, voidPoly };
+    }
+  }
+
+  for (const pl of pools) {
+    const px0 = Math.min(pl.gx1, pl.gx2) * cellSize;
+    const px1 = (Math.max(pl.gx1, pl.gx2) + 1) * cellSize;
+    const pz0 = Math.min(pl.gz1, pl.gz2) * cellSize;
+    const pz1 = (Math.max(pl.gz1, pl.gz2) + 1) * cellSize;
+    if (
+      obbIntersectsObb(
+        candObb,
+        { cx: (px0 + px1) * 0.5, cz: (pz0 + pz1) * 0.5, sizeX: px1 - px0, sizeZ: pz1 - pz0, rotationY: 0 },
+        0.06,
+      )
+    ) {
+      return { valid: false, reason: "Menimpa area kolam", start, end, voidPoly };
     }
   }
 
@@ -315,6 +352,7 @@ export function applyTerrainBrushToHeights(
   mode: "raise" | "lower" | "flatten",
   deltaM = 0.2,
   radiusCells = 2.5,
+  protectedPolys: Vec2[][] = [],
 ): number[] {
   const next = heights.length === (cols + 1) * (rows + 1) ? [...heights] : new Array((cols + 1) * (rows + 1)).fill(0);
   const stride = cols + 1;
@@ -322,6 +360,12 @@ export function applyTerrainBrushToHeights(
     for (let x = 0; x <= cols; x++) {
       const dist = Math.hypot(x - centerGx, z - centerGz);
       if (dist > radiusCells) continue;
+      const wx = x * 0.5;
+      const wz = z * 0.5;
+      if (protectedPolys.length > 0 && protectedPolys.some((poly) => pointInPolygonXZ(wx, wz, poly))) {
+        next[z * stride + x] = Math.min(0, next[z * stride + x] ?? 0);
+        continue;
+      }
       const falloff = 0.5 * (1 + Math.cos((Math.PI * dist) / radiusCells));
       const idx = z * stride + x;
       const curr = next[idx] ?? 0;
@@ -370,6 +414,7 @@ export function isWallCutawayCandidate(
   camZ: number,
   targetX: number,
   targetZ: number,
+  exterior?: boolean,
 ): boolean {
   const vx = camX - targetX;
   const vz = camZ - targetZ;
@@ -386,32 +431,19 @@ export function isWallCutawayCandidate(
   // Wall normal in XZ: skip nearly edge-on walls so side framing stays intact
   const nx = -wz / wLen;
   const nz = wx / wLen;
-  if (Math.abs(nx * ux + nz * uz) <= 0.28) return false;
+  const edgeThreshold = exterior ? 0.18 : 0.28;
+  if (Math.abs(nx * ux + nz * uz) <= edgeThreshold) return false;
 
   const t = Math.max(0, Math.min(1, ((targetX - startX) * wx + (targetZ - startZ) * wz) / wLenSq));
   const cx = startX + wx * t;
   const cz = startZ + wz * t;
   const dot = (cx - targetX) * ux + (cz - targetZ) * uz;
+  if (exterior === true) return dot > 0.05;
   return dot > 0.25;
 }
 
-function pointInPolyLocal(px: number, pz: number, poly: Vec2[]): boolean {
-  if (poly.length < 3) return false;
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i]!.x;
-    const zi = poly[i]!.z;
-    const xj = poly[j]!.x;
-    const zj = poly[j]!.z;
-    if (zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi || 1e-9) + xi) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
 /**
- * Validate 2D XZ footprint placement against lot boundaries, walls, LT2 void holes, and stairs.
+ * Validate 2D XZ footprint placement against lot boundaries, walls, LT2 void holes, stairs, pools, and furniture.
  */
 export function validateFootprintPlacement(
   project: Project,
@@ -423,68 +455,20 @@ export function validateFootprintPlacement(
   rotationY: number,
   mountKind: "wall" | "ceiling" | "surface",
   elevY = 0,
+  excludeEntityId?: string,
+  altBypass = false,
 ): { valid: boolean; reason?: string } {
-  const c = Math.abs(Math.cos(rotationY));
-  const s = Math.abs(Math.sin(rotationY));
-  const halfW = (sizeX * c + sizeZ * s) * 0.5;
-  const halfD = (sizeX * s + sizeZ * c) * 0.5;
-  const margin = mountKind === "surface" ? 0.02 : 0.08;
-
-  if (
-    cx - halfW < margin ||
-    cx + halfW > project.site.width - margin ||
-    cz - halfD < margin ||
-    cz + halfD > project.site.depth - margin
-  ) {
-    return { valid: false, reason: "Melewati batas kavling 5×17 m" };
-  }
-
-  const lv = project.levels[lvIdx];
-  if (!lv || mountKind !== "surface") return { valid: true };
-
-  // Block floor props placed over LT2 stairwell/courtyard void slabs
-  if (lvIdx === 1) {
-    const voids = lv.slabs.filter((sl) => sl.isVoid);
-    const probes: [number, number][] = [
-      [cx, cz],
-      [cx - halfW * 0.65, cz - halfD * 0.65],
-      [cx + halfW * 0.65, cz + halfD * 0.65],
-    ];
-    for (const v of voids) {
-      if (probes.some(([px, pz]) => pointInPolyLocal(px, pz, v.polygon))) {
-        return { valid: false, reason: `Menimpa ${v.name}` };
-      }
-    }
-  }
-
-  // Detect true wall penetration by floor items (wall mounts & tabletop items exempt)
-  if (elevY < 0.08 && sizeX >= 0.35 && sizeZ >= 0.35) {
-    for (const w of lv.walls) {
-      if (w.height < 0.6) continue;
-      const dx = w.end.x - w.start.x;
-      const dz = w.end.z - w.start.z;
-      const wLen = Math.hypot(dx, dz);
-      if (wLen < 0.1) continue;
-      const ux = dx / wLen;
-      const uz = dz / wLen;
-      const nx = -uz;
-      const nz = ux;
-      const rx = cx - w.start.x;
-      const rz = cz - w.start.z;
-      const along = rx * ux + rz * uz;
-      const perp = Math.abs(rx * nx + rz * nz);
-
-      // Item OBB half-extent along wall normal vs along wall axis
-      const locX = Math.cos(rotationY);
-      const locZ = Math.sin(rotationY);
-      const extN = Math.abs(locX * nx - locZ * nz) * (sizeX * 0.5) + Math.abs(locZ * nx + locX * nz) * (sizeZ * 0.5);
-      const extA = Math.abs(locX * ux - locZ * uz) * (sizeX * 0.5) + Math.abs(locZ * ux + locX * uz) * (sizeZ * 0.5);
-
-      if (along > -extA + 0.08 && along < wLen + extA - 0.08 && perp < extN + w.thickness * 0.5 - 0.08) {
-        return { valid: false, reason: `Menembus ${w.name}` };
-      }
-    }
-  }
-
-  return { valid: true };
+  return validateObjectFootprint({
+    project,
+    levelIndex: lvIdx,
+    x: cx,
+    y: elevY,
+    z: cz,
+    sizeX,
+    sizeZ,
+    rotationY,
+    mountKind,
+    excludeEntityId,
+    altBypass,
+  });
 }

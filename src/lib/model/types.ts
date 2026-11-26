@@ -124,7 +124,10 @@ export interface Wall {
   end: Vec2;
   thickness: number; // m
   height: number; // m
+  kind?: "wall" | "fence"; // default "wall"; fence cannot host openings or full masonry
   materialId: ID;
+  frontMaterialId?: ID; // +right normal side (right-hand of start->end)
+  backMaterialId?: ID; // -left normal side (left-hand of start->end)
   exterior: boolean;
   partyWallSide?: "left" | "right" | null;
   openings: Opening[];
@@ -160,6 +163,7 @@ export interface Slab {
   materialId: ID;
   isVoid?: boolean;
   isOverhang?: boolean;
+  linkedStairId?: ID;
 }
 
 export interface Stair {

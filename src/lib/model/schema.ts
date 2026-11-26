@@ -108,7 +108,10 @@ export const wallSchema = z
     end: vec2Schema,
     thickness: z.number().finite().min(0.05).max(0.4),
     height: z.number().finite().min(0.5).max(6),
+    kind: z.enum(["wall", "fence"]).optional(),
     materialId: z.string(),
+    frontMaterialId: z.string().optional(),
+    backMaterialId: z.string().optional(),
     exterior: z.boolean(),
     partyWallSide: z.enum(["left", "right"]).nullable().optional(),
     openings: z.array(openingSchema),
@@ -152,6 +155,7 @@ export const slabSchema = z.object({
   materialId: z.string(),
   isVoid: z.boolean().optional(),
   isOverhang: z.boolean().optional(),
+  linkedStairId: z.string().optional(),
 });
 
 export const stairSchema = z.object({
@@ -521,12 +525,35 @@ export function migrateProjectSave(raw: unknown): VersionedSaveParseResult {
     },
   };
 
-  // Strip dead mepRoutes and ensure 1..2 levels
+  // Strip dead mepRoutes, normalize wall.kind & slab.linkedStairId, and ensure 1..2 levels
   if (Array.isArray(draft.levels)) {
     draft.levels = draft.levels.slice(0, LEVEL_COUNT).map((lv) => {
       if (!lv || typeof lv !== "object") return lv;
       const copy = { ...(lv as Record<string, unknown>) };
       delete copy.mepRoutes;
+      if (Array.isArray(copy.walls)) {
+        copy.walls = copy.walls.map((rawW) => {
+          if (!rawW || typeof rawW !== "object") return rawW;
+          const w = { ...(rawW as Record<string, unknown>) };
+          if (w.kind === undefined) {
+            const h = typeof w.height === "number" ? w.height : 3.6;
+            const t = typeof w.thickness === "number" ? w.thickness : 0.1;
+            const ops = Array.isArray(w.openings) ? w.openings : [];
+            w.kind = h <= 1.35 && t <= 0.085 && ops.length === 0 ? "fence" : "wall";
+          }
+          return w;
+        });
+      }
+      if (Array.isArray(copy.slabs)) {
+        copy.slabs = copy.slabs.map((rawS) => {
+          if (!rawS || typeof rawS !== "object") return rawS;
+          const s = { ...(rawS as Record<string, unknown>) };
+          if (s.isVoid && !s.linkedStairId && typeof s.id === "string" && s.id.startsWith("slab-void-")) {
+            s.linkedStairId = s.id.slice("slab-void-".length);
+          }
+          return s;
+        });
+      }
       return copy;
     });
   }

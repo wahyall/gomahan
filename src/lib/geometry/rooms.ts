@@ -170,6 +170,7 @@ export function computeLevelRoomsMetrics(
 
     if (room.program !== "void") {
       for (const w of level.walls) {
+        if (w.kind === "fence") continue;
         const effThick = (w.exterior ? brickSpec.outerThicknessMm : brickSpec.innerThicknessMm) / 1000;
         const shared = edgeSharedLengthWithWall(room.polygon, w);
         if (shared > 0.02) {
@@ -218,8 +219,9 @@ export function computeLevelRoomsMetrics(
     });
   }
 
-  // Exact wall footprint area on this level
+  // Exact wall footprint area on this level (excluding light fences)
   const wallFootprint = level.walls.reduce((s, w) => {
+    if (w.kind === "fence") return s;
     const effThick = (w.exterior ? brickSpec.outerThicknessMm : brickSpec.innerThicknessMm) / 1000;
     const len = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
     return s + len * effThick;

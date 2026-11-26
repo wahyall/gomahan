@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { useStore } from "zustand";
 import {
   Box,
   Boxes,
@@ -13,6 +14,7 @@ import {
   Copy,
   Droplets,
   Eye,
+  FlipHorizontal2,
   Footprints,
   Grid3x3,
   Hammer,
@@ -23,6 +25,7 @@ import {
   Moon,
   MousePointer2,
   Pipette,
+  Redo2,
   RotateCcw,
   RotateCw,
   Save,
@@ -32,6 +35,7 @@ import {
   Sparkles,
   Sun,
   Trash2,
+  Undo2,
   X,
   Wind,
 } from "lucide-react";
@@ -46,14 +50,16 @@ import {
   type BuildCatalogEntry,
   type BuildCategoryId,
   type BuildSceneStats,
+  type FurnitureSubcategory,
   type RoofVisibilityMode,
   type WallVisibilityMode,
 } from "@/features/buildMode";
 import { simsAudio } from "@/lib/audio/simsAudio";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import { polygonArea } from "@/lib/geometry/rooms";
 import { CUT_PLANE_MAX_M, CUT_PLANE_OFF, PEIL_FLOOR1_MAX_M, PEIL_FLOOR1_MIN_M } from "@/lib/model/constants";
 import { PAINT_SWATCHES, ROOF_SWATCHES } from "@/lib/model/catalog";
-import type { RoofType } from "@/lib/model/types";
+import type { RoofType, RoomProgram } from "@/lib/model/types";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
@@ -96,6 +102,48 @@ const TIMES_OF_DAY: { id: string; hour: number; label: string }[] = [
   { id: "noon", hour: 12.0, label: "Siang" },
   { id: "sunset", hour: 17.2, label: "Sore" },
   { id: "night", hour: 21.0, label: "Malam" },
+];
+
+const FURNITURE_SUBCATS: { id: FurnitureSubcategory; label: string }[] = [
+  { id: "all", label: "Semua" },
+  { id: "living", label: "Tamu" },
+  { id: "bedroom", label: "Tidur" },
+  { id: "kitchen", label: "Dapur & Makan" },
+  { id: "bath", label: "Kamar Mandi" },
+  { id: "outdoor", label: "Luar & Parkir" },
+];
+
+function matchFurnitureSubcat(item: BuildCatalogEntry, sub: FurnitureSubcategory): boolean {
+  if (sub === "all") return true;
+  const mat = item.materialId ?? "";
+  if (sub === "living") {
+    return (
+      item.furnitureCategory === "seating" ||
+      item.furnitureCategory === "storage" ||
+      mat === "coffee_table" ||
+      mat === "desk"
+    );
+  }
+  if (sub === "bedroom") {
+    return item.furnitureCategory === "bed" || mat === "wardrobe";
+  }
+  if (sub === "kitchen") {
+    return item.furnitureCategory === "kitchen" || mat === "dining_table" || mat === "dining_chair";
+  }
+  if (sub === "bath") return item.furnitureCategory === "sanitary";
+  if (sub === "outdoor") return item.furnitureCategory === "plant" || item.furnitureCategory === "vehicle";
+  return true;
+}
+
+const ROOM_PROGRAM_OPTIONS: { id: RoomProgram; label: string }[] = [
+  { id: "living", label: "Ruang Tamu / Keluarga" },
+  { id: "bedroom", label: "Kamar Tidur" },
+  { id: "kitchen", label: "Dapur / Makan" },
+  { id: "bathroom", label: "Kamar Mandi" },
+  { id: "circulation", label: "Teras / Sirkulasi" },
+  { id: "balcony", label: "Balkon" },
+  { id: "carport", label: "Carport" },
+  { id: "garden", label: "Taman" },
 ];
 
 function WallModeIcon({ mode }: { mode: WallVisibilityMode }) {
@@ -225,9 +273,14 @@ export function BuildWorkspace({
   const activeCategory = useBuildModeStore((s) => s.activeCategory);
   const activeTool = useBuildModeStore((s) => s.activeTool);
   const selectedCatalogId = useBuildModeStore((s) => s.selectedCatalogId);
+  const selectedSwatchHex = useBuildModeStore((s) => s.selectedSwatchHex);
+  const activeFurnitureSubcat = useBuildModeStore((s) => s.activeFurnitureSubcat);
   const floorBrushMode = useBuildModeStore((s) => s.floorBrushMode);
   const terrainBrushMode = useBuildModeStore((s) => s.terrainBrushMode);
-  const placementRotationQuarter = useBuildModeStore((s) => s.placementRotationQuarter);
+  const wallPaintMode = useBuildModeStore((s) => s.wallPaintMode);
+  const placementRotationStep = useBuildModeStore((s) => s.placementRotationStep);
+  const placementFlipSwing = useBuildModeStore((s) => s.placementFlipSwing);
+  const pendingRoofType = useBuildModeStore((s) => s.pendingRoofType);
   const hover = useBuildModeStore((s) => s.hover);
   const previewHud = useBuildModeStore((s) => s.previewHud);
   const savedCameraSnapshot = useBuildModeStore((s) => s.savedCameraSnapshot);
@@ -235,6 +288,9 @@ export function BuildWorkspace({
   const renderTier = useBuildModeStore((s) => s.renderTier);
   const setRtLook = useBuildModeStore((s) => s.setRtLook);
   const setRenderTier = useBuildModeStore((s) => s.setRenderTier);
+
+  const pastCount = useStore(useStudioStore.temporal, (s) => s.pastStates.length);
+  const futureCount = useStore(useStudioStore.temporal, (s) => s.futureStates.length);
 
   const setActiveLevel = useBuildModeStore((s) => s.setActiveLevel);
   const stepLevel = useBuildModeStore((s) => s.stepLevel);
@@ -249,9 +305,14 @@ export function BuildWorkspace({
   const setCategory = useBuildModeStore((s) => s.setCategory);
   const selectCatalogItem = useBuildModeStore((s) => s.selectCatalogItem);
   const selectCatalogById = useBuildModeStore((s) => s.selectCatalogById);
+  const setSelectedSwatchHex = useBuildModeStore((s) => s.setSelectedSwatchHex);
+  const setActiveFurnitureSubcat = useBuildModeStore((s) => s.setActiveFurnitureSubcat);
   const setFloorBrushMode = useBuildModeStore((s) => s.setFloorBrushMode);
   const setTerrainBrushMode = useBuildModeStore((s) => s.setTerrainBrushMode);
-  const rotatePlacementQuarter = useBuildModeStore((s) => s.rotatePlacementQuarter);
+  const setWallPaintMode = useBuildModeStore((s) => s.setWallPaintMode);
+  const rotatePlacementStep = useBuildModeStore((s) => s.rotatePlacementStep);
+  const togglePlacementFlipSwing = useBuildModeStore((s) => s.togglePlacementFlipSwing);
+  const setPendingRoofType = useBuildModeStore((s) => s.setPendingRoofType);
   const setHover = useBuildModeStore((s) => s.setHover);
   const setPreviewHud = useBuildModeStore((s) => s.setPreviewHud);
   const saveCameraSnapshot = useBuildModeStore((s) => s.saveCameraSnapshot);
@@ -296,19 +357,29 @@ export function BuildWorkspace({
         onSelect: (sel) => setSelected(sel),
         onHoverCell: (gx, gz, worldX, worldZ, inBounds) => setHover({ gx, gz, worldX, worldZ, inBounds }),
         onPreviewHud: (hud) => setPreviewHud(hud),
-        onEyedropCatalog: (cid) => {
-          selectCatalogById(cid);
+        onEyedropCatalog: (cid, swatchHex) => {
+          selectCatalogById(cid, swatchHex);
           toast.info("Item disalin dari viewport.");
         },
         onStats: (snap) => setStats(snap),
         onAddWall: (lv, w) => st.addWall(lv, w),
         onAddRoomAndWalls: (lv, ws, r) => st.addRoomAndWalls(lv, ws, r),
         onUpdateWall: (lv, id, p) => st.updateWall(lv, id, p),
+        onPushPullWall: (lv, wid, d, altFree) => {
+          const res = st.pushPullWall(lv, wid, d, altFree);
+          if (!res.ok && res.reason) toast.warning(res.reason);
+        },
+        onPaintRoomWalls: (lv, rid, matId) => st.paintRoomWalls(lv, rid, matId),
         onDeleteWall: (lv, id) => st.deleteWall(lv, id),
+        onDeleteWallsBatch: (lv, ids) => st.deleteWallsBatch(lv, ids),
         onAddOpening: (lv, wid, op) => st.addOpening(lv, wid, op),
+        onUpdateOpening: (lv, wid, oid, p) => st.updateOpening(lv, wid, oid, p),
         onDeleteOpening: (lv, wid, oid) => st.deleteOpening(lv, wid, oid),
         onPaintRoomFloor: (lv, rid, matId) => st.paintRoomFloor(lv, rid, matId),
+        onDeleteRoom: (lv, rid) => st.deleteRoom(lv, rid),
         onSetFloorTiles: (tiles) => st.setFloorTileOverrides(tiles),
+        onDeleteFloorTile: (lv, gx, gz) => st.deleteFloorTile(lv, gx, gz),
+        onDeleteFloorTilesBatch: (tiles) => st.deleteFloorTilesBatch(tiles),
         onAddStair: (lv, s, v) => st.addStairWithCutout(lv, s, v),
         onDeleteStair: (lv, id) => st.deleteStair(lv, id),
         onAddFurniture: (lv, f) => st.addFurniture(lv, f),
@@ -326,6 +397,9 @@ export function BuildWorkspace({
         onAddPool: (p) => st.addPool(p),
         onDeletePool: (id) => st.deletePool(id),
         onSetTerrainHeights: (h) => st.setTerrainHeights(h),
+        onPlacementCommitted: (_tool, keepTool) => {
+          if (!keepTool) selectCatalogById("tool_select");
+        },
       });
       if (savedCameraSnapshot) bs.cameraCtrl.applySnapshot(savedCameraSnapshot);
       sceneRef.current = bs;
@@ -353,8 +427,12 @@ export function BuildWorkspace({
   }, []);
 
   useEffect(() => {
-    sceneRef.current?.updateProjectData(derived, struct, selected, view, lighting, airflow, flood);
-  }, [derived, struct, selected, view, lighting, airflow, flood]);
+    sceneRef.current?.updateProjectData(derived, struct, useStudioStore.getState().selected, view, lighting, airflow, flood);
+  }, [derived, struct, view, lighting, airflow, flood]);
+
+  useEffect(() => {
+    sceneRef.current?.setSelected(selected);
+  }, [selected]);
 
   // Cinematic RT-look & quality tier are pushed into the scene whenever they change
   useEffect(() => {
@@ -377,9 +455,13 @@ export function BuildWorkspace({
       showBricksOverlay,
       activeTool,
       selectedCatalogId,
+      selectedSwatchHex,
       floorBrushMode,
       terrainBrushMode,
-      placementRotationQuarter,
+      wallPaintMode,
+      placementRotationStep,
+      placementFlipSwing,
+      pendingRoofType,
     });
   }, [
     activeLevel,
@@ -392,9 +474,13 @@ export function BuildWorkspace({
     showBricksOverlay,
     activeTool,
     selectedCatalogId,
+    selectedSwatchHex,
     floorBrushMode,
     terrainBrushMode,
-    placementRotationQuarter,
+    wallPaintMode,
+    placementRotationStep,
+    placementFlipSwing,
+    pendingRoofType,
   ]);
 
   useEffect(() => {
@@ -419,13 +505,31 @@ export function BuildWorkspace({
       const w = lv.walls.find((x) => x.id === selected.id);
       if (!w) return null;
       const len = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
-      return { title: w.name, sub: `Panjang ${len.toFixed(2)} m · Tebal ${(w.thickness * 100).toFixed(0)} cm · LT${lv.index + 1}` };
+      return {
+        title: w.name,
+        sub: `${w.kind === "fence" ? "Pagar" : "Dinding"} ${len.toFixed(2)} m · ${(w.thickness * 100).toFixed(0)} cm · LT${lv.index + 1}`,
+      };
     }
     if (selected.kind === "opening") {
       const w = lv.walls.find((x) => x.id === selected.wallId);
       const o = w?.openings.find((x) => x.id === selected.id);
       if (!o) return null;
-      return { title: o.label, sub: `${o.width.toFixed(2)}×${o.height.toFixed(2)} m · Sill ${o.sill.toFixed(2)} m` };
+      return { title: o.label, sub: `${o.width.toFixed(2)}×${o.height.toFixed(2)} m · Seret di dinding` };
+    }
+    if (selected.kind === "room") {
+      const r = lv.rooms.find((x) => x.id === selected.id);
+      if (!r) return null;
+      const areaM2 = polygonArea(r.polygon);
+      return { title: r.name, sub: `Ruangan · ${areaM2.toFixed(1)} m² · LT${lv.index + 1}` };
+    }
+    if (selected.kind === "floorTile") {
+      const tile = (project.buildExtras?.floorTiles ?? []).find(
+        (t) => t.levelIndex === selected.levelIndex && t.gx === selected.gx && t.gz === selected.gz,
+      );
+      return {
+        title: `Ubin (${selected.gx}, ${selected.gz})`,
+        sub: `${tile?.materialId ?? "Ubin kustom"} · LT${lv.index + 1}`,
+      };
     }
     if (selected.kind === "stair") {
       const stObj = lv.stairs.find((x) => x.id === selected.id);
@@ -448,7 +552,7 @@ export function BuildWorkspace({
       return { title: l.name, sub: `${l.lumens} lm · ${l.colorTempK}K · ${l.on ? "ON" : "OFF"}` };
     }
     return null;
-  }, [project.buildExtras?.pools, project.levels, selected]);
+  }, [project.buildExtras?.floorTiles, project.buildExtras?.pools, project.levels, selected]);
 
   const handleDeleteSelected = useCallback(() => {
     if (!selected || selected.kind === "part") return;
@@ -458,15 +562,25 @@ export function BuildWorkspace({
     else if (selected.kind === "stair") st.deleteStair(lv, selected.id);
     else if (selected.kind === "wall") st.deleteWall(lv, selected.id);
     else if (selected.kind === "opening") st.deleteOpening(lv, selected.wallId, selected.id);
+    else if (selected.kind === "room") st.deleteRoom(lv, selected.id);
+    else if (selected.kind === "floorTile") st.deleteFloorTile(lv, selected.gx, selected.gz);
     else if (selected.kind === "furniture") st.deleteFurniture(lv, selected.id);
     else if (selected.kind === "hvac") st.deleteHvac(lv, selected.id);
     else if (selected.kind === "light") st.deleteLight(lv, selected.id);
   }, [selected]);
 
   const handleRotateSelected = useCallback(
-    (deltaRad = Math.PI / 2) => {
+    (deltaStep: -1 | 1 = 1) => {
+      if (sceneRef.current?.rotateActiveDrag(deltaStep)) {
+        simsAudio.play("rotate");
+        return;
+      }
       if (!selected || selected.kind === "part") {
-        rotatePlacementQuarter(deltaRad > 0 ? 1 : -1);
+        if (activeTool === "opening") {
+          togglePlacementFlipSwing();
+        } else {
+          rotatePlacementStep(deltaStep);
+        }
         simsAudio.play("rotate");
         return;
       }
@@ -474,7 +588,12 @@ export function BuildWorkspace({
       const lvIdx = selected.levelIndex as 0 | 1;
       const lv = st.project.levels[lvIdx];
       if (!lv) return;
-      if (selected.kind === "furniture") {
+      const deltaRad = (deltaStep > 0 ? 1 : -1) * (Math.PI / 4);
+      if (selected.kind === "opening") {
+        const w = lv.walls.find((x) => x.id === selected.wallId);
+        const cur = w?.openings.find((o) => o.id === selected.id);
+        if (w && cur) st.updateOpening(lvIdx, w.id, cur.id, { swing: cur.swing === -1 ? 1 : -1 });
+      } else if (selected.kind === "furniture") {
         const cur = lv.furniture.find((f) => f.id === selected.id);
         if (cur) st.updateFurniture(lvIdx, cur.id, { rotationY: cur.rotationY + deltaRad });
       } else if (selected.kind === "hvac") {
@@ -486,7 +605,7 @@ export function BuildWorkspace({
       }
       simsAudio.play("rotate");
     },
-    [rotatePlacementQuarter, selected],
+    [activeTool, rotatePlacementStep, selected, togglePlacementFlipSwing],
   );
 
   const handleDuplicateSelected = useCallback(() => {
@@ -495,13 +614,14 @@ export function BuildWorkspace({
     const lvIdx = selected.levelIndex as 0 | 1;
     const lv = st.project.levels[lvIdx];
     if (!lv) return;
+    const maxX = Math.max(1, st.project.site.width - 0.35);
     if (selected.kind === "furniture") {
       const f = lv.furniture.find((x) => x.id === selected.id);
       if (f) {
         st.addFurniture(lvIdx, {
           ...structuredClone(f),
           id: `furn-cp-${Date.now().toString(36)}`,
-          position: { x: Math.min(4.6, f.position.x + 0.6), y: f.position.y, z: f.position.z },
+          position: { x: Math.min(maxX, f.position.x + 0.5), y: f.position.y, z: f.position.z },
         });
       }
     } else if (selected.kind === "hvac") {
@@ -510,7 +630,7 @@ export function BuildWorkspace({
         st.addHvac(lvIdx, {
           ...structuredClone(h),
           id: `hv-cp-${Date.now().toString(36)}`,
-          position: { x: Math.min(4.6, h.position.x + 0.6), y: h.position.y, z: h.position.z },
+          position: { x: Math.min(maxX, h.position.x + 0.5), y: h.position.y, z: h.position.z },
         });
       }
     } else if (selected.kind === "light") {
@@ -519,7 +639,7 @@ export function BuildWorkspace({
         st.addLight(lvIdx, {
           ...structuredClone(l),
           id: `lgt-cp-${Date.now().toString(36)}`,
-          position: { x: Math.min(4.6, l.position.x + 0.6), y: l.position.y, z: l.position.z },
+          position: { x: Math.min(maxX, l.position.x + 0.5), y: l.position.y, z: l.position.z },
         });
       }
     }
@@ -530,6 +650,7 @@ export function BuildWorkspace({
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
       const mod = e.ctrlKey || e.metaKey;
+      const st = useStudioStore.getState();
       if (e.key === "PageUp") {
         e.preventDefault();
         stepLevel(1);
@@ -546,6 +667,9 @@ export function BuildWorkspace({
         e.preventDefault();
         setWallVisibility(wallVisibility === "down" ? "cutaway" : "down");
         simsAudio.play("select");
+      } else if (e.key.toLowerCase() === "b" && !mod && !e.shiftKey) {
+        selectCatalogById("tool_wall_straight");
+        simsAudio.play("select");
       } else if (e.key.toLowerCase() === "v" && !mod && !e.shiftKey) {
         selectCatalogById("tool_select");
         simsAudio.play("select");
@@ -557,23 +681,32 @@ export function BuildWorkspace({
       } else if (e.key.toLowerCase() === "i" && !mod) {
         selectCatalogById("tool_eyedropper");
         simsAudio.play("select");
-      } else if ((e.key === "r" || e.key === "." || e.key === ",") && !mod) {
-        handleRotateSelected(e.key === "," ? -Math.PI / 2 : Math.PI / 2);
+      } else if ((e.key.toLowerCase() === "r" || e.key === "." || e.key === ",") && !mod) {
+        handleRotateSelected(e.key === "," ? -1 : 1);
       } else if (e.key === "Delete" || e.key === "Backspace") {
         if (selected && selected.kind !== "part") {
           e.preventDefault();
           handleDeleteSelected();
         }
       } else if (e.key === "Escape") {
-        if (resetModalOpen) setResetModalOpen(false);
-        else if (helpOpen) setHelpOpen(false);
-        else if (selected) setSelected(null);
-        else if (studioPanel !== "none") setStudioPanel("none");
-        else selectCatalogById("tool_select");
+        if (st.commandPaletteOpen || st.guideOpen) return;
+        if (resetModalOpen) {
+          e.stopImmediatePropagation();
+          setResetModalOpen(false);
+        } else if (helpOpen) {
+          e.stopImmediatePropagation();
+          setHelpOpen(false);
+        } else if (pendingRoofType) {
+          e.stopImmediatePropagation();
+          setPendingRoofType(null);
+        } else if (activeTool !== "select") {
+          e.stopImmediatePropagation();
+          selectCatalogById("tool_select");
+        }
       }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [
     stepLevel,
     cycleWallVisibility,
@@ -583,12 +716,12 @@ export function BuildWorkspace({
     selectCatalogById,
     handleRotateSelected,
     selected,
-    studioPanel,
-    setStudioPanel,
     handleDeleteSelected,
     resetModalOpen,
     helpOpen,
-    setSelected,
+    pendingRoofType,
+    setPendingRoofType,
+    activeTool,
   ]);
 
   const handleFocusFoundation = useCallback(() => {
@@ -604,10 +737,13 @@ export function BuildWorkspace({
 
   const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return UNIFIED_BUILD_CATALOG.filter((item) =>
-      q ? item.name.toLowerCase().includes(q) || item.description.toLowerCase().includes(q) : item.category === activeCategory,
-    );
-  }, [activeCategory, query]);
+    return UNIFIED_BUILD_CATALOG.filter((item) => {
+      if (q) return item.name.toLowerCase().includes(q) || item.description.toLowerCase().includes(q);
+      if (item.category !== activeCategory) return false;
+      if (activeCategory === "furniture") return matchFurnitureSubcat(item, activeFurnitureSubcat);
+      return true;
+    });
+  }, [activeCategory, activeFurnitureSubcat, query]);
 
   const activeItem = UNIFIED_BUILD_CATALOG.find((c) => c.id === selectedCatalogId) ?? UNIFIED_BUILD_CATALOG[0]!;
   const criticalCount = derived.validation.filter((v) => v.severity === "critical").length;
@@ -615,12 +751,6 @@ export function BuildWorkspace({
   const floodDanger = flood.lt1FloorFloodCm > 0 || flood.electricalHazardMcb || flood.electricalHazardOutlets;
 
   const handleSelectItemClick = (item: BuildCatalogEntry) => {
-    if (item.toolId === "roof" && item.roofType) {
-      useStudioStore.getState().patchSystems({ roofType: item.roofType as RoofType });
-      selectCatalogItem(item);
-      toast.success(`Bentuk atap diubah menjadi ${item.name}.`);
-      return;
-    }
     selectCatalogItem(item);
     simsAudio.play("select");
   };
@@ -704,6 +834,29 @@ export function BuildWorkspace({
               >
                 <Footprints className="h-3.5 w-3.5 text-primary" />
                 <span className="hidden md:inline">Walk</span>
+              </button>
+
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-white/15" aria-hidden />
+
+              <button
+                type="button"
+                disabled={pastCount === 0}
+                onClick={() => useStudioStore.temporal.getState().undo()}
+                title="Batalkan (Ctrl+Z)"
+                aria-label="Undo"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-foreground transition hover:bg-white/[0.1] disabled:opacity-35 sm:h-8 sm:w-8"
+              >
+                <Undo2 className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                disabled={futureCount === 0}
+                onClick={() => useStudioStore.temporal.getState().redo()}
+                title="Ulangi (Ctrl+Y)"
+                aria-label="Redo"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-foreground transition hover:bg-white/[0.1] disabled:opacity-35 sm:h-8 sm:w-8"
+              >
+                <Redo2 className="h-3.5 w-3.5" />
               </button>
             </div>
 
@@ -1232,6 +1385,35 @@ export function BuildWorkspace({
                     </button>
                   </div>
 
+                  {selected?.kind === "room" && (() => {
+                    const lvIdx = selected.levelIndex as 0 | 1;
+                    const r = project.levels[lvIdx]?.rooms.find((x) => x.id === selected.id);
+                    if (!r) return null;
+                    return (
+                      <div className="space-y-1.5 pt-0.5">
+                        <input
+                          value={r.name}
+                          onChange={(e) => useStudioStore.getState().updateRoom(lvIdx, r.id, { name: e.target.value })}
+                          placeholder="Nama ruangan"
+                          className="h-7 w-full rounded-lg border border-white/15 bg-black/30 px-2 text-[11px] text-foreground focus:border-primary focus:outline-none"
+                        />
+                        <select
+                          value={r.program}
+                          onChange={(e) =>
+                            useStudioStore.getState().updateRoom(lvIdx, r.id, { program: e.target.value as RoomProgram })
+                          }
+                          className="h-7 w-full rounded-lg border border-white/15 bg-[#12161d] px-2 text-[11px] text-foreground focus:border-primary focus:outline-none"
+                        >
+                          {ROOM_PROGRAM_OPTIONS.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })()}
+
                   {selected?.kind === "furniture" && (() => {
                     const lv = project.levels[selected.levelIndex];
                     const f = lv?.furniture.find((x) => x.id === selected.id);
@@ -1295,10 +1477,10 @@ export function BuildWorkspace({
                     {(selected?.kind === "furniture" || selected?.kind === "hvac" || selected?.kind === "light") && (
                       <button
                         type="button"
-                        onClick={() => handleRotateSelected(Math.PI / 2)}
+                        onClick={() => handleRotateSelected(1)}
                         className="rounded-md bg-white/[0.08] px-2 py-1 text-[10.5px] font-medium hover:bg-white/[0.15]"
                       >
-                        Putar 90°
+                        Putar 45°
                       </button>
                     )}
                     {(selected?.kind === "furniture" || selected?.kind === "hvac" || selected?.kind === "light") && (
@@ -1311,18 +1493,27 @@ export function BuildWorkspace({
                       </button>
                     )}
                     {selected?.kind === "opening" && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const lv = selected.levelIndex as 0 | 1;
-                          const w = project.levels[lv]?.walls.find((x) => x.id === selected.wallId);
-                          const o = w?.openings.find((x) => x.id === selected.id);
-                          if (o) useStudioStore.getState().updateOpening(lv, w!.id, o.id, { openPct: o.openPct > 20 ? 0 : 75 });
-                        }}
-                        className="rounded-md bg-emerald-500/20 px-2 py-1 text-[10.5px] font-medium text-emerald-200 hover:bg-emerald-500/35"
-                      >
-                        Buka/Tutup
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const lv = selected.levelIndex as 0 | 1;
+                            const w = project.levels[lv]?.walls.find((x) => x.id === selected.wallId);
+                            const o = w?.openings.find((x) => x.id === selected.id);
+                            if (o) useStudioStore.getState().updateOpening(lv, w!.id, o.id, { openPct: o.openPct > 20 ? 0 : 75 });
+                          }}
+                          className="rounded-md bg-emerald-500/20 px-2 py-1 text-[10.5px] font-medium text-emerald-200 hover:bg-emerald-500/35"
+                        >
+                          Buka/Tutup
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRotateSelected(1)}
+                          className="flex items-center gap-1 rounded-md bg-white/[0.08] px-2 py-1 text-[10.5px] font-medium hover:bg-white/[0.15]"
+                        >
+                          <FlipHorizontal2 className="h-3 w-3" /> Balik
+                        </button>
+                      </>
                     )}
                     <button
                       type="button"
@@ -1343,7 +1534,7 @@ export function BuildWorkspace({
                   <div className="flex items-center justify-between gap-3 font-mono text-[11px] tabular-nums">
                     <span className="font-semibold text-[#f6ba86]">Grid ({hover.gx}, {hover.gz})</span>
                     <span className="text-muted-foreground">
-                      {(hover.gx * 0.5).toFixed(1)}m × {(hover.gz * 0.5).toFixed(1)}m
+                      {(hover.gx * 0.25).toFixed(2)}m × {(hover.gz * 0.25).toFixed(2)}m
                     </span>
                   </div>
                 )
@@ -1372,6 +1563,7 @@ export function BuildWorkspace({
       {/* ONBOARDING / SHORTCUTS CHEATSHEET */}
       {helpOpen && (
         <div
+          data-build-modal="1"
           className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
           onClick={dismissOnboarding}
         >
@@ -1515,13 +1707,13 @@ export function BuildWorkspace({
             </div>
 
             <div className="flex shrink-0 items-center gap-1.5">
-              <div className="relative hidden sm:block">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+              <div className="relative block">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground sm:left-2.5" />
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Cari item..."
-                  className="h-8 w-24 rounded-lg border border-white/10 bg-black/30 pl-7 pr-6 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none sm:h-7 sm:w-32"
+                  placeholder="Cari..."
+                  className="h-8 w-20 rounded-lg border border-white/10 bg-black/30 pl-6 pr-5 text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none sm:h-7 sm:w-32 sm:pl-7 sm:pr-6"
                 />
                 {query && (
                   <button
@@ -1572,13 +1764,59 @@ export function BuildWorkspace({
           {!catalogCollapsed &&
             (activeTool === "floor_tile" ||
               activeTool === "terrain" ||
+              activeTool === "wall_paint" ||
               activeTool === "stair" ||
               activeTool === "furniture" ||
               activeTool === "hvac" ||
+              activeTool === "light" ||
+              activeCategory === "furniture" ||
               activeCategory === "walls" ||
               activeCategory === "stairs_roof" ||
-              activeCategory === "build") && (
+              activeCategory === "build" ||
+              Boolean(pendingRoofType)) && (
               <div className="flex flex-wrap items-center gap-2.5 border-b border-white/[0.06] bg-black/20 px-3 py-1.5 text-[10.5px]">
+                {activeCategory === "furniture" && !query.trim() && (
+                  <div className="flex flex-wrap items-center gap-1">
+                    {FURNITURE_SUBCATS.map((sc) => (
+                      <button
+                        key={sc.id}
+                        type="button"
+                        onClick={() => setActiveFurnitureSubcat(sc.id)}
+                        className={cn(
+                          "rounded-md px-2 py-0.5 font-medium transition",
+                          activeFurnitureSubcat === sc.id
+                            ? "bg-primary font-semibold text-primary-foreground"
+                            : "bg-white/[0.07] text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {sc.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {activeTool === "furniture" && Boolean(activeItem.swatches?.length) && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted-foreground">Warna:</span>
+                    {activeItem.swatches!.map((sw) => {
+                      const activeHex = selectedSwatchHex ?? activeItem.swatchHex;
+                      return (
+                        <button
+                          key={sw.hex}
+                          type="button"
+                          title={sw.name}
+                          onClick={() => setSelectedSwatchHex(sw.hex)}
+                          className={cn(
+                            "h-4 w-4 rounded-full border transition",
+                            activeHex === sw.hex ? "scale-110 border-primary ring-2 ring-primary/40" : "border-white/30",
+                          )}
+                          style={{ backgroundColor: sw.hex }}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+
                 {activeTool === "floor_tile" && (
                   <div className="flex items-center gap-1">
                     <span className="text-muted-foreground">Kuas:</span>
@@ -1632,49 +1870,147 @@ export function BuildWorkspace({
                 {(activeTool === "stair" || activeTool === "furniture" || activeTool === "hvac" || activeTool === "light") && (
                   <button
                     type="button"
-                    onClick={() => handleRotateSelected(Math.PI / 2)}
+                    onClick={() => handleRotateSelected(1)}
                     className="flex items-center gap-1 rounded-md bg-primary/20 px-2 py-0.5 font-semibold text-[#f6ba86] hover:bg-primary/30"
                   >
-                    <RotateCw className="h-3 w-3" /> Putar ({placementRotationQuarter * 90}°) · R
+                    <RotateCw className="h-3 w-3" /> Putar ({(activeTool === "stair" ? (placementRotationStep % 4) * 90 : placementRotationStep * 45)}°) · R
                   </button>
                 )}
 
-                {activeCategory === "walls" && (
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-muted-foreground">Cat Seluruh Fasad:</span>
-                    {PAINT_SWATCHES.map((sw) => (
-                      <button
-                        key={sw.hex}
-                        type="button"
-                        title={`Cat Global Fasad: ${sw.name}`}
-                        onClick={() => useStudioStore.getState().patchSimulation({ paintExtHex: sw.hex })}
-                        className={cn(
-                          "h-4 w-4 rounded-full border transition",
-                          project.simulation.paintExtHex === sw.hex ? "scale-110 border-primary ring-2 ring-primary/40" : "border-white/30",
-                        )}
-                        style={{ backgroundColor: sw.hex }}
-                      />
-                    ))}
-                    <span className="hidden text-[10px] text-muted-foreground/80 sm:inline">(atau pilih kuas dinding di bawah)</span>
+                {(activeCategory === "walls" || activeTool === "wall_paint") && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1">
+                      <span className="text-muted-foreground">Mode Cat:</span>
+                      {(
+                        [
+                          { id: "side", label: "Sisi" },
+                          { id: "room", label: "1 Ruangan" },
+                        ] as const
+                      ).map((pm) => (
+                        <button
+                          key={pm.id}
+                          type="button"
+                          onClick={() => setWallPaintMode(pm.id)}
+                          className={cn(
+                            "rounded-md px-2 py-0.5 font-medium transition",
+                            wallPaintMode === pm.id
+                              ? "bg-primary font-semibold text-primary-foreground"
+                              : "bg-white/[0.07] text-muted-foreground hover:text-foreground",
+                          )}
+                        >
+                          {pm.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-muted-foreground">Fasad:</span>
+                      {PAINT_SWATCHES.map((sw) => (
+                        <button
+                          key={sw.hex}
+                          type="button"
+                          title={`Cat Global Fasad: ${sw.name}`}
+                          onClick={() => useStudioStore.getState().patchSimulation({ paintExtHex: sw.hex })}
+                          className={cn(
+                            "h-4 w-4 rounded-full border transition",
+                            project.simulation.paintExtHex === sw.hex ? "scale-110 border-primary ring-2 ring-primary/40" : "border-white/30",
+                          )}
+                          style={{ backgroundColor: sw.hex }}
+                        />
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                {activeCategory === "stairs_roof" && (
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-muted-foreground">Warna Atap:</span>
-                    {ROOF_SWATCHES.map((sw) => (
+                {(activeCategory === "stairs_roof" || pendingRoofType) && (
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {pendingRoofType && (
+                      <div className="flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/15 px-2 py-0.5">
+                        <span className="font-semibold text-[#f6ba86]">Preview: {pendingRoofType}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            useStudioStore.getState().patchSystems({ roofType: pendingRoofType as RoofType });
+                            setPendingRoofType(null);
+                            simsAudio.play("place");
+                            toast.success(`Bentuk atap diterapkan.`);
+                          }}
+                          className="rounded bg-emerald-500/80 px-2 py-0.5 font-semibold text-slate-950 hover:bg-emerald-400"
+                        >
+                          Terapkan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPendingRoofType(null)}
+                          className="rounded bg-white/10 px-1.5 py-0.5 text-foreground hover:bg-white/20"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1 text-muted-foreground">
+                      <span>Sudut:</span>
                       <button
-                        key={sw.hex}
                         type="button"
-                        title={sw.name}
-                        onClick={() => useStudioStore.getState().patchSimulation({ roofColorHex: sw.hex })}
-                        className={cn(
-                          "h-4 w-4 rounded-full border transition",
-                          project.simulation.roofColorHex === sw.hex ? "scale-110 border-primary ring-2 ring-primary/40" : "border-white/30",
-                        )}
-                        style={{ backgroundColor: sw.hex }}
-                      />
-                    ))}
+                        onClick={() =>
+                          useStudioStore.getState().patchSystems({ roofSlopeDeg: Math.max(5, project.systems.roofSlopeDeg - 2) })
+                        }
+                        className="flex h-5 w-5 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20"
+                      >
+                        -
+                      </button>
+                      <span className="font-mono font-semibold text-foreground tabular-nums">{project.systems.roofSlopeDeg}°</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          useStudioStore.getState().patchSystems({ roofSlopeDeg: Math.min(45, project.systems.roofSlopeDeg + 2) })
+                        }
+                        className="flex h-5 w-5 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1 text-muted-foreground">
+                      <span>Tritisan:</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          useStudioStore.getState().patchSystems({
+                            overhangFrontM: Math.max(0.2, Number((project.systems.overhangFrontM - 0.1).toFixed(2))),
+                          })
+                        }
+                        className="flex h-5 w-5 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20"
+                      >
+                        -
+                      </button>
+                      <span className="font-mono font-semibold text-foreground tabular-nums">{project.systems.overhangFrontM.toFixed(1)}m</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          useStudioStore.getState().patchSystems({
+                            overhangFrontM: Math.min(1.5, Number((project.systems.overhangFrontM + 0.1).toFixed(2))),
+                          })
+                        }
+                        className="flex h-5 w-5 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-muted-foreground">Atap:</span>
+                      {ROOF_SWATCHES.map((sw) => (
+                        <button
+                          key={sw.hex}
+                          type="button"
+                          title={sw.name}
+                          onClick={() => useStudioStore.getState().patchSimulation({ roofColorHex: sw.hex })}
+                          className={cn(
+                            "h-4 w-4 rounded-full border transition",
+                            project.simulation.roofColorHex === sw.hex ? "scale-110 border-primary ring-2 ring-primary/40" : "border-white/30",
+                          )}
+                          style={{ backgroundColor: sw.hex }}
+                        />
+                      ))}
+                    </div>
                   </div>
                 )}
 
@@ -1729,9 +2065,18 @@ export function BuildWorkspace({
                   >
                     <ItemThumbnail item={item} />
                     <div className="truncate text-[11px] font-semibold text-foreground">{item.name}</div>
-                    <div className="flex items-center justify-between font-mono text-[9.5px] tabular-nums">
+                    <div className="flex items-center justify-between gap-1 font-mono text-[9.5px] tabular-nums">
                       <span className="truncate text-muted-foreground">{item.specLabel}</span>
-                      {active && <Sparkles className="h-2.5 w-2.5 shrink-0 text-primary" />}
+                      <span className="flex items-center gap-0.5">
+                        {item.swatches?.slice(0, 3).map((sw) => (
+                          <i
+                            key={sw.hex}
+                            className="inline-block h-2 w-2 rounded-full border border-white/25"
+                            style={{ backgroundColor: sw.hex }}
+                          />
+                        ))}
+                        {active && <Sparkles className="h-2.5 w-2.5 shrink-0 text-primary" />}
+                      </span>
                     </div>
                   </button>
                 );
@@ -1764,7 +2109,7 @@ export function BuildWorkspace({
 
       {/* RESET / PRESET CONFIRMATION MODAL */}
       {resetModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+        <div data-build-modal="1" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="studio-glass w-full max-w-md rounded-2xl p-5 shadow-2xl">
             <h3 className="flex items-center gap-2 text-sm font-bold text-foreground">
               <Home className="h-4 w-4 text-primary" /> Atur Ulang Kavling 5×17 m

@@ -148,6 +148,7 @@ export function computeMasonryTakeoff(
 
   for (const level of levels) {
     for (const w of level.walls) {
+      if (w.kind === "fence") continue;
       const len = wallLength(w);
       if (len < 0.05) continue;
       const dx = w.end.x - w.start.x;

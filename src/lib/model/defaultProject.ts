@@ -1257,6 +1257,7 @@ export function createDefaultProject(): Project {
             thickness: 0.12,
             materialId: "void",
             isVoid: true,
+            linkedStairId: "st-1",
           },
         ],
         stairs: [],

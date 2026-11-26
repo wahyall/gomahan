@@ -44,6 +44,9 @@ export class BuildCameraController {
 
   // Pointer drag state
   private dragMode: "none" | "orbit" | "pan" = "none";
+  private rightDragPending = false;
+  private rightDownX = 0;
+  private rightDownY = 0;
   private lastPointerX = 0;
   private lastPointerY = 0;
   private cursorNdc = new THREE.Vector2(0, 0);
@@ -58,9 +61,11 @@ export class BuildCameraController {
   private readonly _up = new THREE.Vector3(0, 1, 0);
   private readonly _wheelNdc = new THREE.Vector2(0, 0);
 
-  // Touch pinch state
+  // Touch pinch / 2-finger orbit & pan state
   private activeTouches = new Map<number, { x: number; y: number }>();
   private lastPinchDist = 0;
+  private lastTouchMid: { x: number; y: number } | null = null;
+  private lastTouchAngle = 0;
 
   private readonly onKeyDownBound: (e: KeyboardEvent) => void;
   private readonly onKeyUpBound: (e: KeyboardEvent) => void;
@@ -281,13 +286,19 @@ export class BuildCameraController {
       if (this.activeTouches.size === 2) {
         const pts = [...this.activeTouches.values()];
         this.lastPinchDist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+        this.lastTouchMid = { x: (pts[0]!.x + pts[1]!.x) * 0.5, y: (pts[0]!.y + pts[1]!.y) * 0.5 };
+        this.lastTouchAngle = Math.atan2(pts[1]!.y - pts[0]!.y, pts[1]!.x - pts[0]!.x);
+      } else {
+        this.lastTouchMid = null;
       }
       return;
     }
     this.lastPointerX = e.clientX;
     this.lastPointerY = e.clientY;
     if (e.button === 2) {
-      this.dragMode = "orbit";
+      this.rightDragPending = true;
+      this.rightDownX = e.clientX;
+      this.rightDownY = e.clientY;
     } else if (e.button === 1) {
       e.preventDefault();
       this.dragMode = "pan";
@@ -304,10 +315,32 @@ export class BuildCameraController {
         this.panByPixels(dx, dy);
       } else if (this.activeTouches.size === 2) {
         const pts = [...this.activeTouches.values()];
-        const dist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+        const p0 = pts[0]!;
+        const p1 = pts[1]!;
+        const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
         const delta = dist - this.lastPinchDist;
         this.lastPinchDist = dist;
         this.goalDistance = Math.max(3.4, Math.min(36, this.goalDistance - delta * 0.04));
+
+        // Twist angle -> yaw orbit + vertical midpoint drag -> tilt/pan
+        const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+        let dAngle = angle - this.lastTouchAngle;
+        while (dAngle > Math.PI) dAngle -= Math.PI * 2;
+        while (dAngle < -Math.PI) dAngle += Math.PI * 2;
+        this.lastTouchAngle = angle;
+        if (Math.abs(dAngle) < 0.45) {
+          this.goalYaw -= dAngle * 1.1;
+        }
+
+        const mid = { x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5 };
+        if (this.lastTouchMid) {
+          const mdx = mid.x - this.lastTouchMid.x;
+          const mdy = mid.y - this.lastTouchMid.y;
+          this.panByPixels(mdx, mdy * 0.55);
+          const minPitch = this.allowUnderground ? -1.05 : 0.14;
+          this.goalPitch = Math.max(minPitch, Math.min(1.5, this.goalPitch - mdy * 0.0028));
+        }
+        this.lastTouchMid = mid;
       }
       return;
     }
@@ -330,6 +363,13 @@ export class BuildCameraController {
     this.lastPointerX = e.clientX;
     this.lastPointerY = e.clientY;
 
+    if (this.rightDragPending && this.dragMode === "none") {
+      if (Math.hypot(e.clientX - this.rightDownX, e.clientY - this.rightDownY) > 5) {
+        this.dragMode = "orbit";
+        this.rightDragPending = false;
+      }
+    }
+
     if (this.dragMode === "orbit") {
       this.goalYaw -= dx * 0.0065;
       const minPitch = this.allowUnderground ? -1.05 : 0.14;
@@ -350,8 +390,10 @@ export class BuildCameraController {
     if (e.pointerType === "touch") {
       this.activeTouches.delete(e.pointerId);
       this.lastPinchDist = 0;
+      this.lastTouchMid = null;
       return;
     }
+    this.rightDragPending = false;
     this.dragMode = "none";
   }
 

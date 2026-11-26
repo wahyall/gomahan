@@ -6,6 +6,8 @@ import type { SelectionTarget } from "@/lib/store/useStudioStore";
 import { createChamferBox, mergeGeometryBatch, StaticBatchCollector } from "@/lib/scene/geometryHelpers";
 import type { MaterialPalette } from "@/lib/scene/materials";
 import { buildFurnitureMesh, buildHvacMesh, buildLightFixtureMesh } from "@/lib/scene/propsBuilder";
+import { pointInPolygon, polygonArea, polygonBounds } from "@/lib/geometry/rooms";
+import type { FurnitureItem, HvacUnit, LightFixture, Project, Vec2 } from "@/lib/model/types";
 
 // Ensure BVH raycast helpers are active globally on Three BufferGeometry / Mesh
 (THREE.BufferGeometry.prototype as unknown as { computeBoundsTree: typeof computeBoundsTree }).computeBoundsTree =
@@ -34,6 +36,15 @@ export interface WallCutawayRecord {
   downGroup: THREE.Group;
 }
 
+export interface ColumnCutawayRecord {
+  levelIndex: 0 | 1;
+  x: number;
+  z: number;
+  fullObj: THREE.Object3D;
+  cutawayObj: THREE.Object3D;
+  downObj: THREE.Object3D;
+}
+
 export interface BrickWallBatch {
   levelIndex: 0 | 1;
   im: THREE.InstancedMesh;
@@ -57,6 +68,7 @@ export interface ProjectHouseBuildOptions {
   hideUpperPropsInLt1?: boolean;
   walkOpenDoorsFull?: boolean;
   enableDynamicLights?: boolean;
+  skipProps?: boolean;
   onExplodePiece?: (obj: THREE.Object3D, off: THREE.Vector3) => void;
   onExplodeInstanced?: (im: THREE.InstancedMesh, off: Float32Array) => void;
 }
@@ -67,6 +79,7 @@ export interface BuiltProjectHouseResult {
   lt2StructuralGroup: THREE.Group;
   roofGroup: THREE.Group;
   wallCutawayRecords: WallCutawayRecord[];
+  columnCutawayRecords: ColumnCutawayRecord[];
   brickBatches: BrickWallBatch[];
   pickables: THREE.Object3D[];
   resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[];
@@ -534,6 +547,106 @@ function buildAcCondenserUnit(
   return g;
 }
 
+export function buildProjectFurnitureObject(
+  f: FurnitureItem,
+  lvIdx: 0 | 1,
+  peil: Project["site"]["peil"],
+  palette: MaterialPalette,
+  resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[],
+  contactShadowMat: THREE.Material,
+): THREE.Object3D {
+  const mesh = buildFurnitureMesh(f, palette, resources, contactShadowMat);
+  const lt1Y = peil.floor1PeilM;
+  if (lvIdx === 0) {
+    if (f.category === "vehicle" && f.position.z < 4.5) {
+      mesh.position.y += Math.max(0.08, peil.carportPeilM) - lt1Y;
+    } else if (f.position.x < 1.5 && f.position.z < 3.0) {
+      mesh.position.y += 0.08 - lt1Y;
+    } else if (f.position.z >= 3.0 && f.position.z <= 4.0 && f.position.x < 2.25) {
+      mesh.position.y += Math.max(0.12, peil.terracePeilM) - lt1Y;
+    }
+  }
+  mesh.userData.sel = { kind: "furniture", id: f.id, levelIndex: lvIdx };
+  mesh.userData.label = f.name;
+  return mesh;
+}
+
+export function buildProjectHvacObject(
+  hv: HvacUnit,
+  lvIdx: 0 | 1,
+  palette: MaterialPalette,
+  resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[],
+  animatedFans: THREE.Object3D[],
+): THREE.Group {
+  const wrap = new THREE.Group();
+  const mesh = buildHvacMesh(hv, palette, resources, animatedFans);
+  mesh.userData.sel = { kind: "hvac", id: hv.id, levelIndex: lvIdx };
+  mesh.userData.label = hv.name;
+  wrap.add(mesh);
+  if (hv.type === "ac_split") {
+    const isFront = hv.position.z < 9.5;
+    const extZ = isFront ? 3.84 : 15.42;
+    const extX = isFront
+      ? hv.position.x > 2.8
+        ? Math.min(4.45, hv.position.x)
+        : 3.15
+      : Math.max(2.1, Math.min(4.45, hv.position.x));
+    const outUnit = buildAcCondenserUnit(extX, 2.72, extZ, isFront ? 0 : Math.PI, resources);
+    outUnit.userData.sel = { kind: "hvac", id: hv.id, levelIndex: lvIdx };
+    outUnit.userData.label = `Outdoor ${hv.name}`;
+    wrap.add(outUnit);
+  }
+  return wrap;
+}
+
+export function buildProjectLightObject(
+  l: LightFixture,
+  lvIdx: 0 | 1,
+  lvHeight: number,
+  palette: MaterialPalette,
+  resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[],
+  emitHardwareLight: boolean,
+): THREE.Group {
+  const wrap = new THREE.Group();
+  const mesh = buildLightFixtureMesh(l, palette, resources);
+  mesh.userData.sel = { kind: "light", id: l.id, levelIndex: lvIdx };
+  mesh.userData.label = l.name;
+  wrap.add(mesh);
+  if (emitHardwareLight) {
+    const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de;
+    const clampedY = Math.min(lvHeight - 0.25, Math.max(0.25, l.position.y));
+    if (l.type === "garden") {
+      const pt = new THREE.PointLight(lightHex, (l.lumens / 500) * l.dimmer * 1.4, 2.6, 1.6);
+      pt.position.set(l.position.x, clampedY, l.position.z);
+      wrap.add(pt);
+    } else {
+      const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
+      const rotY = l.rotationY ?? 0;
+      const fwdOff = l.type === "wall" ? 1.15 : 0;
+      const spot = new THREE.SpotLight(
+        lightHex,
+        (l.lumens / 450) * l.dimmer * 2.5,
+        Math.min(3.85, lvHeight + 0.15),
+        halfAngle,
+        0.78,
+        1.4,
+      );
+      spot.position.set(
+        l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.1 : 0),
+        clampedY - 0.04,
+        l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.1 : 0),
+      );
+      spot.target.position.set(
+        l.position.x + Math.sin(rotY) * fwdOff,
+        0,
+        l.position.z + Math.cos(rotY) * fwdOff,
+      );
+      wrap.add(spot, spot.target);
+    }
+  }
+  return wrap;
+}
+
 const CUSTOM_PAINT_HEX: Record<string, { hex: string; roughness: number }> = {
   wall_sage: { hex: "#cad6c7", roughness: 0.84 },
   wall_cream: { hex: "#dfd5c3", roughness: 0.85 },
@@ -541,6 +654,93 @@ const CUSTOM_PAINT_HEX: Record<string, { hex: string; roughness: number }> = {
   wall_timber: { hex: "#9c6d45", roughness: 0.62 },
   wall_andesit: { hex: "#434952", roughness: 0.78 },
 };
+
+const EXPLICIT_SIDE_PAINT_HEX: Record<string, { hex: string; roughness: number }> = {
+  ...CUSTOM_PAINT_HEX,
+  wall_ext_ivory: { hex: "#f2ece1", roughness: 0.85 },
+  wall_int_ivory: { hex: "#f7f5ef", roughness: 0.86 },
+};
+
+/**
+ * Reorder non-indexed ExtrudeGeometry triangles into 3 contiguous material groups:
+ * 0 = +Z front face, 1 = -Z back face, 2 = edges/caps/opening reveals.
+ */
+function splitWallExtrudeMaterialGroups(geo: THREE.BufferGeometry): void {
+  const posAttr = geo.getAttribute("position") as THREE.BufferAttribute | undefined;
+  const normAttr = geo.getAttribute("normal") as THREE.BufferAttribute | undefined;
+  const uvAttr = geo.getAttribute("uv") as THREE.BufferAttribute | undefined;
+  if (!posAttr || !normAttr || posAttr.count < 3) return;
+
+  const triCount = Math.floor(posAttr.count / 3);
+  const buckets: [number[], number[], number[]] = [[], [], []];
+  for (let t = 0; t < triCount; t++) {
+    const i0 = t * 3;
+    const nz = (normAttr.getZ(i0) + normAttr.getZ(i0 + 1) + normAttr.getZ(i0 + 2)) / 3;
+    if (nz > 0.5) buckets[0].push(t);
+    else if (nz < -0.5) buckets[1].push(t);
+    else buckets[2].push(t);
+  }
+
+  const ordered = [...buckets[0], ...buckets[1], ...buckets[2]];
+  const nextPos = new Float32Array(triCount * 9);
+  const nextNorm = new Float32Array(triCount * 9);
+  const nextUv = uvAttr ? new Float32Array(triCount * 6) : null;
+  const pArr = posAttr.array as Float32Array;
+  const nArr = normAttr.array as Float32Array;
+  const uArr = uvAttr ? (uvAttr.array as Float32Array) : null;
+
+  for (let dst = 0; dst < ordered.length; dst++) {
+    const src = ordered[dst]!;
+    nextPos.set(pArr.subarray(src * 9, src * 9 + 9), dst * 9);
+    nextNorm.set(nArr.subarray(src * 9, src * 9 + 9), dst * 9);
+    if (nextUv && uArr) {
+      nextUv.set(uArr.subarray(src * 6, src * 6 + 6), dst * 6);
+    }
+  }
+
+  geo.setAttribute("position", new THREE.BufferAttribute(nextPos, 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(nextNorm, 3));
+  if (nextUv) geo.setAttribute("uv", new THREE.BufferAttribute(nextUv, 2));
+
+  geo.clearGroups();
+  const c0 = buckets[0].length * 3;
+  const c1 = buckets[1].length * 3;
+  const c2 = buckets[2].length * 3;
+  if (c0 > 0) geo.addGroup(0, c0, 0);
+  if (c1 > 0) geo.addGroup(c0, c1, 1);
+  if (c2 > 0) geo.addGroup(c0 + c1, c2, 2);
+}
+
+/**
+ * Clips a polygon against a convex rectangle [x0..x1, z0..z1] for safe LT2 slab void holes.
+ */
+function clipPolygonToRect(poly: Vec2[], x0: number, x1: number, z0: number, z1: number): Vec2[] {
+  const clipEdge = (pts: Vec2[], inside: (p: Vec2) => boolean, intersect: (a: Vec2, b: Vec2) => Vec2): Vec2[] => {
+    if (pts.length === 0) return [];
+    const out: Vec2[] = [];
+    let prev = pts[pts.length - 1]!;
+    let prevIn = inside(prev);
+    for (const curr of pts) {
+      const currIn = inside(curr);
+      if (currIn) {
+        if (!prevIn) out.push(intersect(prev, curr));
+        out.push(curr);
+      } else if (prevIn) {
+        out.push(intersect(prev, curr));
+      }
+      prev = curr;
+      prevIn = currIn;
+    }
+    return out;
+  };
+
+  let res = poly;
+  res = clipEdge(res, (p) => p.x >= x0, (a, b) => ({ x: x0, z: a.z + ((b.z - a.z) * (x0 - a.x)) / ((b.x - a.x) || 1e-9) }));
+  res = clipEdge(res, (p) => p.x <= x1, (a, b) => ({ x: x1, z: a.z + ((b.z - a.z) * (x1 - a.x)) / ((b.x - a.x) || 1e-9) }));
+  res = clipEdge(res, (p) => p.z >= z0, (a, b) => ({ x: a.x + ((b.x - a.x) * (z0 - a.z)) / ((b.z - a.z) || 1e-9), z: z0 }));
+  res = clipEdge(res, (p) => p.z <= z1, (a, b) => ({ x: a.x + ((b.x - a.x) * (z1 - a.z)) / ((b.z - a.z) || 1e-9), z: z1 }));
+  return res;
+}
 
 const CUSTOM_TILE_HEX: Record<string, { hex: string; roughness: number }> = {
   granite_warm: { hex: "#dbd4c8", roughness: 0.42 },
@@ -566,6 +766,7 @@ export function buildProjectHouse(
   const lt2StructuralGroup = new THREE.Group();
   const roofGroup = new THREE.Group();
   const wallCutawayRecords: WallCutawayRecord[] = [];
+  const columnCutawayRecords: ColumnCutawayRecord[] = [];
   const brickBatches: BrickWallBatch[] = [];
   const pickables: THREE.Object3D[] = [];
   const resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
@@ -604,154 +805,209 @@ export function buildProjectHouse(
   const batchLt2 = new StaticBatchCollector();
   const batchRoof = new StaticBatchCollector();
 
-  // 1. Plinth & Site Surfaces (hidden cleanly when showTerrain === false to expose foundations!)
-  if (showTerrain && (stage === 0 || stage >= 1)) {
-    batchBase.addBox("site:grass", palette.grass, "lantai", "Taman Depan", 0.75, 0.04, 1.5, 1.5, 0.08, 3.0);
-    const cpH = Math.max(0.08, peil.carportPeilM);
-    batchBase.addGeo(
-      "site:carport",
-      palette.carport,
-      "lantai",
-      "Carport",
-      createChamferBox(3.5, cpH, 4.5, 0.014, 1),
-      3.25,
-      cpH * 0.5,
-      2.25,
-    );
-    const trH = Math.max(0.12, peil.terracePeilM);
-    batchBase.addGeo(
-      "site:teras",
-      palette.woodDeck,
-      "lantai",
-      "Teras Depan",
-      createChamferBox(2.25, trH, 1.0, 0.012, 1),
-      1.125,
-      trH * 0.5,
-      3.5,
-    );
-    if (lt1Y > trH + 0.03) {
-      batchBase.addGeo(
-        "site:entry-step",
-        palette.tileFloor,
+  const lt1Rooms = project.levels[0]?.rooms ?? [];
+  const lt1WallsAll = project.levels[0]?.walls ?? [];
+  const hasAnyHouse =
+    lt1WallsAll.length > 0 ||
+    lt1Rooms.length > 0 ||
+    (project.levels[1]?.walls.length ?? 0) > 0 ||
+    (project.levels[1]?.rooms.length ?? 0) > 0;
+  const frontGardenRoom = lt1Rooms.find((r) => r.program === "garden" && r.polygon.some((p) => p.z < 4.5));
+  const rearGardenRoom = lt1Rooms.find((r) => r.program === "garden" && r.polygon.some((p) => p.z > 13.5));
+  const carportRoom = lt1Rooms.find((r) => r.program === "carport");
+  const terasRoom = lt1Rooms.find((r) => r.program === "circulation");
+  const enclosedLt1Rooms = lt1Rooms.filter(
+    (r) => r.program !== "garden" && r.program !== "carport" && r.program !== "void" && r.program !== "circulation",
+  );
+
+  // 1. Plinth & Site Surfaces (derived dynamically from actual LT1 rooms; hidden when lot is clean or showTerrain === false!)
+  if (showTerrain && hasAnyHouse && (stage === 0 || stage >= 1)) {
+    if (frontGardenRoom) {
+      const fb = polygonBounds(frontGardenRoom.polygon);
+      batchBase.addBox(
+        "site:grass",
+        palette.grass,
         "lantai",
-        "Tangga Masuk Teras",
-        createChamferBox(1.12, lt1Y - trH, 0.34, 0.01, 1),
-        1.58,
-        (lt1Y + trH) * 0.5,
-        3.85,
+        frontGardenRoom.name,
+        (fb.minX + fb.maxX) * 0.5,
+        0.04,
+        (fb.minZ + fb.maxZ) * 0.5,
+        Math.max(0.4, fb.width),
+        0.08,
+        Math.max(0.4, fb.depth),
       );
     }
-    batchBase.addBox(
-      "fnd:plinth",
-      palette.concrete,
-      "pondasi",
-      "Urugan Peil Lantai",
-      2.5,
-      lt1Y * 0.5 - 0.05,
-      10.5,
-      4.96,
-      Math.max(0.1, lt1Y - 0.08),
-      13.0,
-    );
-
-    // Human-scale landscaping gives the hero lot depth and a lived-in silhouette.
-    const leafDeep = new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 });
-    const leafLight = new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 });
-    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 });
-    const gardenLightMat = new THREE.MeshStandardMaterial({
-      color: 0xffe7b2,
-      emissive: 0xffc46b,
-      emissiveIntensity: 1.8,
-      roughness: 0.38,
-      metalness: 0.1,
-    });
-    resources.push(leafDeep, leafLight, hedgeMat, gardenLightMat);
-
-    const addGardenTree = (x: number, z: number, scale: number, mat: THREE.Material) => {
-      const trunkGeos: THREE.BufferGeometry[] = [];
-      const trunk = new THREE.CylinderGeometry(0.065 * scale, 0.11 * scale, 2.25 * scale, 7);
-      trunk.translate(x, 0.08 + 1.125 * scale, z);
-      trunkGeos.push(trunk);
-      for (const [ox, oz, ang, len] of [
-        [0.22, 0.08, 0.5, 0.9],
-        [-0.2, -0.1, -0.45, 0.82],
-      ] as [number, number, number, number][]) {
-        const branch = new THREE.CylinderGeometry(0.025 * scale, 0.05 * scale, len * scale, 6);
-        branch.rotateZ(ang);
-        branch.translate(x + ox * scale, 0.08 + 1.92 * scale, z + oz * scale);
-        trunkGeos.push(branch);
+    if (carportRoom) {
+      const cb = polygonBounds(carportRoom.polygon);
+      const cpH = Math.max(0.08, peil.carportPeilM);
+      batchBase.addGeo(
+        "site:carport",
+        palette.carport,
+        "lantai",
+        carportRoom.name,
+        createChamferBox(Math.max(0.5, cb.width), cpH, Math.max(0.5, cb.depth), 0.014, 1),
+        (cb.minX + cb.maxX) * 0.5,
+        cpH * 0.5,
+        (cb.minZ + cb.maxZ) * 0.5,
+      );
+    }
+    if (terasRoom) {
+      const tb = polygonBounds(terasRoom.polygon);
+      const trH = Math.max(0.12, peil.terracePeilM);
+      batchBase.addGeo(
+        "site:teras",
+        palette.woodDeck,
+        "lantai",
+        terasRoom.name,
+        createChamferBox(Math.max(0.5, tb.width), trH, Math.max(0.5, tb.depth), 0.012, 1),
+        (tb.minX + tb.maxX) * 0.5,
+        trH * 0.5,
+        (tb.minZ + tb.maxZ) * 0.5,
+      );
+      if (lt1Y > trH + 0.03) {
+        batchBase.addGeo(
+          "site:entry-step",
+          palette.tileFloor,
+          "lantai",
+          "Tangga Masuk Teras",
+          createChamferBox(Math.min(1.12, tb.width * 0.6), lt1Y - trH, 0.34, 0.01, 1),
+          Math.min(tb.maxX - 0.5, tb.minX + 1.58),
+          (lt1Y + trH) * 0.5,
+          tb.maxZ - 0.15,
+        );
       }
-      const mergedTrunk = mergeGeometryBatch(trunkGeos);
-      if (mergedTrunk) {
-        const tm = new THREE.Mesh(mergedTrunk, palette.woodTeak);
-        tm.castShadow = true;
-        tm.receiveShadow = true;
-        levelRoots[0].add(tm);
-        resources.push(mergedTrunk);
+    }
+    if (enclosedLt1Rooms.length > 0) {
+      let minPx = Infinity;
+      let maxPx = -Infinity;
+      let minPz = Infinity;
+      let maxPz = -Infinity;
+      for (const r of enclosedLt1Rooms) {
+        for (const p of r.polygon) {
+          minPx = Math.min(minPx, p.x);
+          maxPx = Math.max(maxPx, p.x);
+          minPz = Math.min(minPz, p.z);
+          maxPz = Math.max(maxPz, p.z);
+        }
       }
-
-      const crownGeos: THREE.BufferGeometry[] = [];
-      for (const [ox, oy, oz, rad] of [
-        [0, 2.7, 0, 0.82],
-        [-0.55, 2.35, 0.28, 0.58],
-        [0.52, 2.42, -0.22, 0.62],
-        [0.1, 2.18, 0.52, 0.46],
-        [-0.16, 3.12, -0.12, 0.44],
-      ] as [number, number, number, number][]) {
-        const crown = new THREE.IcosahedronGeometry(rad * scale, 1);
-        crown.scale(1.08, 0.82, 1.08);
-        crown.translate(x + ox * scale, 0.08 + oy * scale, z + oz * scale);
-        crownGeos.push(crown);
-      }
-      const mergedCrown = mergeGeometryBatch(crownGeos);
-      if (mergedCrown) {
-        const cm = new THREE.Mesh(mergedCrown, mat);
-        cm.castShadow = true;
-        cm.receiveShadow = true;
-        levelRoots[0].add(cm);
-        resources.push(mergedCrown);
-      }
-    };
-
-    addGardenTree(0.48, 1.32, 1.0, leafLight);
-    addGardenTree(3.95, 16.15, 0.82, leafDeep);
-
-    const hedgeGeos: THREE.BufferGeometry[] = [];
-    const frontHedge = createChamferBox(1.28, 0.42, 0.3, 0.06, 1);
-    frontHedge.translate(0.76, 0.29, 0.17);
-    hedgeGeos.push(frontHedge);
-    const backHedge = createChamferBox(2.45, 0.52, 0.34, 0.06, 1);
-    backHedge.translate(2.6, 0.34, 16.78);
-    hedgeGeos.push(backHedge);
-    const mergedHedge = mergeGeometryBatch(hedgeGeos);
-    if (mergedHedge) {
-      const hm = new THREE.Mesh(mergedHedge, hedgeMat);
-      hm.castShadow = true;
-      hm.receiveShadow = true;
-      levelRoots[0].add(hm);
-      resources.push(mergedHedge);
+      const pW = Math.max(0.4, maxPx - minPx - 0.04);
+      const pD = Math.max(0.4, maxPz - minPz);
+      batchBase.addBox(
+        "fnd:plinth",
+        palette.concrete,
+        "pondasi",
+        "Urugan Peil Lantai",
+        (minPx + maxPx) * 0.5,
+        lt1Y * 0.5 - 0.05,
+        (minPz + maxPz) * 0.5,
+        pW,
+        Math.max(0.1, lt1Y - 0.08),
+        pD,
+      );
     }
 
-    // Two small bollards anchor the garden path and bloom warmly after dusk.
-    const bollardGeos: THREE.BufferGeometry[] = [];
-    for (const [bx, bz] of [
-      [0.08, 0.82],
-      [0.08, 2.28],
-    ] as [number, number][]) {
-      const post = new THREE.CylinderGeometry(0.028, 0.032, 0.46, 7);
-      post.translate(bx, 0.31, bz);
-      bollardGeos.push(post);
-      const bulb = new THREE.SphereGeometry(0.065, 10, 7);
-      bulb.translate(bx, 0.57, bz);
-      levelRoots[0].add(new THREE.Mesh(bulb, gardenLightMat));
-      resources.push(bulb);
-    }
-    const mergedBollard = mergeGeometryBatch(bollardGeos);
-    if (mergedBollard) {
-      const bm = new THREE.Mesh(mergedBollard, palette.aluDark);
-      bm.castShadow = true;
-      levelRoots[0].add(bm);
-      resources.push(mergedBollard);
+    // Human-scale landscaping only when corresponding garden rooms exist
+    if (frontGardenRoom || rearGardenRoom) {
+      const leafDeep = new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 });
+      const leafLight = new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 });
+      const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 });
+      const gardenLightMat = new THREE.MeshStandardMaterial({
+        color: 0xffe7b2,
+        emissive: 0xffc46b,
+        emissiveIntensity: 1.8,
+        roughness: 0.38,
+        metalness: 0.1,
+      });
+      resources.push(leafDeep, leafLight, hedgeMat, gardenLightMat);
+
+      const addGardenTree = (x: number, z: number, scale: number, mat: THREE.Material) => {
+        const trunkGeos: THREE.BufferGeometry[] = [];
+        const trunk = new THREE.CylinderGeometry(0.065 * scale, 0.11 * scale, 2.25 * scale, 7);
+        trunk.translate(x, 0.08 + 1.125 * scale, z);
+        trunkGeos.push(trunk);
+        for (const [ox, oz, ang, len] of [
+          [0.22, 0.08, 0.5, 0.9],
+          [-0.2, -0.1, -0.45, 0.82],
+        ] as [number, number, number, number][]) {
+          const branch = new THREE.CylinderGeometry(0.025 * scale, 0.05 * scale, len * scale, 6);
+          branch.rotateZ(ang);
+          branch.translate(x + ox * scale, 0.08 + 1.92 * scale, z + oz * scale);
+          trunkGeos.push(branch);
+        }
+        const mergedTrunk = mergeGeometryBatch(trunkGeos);
+        if (mergedTrunk) {
+          const tm = new THREE.Mesh(mergedTrunk, palette.woodTeak);
+          tm.castShadow = true;
+          tm.receiveShadow = true;
+          levelRoots[0].add(tm);
+          resources.push(mergedTrunk);
+        }
+
+        const crownGeos: THREE.BufferGeometry[] = [];
+        for (const [ox, oy, oz, rad] of [
+          [0, 2.7, 0, 0.82],
+          [-0.55, 2.35, 0.28, 0.58],
+          [0.52, 2.42, -0.22, 0.62],
+          [0.1, 2.18, 0.52, 0.46],
+          [-0.16, 3.12, -0.12, 0.44],
+        ] as [number, number, number, number][]) {
+          const crown = new THREE.IcosahedronGeometry(rad * scale, 1);
+          crown.scale(1.08, 0.82, 1.08);
+          crown.translate(x + ox * scale, 0.08 + oy * scale, z + oz * scale);
+          crownGeos.push(crown);
+        }
+        const mergedCrown = mergeGeometryBatch(crownGeos);
+        if (mergedCrown) {
+          const cm = new THREE.Mesh(mergedCrown, mat);
+          cm.castShadow = true;
+          cm.receiveShadow = true;
+          levelRoots[0].add(cm);
+          resources.push(mergedCrown);
+        }
+      };
+
+      const hedgeGeos: THREE.BufferGeometry[] = [];
+      if (frontGardenRoom) {
+        addGardenTree(0.48, 1.32, 1.0, leafLight);
+        const frontHedge = createChamferBox(1.28, 0.42, 0.3, 0.06, 1);
+        frontHedge.translate(0.76, 0.29, 0.17);
+        hedgeGeos.push(frontHedge);
+
+        const bollardGeos: THREE.BufferGeometry[] = [];
+        for (const [bx, bz] of [
+          [0.08, 0.82],
+          [0.08, 2.28],
+        ] as [number, number][]) {
+          const post = new THREE.CylinderGeometry(0.028, 0.032, 0.46, 7);
+          post.translate(bx, 0.31, bz);
+          bollardGeos.push(post);
+          const bulb = new THREE.SphereGeometry(0.065, 10, 7);
+          bulb.translate(bx, 0.57, bz);
+          levelRoots[0].add(new THREE.Mesh(bulb, gardenLightMat));
+          resources.push(bulb);
+        }
+        const mergedBollard = mergeGeometryBatch(bollardGeos);
+        if (mergedBollard) {
+          const bm = new THREE.Mesh(mergedBollard, palette.aluDark);
+          bm.castShadow = true;
+          levelRoots[0].add(bm);
+          resources.push(mergedBollard);
+        }
+      }
+      if (rearGardenRoom) {
+        addGardenTree(3.95, 16.15, 0.82, leafDeep);
+        const backHedge = createChamferBox(2.45, 0.52, 0.34, 0.06, 1);
+        backHedge.translate(2.6, 0.34, 16.78);
+        hedgeGeos.push(backHedge);
+      }
+      const mergedHedge = mergeGeometryBatch(hedgeGeos);
+      if (mergedHedge) {
+        const hm = new THREE.Mesh(mergedHedge, hedgeMat);
+        hm.castShadow = true;
+        hm.receiveShadow = true;
+        levelRoots[0].add(hm);
+        resources.push(mergedHedge);
+      }
     }
   }
 
@@ -787,6 +1043,8 @@ export function buildProjectHouse(
     }
     tGeo.computeVertexNormals();
     const tMesh = new THREE.Mesh(tGeo, palette.grass);
+    tMesh.name = "build-terrain-mesh";
+    tMesh.userData.isTerrainMesh = true;
     tMesh.receiveShadow = true;
     levelRoots[0].add(tMesh);
     resources.push(tGeo);
@@ -952,24 +1210,67 @@ export function buildProjectHouse(
 
     for (const col of struct.columns) {
       const isCanopy = col.z < 1.0;
+      const emitCutawayCol = (
+        targetGroup: THREE.Group,
+        lvIdx: 0 | 1,
+        fullH: number,
+        baseBottomY: number,
+        explodeY: number,
+      ) => {
+        const fullG = createChamferBox(col.widthM, fullH, col.depthM, 0.008, 1);
+        const fullM = new THREE.Mesh(fullG, colMat);
+        fullM.position.set(col.x, baseBottomY + fullH * 0.5, col.z);
+        fullM.castShadow = true;
+        fullM.receiveShadow = true;
+        targetGroup.add(fullM);
+        resources.push(fullG);
+        tagPickable(fullM, { kind: "part", id: "kolom" }, `Kolom LT${lvIdx + 1} (${struct.columns.length} titik)`);
+        opts.onExplodePiece?.(fullM, new THREE.Vector3(0, explodeY, 0));
+
+        const cutH = Math.min(fullH, 0.44);
+        const downH = Math.min(fullH, 0.22);
+        const cutG = new THREE.BoxGeometry(col.widthM, cutH, col.depthM);
+        const cutM = new THREE.Mesh(cutG, colMat);
+        cutM.position.set(col.x, baseBottomY + cutH * 0.5, col.z);
+        cutM.visible = false;
+        const downG = new THREE.BoxGeometry(col.widthM, downH, col.depthM);
+        const downM = new THREE.Mesh(downG, colMat);
+        downM.position.set(col.x, baseBottomY + downH * 0.5, col.z);
+        downM.visible = false;
+        targetGroup.add(cutM, downM);
+        resources.push(cutG, downG);
+        columnCutawayRecords.push({
+          levelIndex: lvIdx,
+          x: col.x,
+          z: col.z,
+          fullObj: fullM,
+          cutawayObj: cutM,
+          downObj: downM,
+        });
+      };
+
       // LT1 segment (ground/sloof up to LT2 slab soffit or capped wall height)
       if (col.minLevel === 0) {
         const capH = col.maxHeightM ? Math.min(hLt1, col.maxHeightM) : hLt1;
         const h1 = isCanopy
           ? Math.max(2.2, lt2Y - 0.38 - (4.45 - col.z) * 0.055 - (lt1Y - 0.15))
           : capH + 0.15;
-        batchBase.addGeo(
-          "struct:col",
-          colMat,
-          "kolom",
-          `Kolom LT1 (${struct.columns.length} titik)`,
-          createChamferBox(col.widthM, h1, col.depthM, 0.008, 1),
-          col.x,
-          lt1Y - 0.15 + h1 * 0.5,
-          col.z,
-          0,
-          [0, 0.45, 0],
-        );
+        if (opts.supportWallCutaway) {
+          emitCutawayCol(levelRoots[0], 0, h1, lt1Y - 0.15, 0.45);
+        } else {
+          batchBase.addGeo(
+            "struct:col",
+            colMat,
+            "kolom",
+            `Kolom LT1 (${struct.columns.length} titik)`,
+            createChamferBox(col.widthM, h1, col.depthM, 0.008, 1),
+            col.x,
+            lt1Y - 0.15 + h1 * 0.5,
+            col.z,
+            0,
+            [0, 0.45, 0],
+          );
+        }
         if (opts.xrayRebar && col.isMain) {
           batchBase.addBox(
             "struct:rebar",
@@ -991,18 +1292,22 @@ export function buildProjectHouse(
       if (col.maxLevel >= 1 && opts.activeLevelView !== "lt1") {
         const capH2 = col.minLevel === 1 && col.maxHeightM ? Math.min(hLt2, col.maxHeightM) : hLt2;
         const h2 = capH2 + 0.12;
-        batchLt2.addGeo(
-          "struct:col",
-          colMat,
-          "kolom",
-          `Kolom LT2 (${struct.columns.length} titik)`,
-          createChamferBox(col.widthM, h2, col.depthM, 0.008, 1),
-          col.x,
-          lt2Y - 0.04 + h2 * 0.5,
-          col.z,
-          0,
-          [0, 1.35, 0],
-        );
+        if (opts.supportWallCutaway) {
+          emitCutawayCol(levelRoots[1], 1, h2, lt2Y - 0.04, 1.35);
+        } else {
+          batchLt2.addGeo(
+            "struct:col",
+            colMat,
+            "kolom",
+            `Kolom LT2 (${struct.columns.length} titik)`,
+            createChamferBox(col.widthM, h2, col.depthM, 0.008, 1),
+            col.x,
+            lt2Y - 0.04 + h2 * 0.5,
+            col.z,
+            0,
+            [0, 1.35, 0],
+          );
+        }
         if (opts.xrayRebar && col.isMain) {
           batchLt2.addBox(
             "struct:rebar",
@@ -1063,15 +1368,43 @@ export function buildProjectHouse(
   }
 
   // 4. LT2 Slabs & LT1 Room Floors + Pools + Build Tile Overrides
+  const lt2VoidSlabs = (project.levels[1]?.slabs ?? []).filter((s) => s.isVoid && s.polygon.length >= 3);
+  const lt2SlabsAll = project.levels[1]?.slabs ?? [];
+
   if (showLt2Slab && opts.activeLevelView !== "lt1") {
-    for (const slab of project.levels[1]!.slabs) {
-      if (slab.isVoid) continue;
+    for (const slab of lt2SlabsAll) {
+      if (slab.isVoid || slab.polygon.length < 3) continue;
+      const sb = polygonBounds(slab.polygon);
       const shape = new THREE.Shape();
       slab.polygon.forEach((p, i) => {
         if (i === 0) shape.moveTo(p.x, -p.z);
         else shape.lineTo(p.x, -p.z);
       });
       shape.closePath();
+
+      // Cut real stair/void holes out of LT2 slabs via shape.holes (BM-12)
+      for (const vSlab of lt2VoidSlabs) {
+        const clipped = clipPolygonToRect(
+          vSlab.polygon,
+          sb.minX + 0.01,
+          sb.maxX - 0.01,
+          sb.minZ + 0.01,
+          sb.maxZ - 0.01,
+        );
+        if (clipped.length >= 3 && polygonArea(clipped) >= 0.12) {
+          const allInside = clipped.every((pt) => pointInPolygon(pt, slab.polygon));
+          if (allInside || Math.abs(polygonArea(clipped) - polygonArea(vSlab.polygon)) > 0.05) {
+            const hole = new THREE.Path();
+            clipped.forEach((p, i) => {
+              if (i === 0) hole.moveTo(p.x, -p.z);
+              else hole.lineTo(p.x, -p.z);
+            });
+            hole.closePath();
+            shape.holes.push(hole);
+          }
+        }
+      }
+
       const geo = new THREE.ExtrudeGeometry(shape, { depth: slab.thickness, bevelEnabled: false });
       geo.rotateX(-Math.PI / 2);
       const matKey = slab.isOverhang ? "woodDeck" : showTileFloor ? "tileFloor" : "concrete";
@@ -1086,9 +1419,22 @@ export function buildProjectHouse(
   }
 
   if (showTileFloor) {
-    if (showTerrain) {
-      batchBase.addBox("site:grass", palette.grass, "lantai", "Taman Belakang", 3.32, lt1Y - 0.015, 16.15, 3.16, 0.04, 1.52);
+    if (showTerrain && rearGardenRoom) {
+      const rb = polygonBounds(rearGardenRoom.polygon);
+      batchBase.addBox(
+        "site:grass",
+        palette.grass,
+        "lantai",
+        rearGardenRoom.name,
+        (rb.minX + rb.maxX) * 0.5,
+        lt1Y - 0.015,
+        (rb.minZ + rb.maxZ) * 0.5,
+        Math.max(0.4, rb.width),
+        0.04,
+        Math.max(0.4, rb.depth),
+      );
       for (const px of [2.15, 2.75, 3.35, 3.95]) {
+        if (px < rb.minX + 0.25 || px > rb.maxX - 0.25) continue;
         batchBase.addGeo(
           "floor1:woodDeck",
           palette.woodDeck,
@@ -1097,7 +1443,7 @@ export function buildProjectHouse(
           createChamferBox(0.46, 0.03, 0.42, 0.008, 1),
           px,
           lt1Y + 0.01,
-          15.85,
+          (rb.minZ + rb.maxZ) * 0.5 - 0.15,
         );
       }
     }
@@ -1110,12 +1456,35 @@ export function buildProjectHouse(
       for (const rm of fl.rooms) {
         if (rm.room.program === "garden" || rm.room.program === "carport" || rm.room.program === "void") continue;
         if (rm.room.polygon.length < 3) continue;
+        const rBounds = polygonBounds(rm.room.polygon);
         const shape = new THREE.Shape();
         rm.room.polygon.forEach((p, i) => {
           if (i === 0) shape.moveTo(p.x, -p.z);
           else shape.lineTo(p.x, -p.z);
         });
         shape.closePath();
+
+        if (lvIdx === 1) {
+          for (const vSlab of lt2VoidSlabs) {
+            const clipped = clipPolygonToRect(
+              vSlab.polygon,
+              rBounds.minX + 0.01,
+              rBounds.maxX - 0.01,
+              rBounds.minZ + 0.01,
+              rBounds.maxZ - 0.01,
+            );
+            if (clipped.length >= 3 && polygonArea(clipped) >= 0.12 && clipped.every((pt) => pointInPolygon(pt, rm.room.polygon))) {
+              const hole = new THREE.Path();
+              clipped.forEach((p, i) => {
+                if (i === 0) hole.moveTo(p.x, -p.z);
+                else hole.lineTo(p.x, -p.z);
+              });
+              hole.closePath();
+              shape.holes.push(hole);
+            }
+          }
+        }
+
         const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.03, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
         const customTint = CUSTOM_TILE_HEX[rm.room.floorMaterialId];
@@ -1135,16 +1504,34 @@ export function buildProjectHouse(
     }
   }
 
-  // Custom Tile Overrides + Pools from Build Mode
+  // Custom Tile Overrides + Pools from Build Mode (void & pool excluded, flush with polygonOffset)
   const customTiles = project.buildExtras?.floorTiles ?? [];
+  const pools = project.buildExtras?.pools ?? [];
   if (customTiles.length > 0) {
     const grouped = new Map<string, THREE.BufferGeometry[]>();
     for (const ct of customTiles) {
       if (ct.levelIndex === 1 && opts.activeLevelView === "lt1") continue;
-      const y = ct.levelIndex === 0 ? lt1Y + 0.008 : lt2Y + 0.008;
+      const cx = (ct.gx + 0.5) * 0.5;
+      const cz = (ct.gz + 0.5) * 0.5;
+      if (ct.levelIndex === 1 && lt2VoidSlabs.some((vs) => pointInPolygon({ x: cx, z: cz }, vs.polygon))) {
+        continue;
+      }
+      if (
+        ct.levelIndex === 0 &&
+        pools.some(
+          (pl) =>
+            ct.gx >= Math.min(pl.gx1, pl.gx2) &&
+            ct.gx <= Math.max(pl.gx1, pl.gx2) &&
+            ct.gz >= Math.min(pl.gz1, pl.gz2) &&
+            ct.gz <= Math.max(pl.gz1, pl.gz2),
+        )
+      ) {
+        continue;
+      }
+      const y = ct.levelIndex === 0 ? lt1Y + 0.006 : lt2Y + 0.009;
       const k = `${ct.levelIndex}:${ct.materialId}`;
-      const g = new THREE.BoxGeometry(0.5, 0.025, 0.5);
-      g.translate((ct.gx + 0.5) * 0.5, y, (ct.gz + 0.5) * 0.5);
+      const g = new THREE.BoxGeometry(0.5, 0.005, 0.5);
+      g.translate(cx, y, cz);
       const arr = grouped.get(k) ?? [];
       arr.push(g);
       grouped.set(k, arr);
@@ -1154,10 +1541,15 @@ export function buildProjectHouse(
       const merged = mergeGeometryBatch(geos);
       if (!merged) continue;
       const spec = CUSTOM_TILE_HEX[matId ?? ""] ?? { hex: "#dbd4c8", roughness: 0.45 };
-      const mat = palette.getCachedMaterial(spec.hex, spec.roughness);
-      const mesh = new THREE.Mesh(merged, mat);
+      const baseMat = palette.getCachedMaterial(spec.hex, spec.roughness);
+      const tileMat = baseMat.clone();
+      tileMat.polygonOffset = true;
+      tileMat.polygonOffsetFactor = -2;
+      tileMat.polygonOffsetUnits = -2;
+      resources.push(merged, tileMat);
+      const mesh = new THREE.Mesh(merged, tileMat);
+      mesh.userData.customTileMeta = { levelIndex: Number(lvStr) === 1 ? 1 : 0, materialId: matId ?? "granite_warm" };
       mesh.receiveShadow = true;
-      resources.push(merged);
       levelRoots[Number(lvStr) === 1 ? 1 : 0].add(mesh);
     }
   }
@@ -1228,46 +1620,100 @@ export function buildProjectHouse(
       tagPickable(cm, { kind: "stair", id: st.id, levelIndex: 0 }, st.name);
     }
   }
+  // Dynamic LT2 Stairwell & Balcony Railings (derived from actual voids/stairs/balconies; 0 phantom rails on empty lot)
   if (opts.activeLevelView !== "lt1") {
-    batchLt2.addBox("rail:glass-stair", palette.glass, "tangga", "Railing Tangga", 1.35, lt2Y + 0.5, 10.0, 0.035, 0.98, 4.9, {
-      explodeOff: [0, 1.5, 0],
-    });
-    batchLt2.addGeo(
-      "rail:alu",
-      palette.aluDark,
-      "tangga",
-      "Handrail Tangga & Balkon",
-      createChamferBox(0.06, 0.045, 4.95, 0.008, 1),
-      1.35,
-      lt2Y + 1.0,
-      10.0,
-      0,
-      [0, 1.5, 0],
-    );
-    for (let pz = 7.6; pz <= 12.45; pz += 1.2) {
-      batchLt2.addBox("rail:alu", palette.aluDark, "tangga", "Handrail Tangga & Balkon", 1.35, lt2Y + 0.5, pz, 0.04, 1.0, 0.04, {
+    const lt2Walls = project.levels[1]?.walls ?? [];
+    const hasLt2WallNearEdge = (ax: number, az: number, bx: number, bz: number) => {
+      const mx = (ax + bx) * 0.5;
+      const mz = (az + bz) * 0.5;
+      const edgeLen = Math.hypot(bx - ax, bz - az) || 1;
+      const eux = (bx - ax) / edgeLen;
+      const euz = (bz - az) / edgeLen;
+      for (const w of lt2Walls) {
+        const wdx = w.end.x - w.start.x;
+        const wdz = w.end.z - w.start.z;
+        const wLen = Math.hypot(wdx, wdz) || 1;
+        const dot = Math.abs(eux * (wdx / wLen) + euz * (wdz / wLen));
+        if (dot < 0.85) continue;
+        const t = Math.max(0, Math.min(wLen, (mx - w.start.x) * (wdx / wLen) + (mz - w.start.z) * (wdz / wLen)));
+        const px = w.start.x + (wdx / wLen) * t;
+        const pz = w.start.z + (wdz / wLen) * t;
+        if (Math.hypot(mx - px, mz - pz) < 0.16) return true;
+      }
+      return false;
+    };
+
+    const emitRailingSegment = (ax: number, az: number, bx: number, bz: number, partId: "tangga" | "pelat", label: string) => {
+      const rLen = Math.hypot(bx - ax, bz - az);
+      if (rLen < 0.3) return;
+      const ang = -Math.atan2(bz - az, bx - ax);
+      const mx = (ax + bx) * 0.5;
+      const mz = (az + bz) * 0.5;
+      batchLt2.addBox(`rail:glass-${partId}`, palette.glass, partId, `Railing ${label}`, mx, lt2Y + 0.5, mz, rLen, 0.98, 0.035, {
+        rotY: ang,
         explodeOff: [0, 1.5, 0],
       });
+      batchLt2.addGeo(
+        "rail:alu",
+        palette.aluDark,
+        partId,
+        `Handrail ${label}`,
+        createChamferBox(rLen + 0.04, 0.045, 0.06, 0.008, 1),
+        mx,
+        lt2Y + 1.0,
+        mz,
+        ang,
+        [0, 1.5, 0],
+      );
+      const postCount = Math.max(2, Math.round(rLen / 1.15) + 1);
+      for (let i = 0; i < postCount; i++) {
+        const t = i / (postCount - 1);
+        const px = ax + (bx - ax) * t;
+        const pz = az + (bz - az) * t;
+        batchLt2.addBox("rail:alu", palette.aluDark, partId, `Handrail ${label}`, px, lt2Y + 0.5, pz, 0.04, 1.0, 0.04, {
+          explodeOff: [0, 1.5, 0],
+        });
+      }
+    };
+
+    const lt1Stairs = project.levels[0]?.stairs ?? [];
+    for (const st of lt1Stairs) {
+      const vSlab = lt2VoidSlabs.find((s) => s.linkedStairId === st.id || s.id === `slab-void-${st.id}`);
+      if (!vSlab || vSlab.polygon.length < 3) continue;
+      // Only guard edges of the stairwell void that touch an adjacent LT2 floor slab and aren't walled or at the top stair exit
+      const topPt = st.end;
+      for (let i = 0; i < vSlab.polygon.length; i++) {
+        const a = vSlab.polygon[i]!;
+        const b = vSlab.polygon[(i + 1) % vSlab.polygon.length]!;
+        const mx = (a.x + b.x) * 0.5;
+        const mz = (a.z + b.z) * 0.5;
+        if (Math.hypot(mx - topPt.x, mz - topPt.z) < st.width * 0.65) continue; // open landing entry/exit at top of stair
+        if (hasLt2WallNearEdge(a.x, a.z, b.x, b.z)) continue;
+        // Check outward normal to confirm there is walkable LT2 slab on the outside of this void edge
+        const edx = b.x - a.x;
+        const edz = b.z - a.z;
+        const elen = Math.hypot(edx, edz) || 1;
+        const enx = -edz / elen;
+        const enz = edx / elen;
+        const probePos = { x: mx + enx * 0.25, z: mz + enz * 0.25 };
+        const probeNeg = { x: mx - enx * 0.25, z: mz - enz * 0.25 };
+        const outPt = pointInPolygon(probePos, vSlab.polygon) ? probeNeg : probePos;
+        const hasLt2FloorOutside = lt2SlabsAll.some((sl) => !sl.isVoid && pointInPolygon(outPt, sl.polygon));
+        if (hasLt2FloorOutside) {
+          emitRailingSegment(a.x, a.z, b.x, b.z, "tangga", "Tangga");
+        }
+      }
     }
-    batchLt2.addBox("rail:glass-balc", palette.glass, "pelat", "Railing Balkon", 1.25, lt2Y + 0.5, 3.04, 2.45, 0.98, 0.035, {
-      explodeOff: [0, 1.5, 0],
-    });
-    batchLt2.addGeo(
-      "rail:alu",
-      palette.aluDark,
-      "pelat",
-      "Handrail Balkon",
-      createChamferBox(2.5, 0.045, 0.06, 0.008, 1),
-      1.25,
-      lt2Y + 1.0,
-      3.04,
-      0,
-      [0, 1.5, 0],
-    );
-    for (const px of [0.06, 0.85, 1.65, 2.44]) {
-      batchLt2.addBox("rail:alu", palette.aluDark, "pelat", "Handrail Balkon", px, lt2Y + 0.5, 3.04, 0.04, 1.0, 0.04, {
-        explodeOff: [0, 1.5, 0],
-      });
+
+    for (const r of project.levels[1]?.rooms ?? []) {
+      if (r.program !== "balcony" || r.polygon.length < 3) continue;
+      for (let i = 0; i < r.polygon.length; i++) {
+        const a = r.polygon[i]!;
+        const b = r.polygon[(i + 1) % r.polygon.length]!;
+        if (!hasLt2WallNearEdge(a.x, a.z, b.x, b.z)) {
+          emitRailingSegment(a.x, a.z, b.x, b.z, "pelat", r.name);
+        }
+      }
     }
   }
 
@@ -1352,11 +1798,19 @@ export function buildProjectHouse(
       const fullGroup = new THREE.Group();
       wallWrap.add(fullGroup);
 
-      const customMat = CUSTOM_PAINT_HEX[w.materialId];
-      let wallMat: THREE.Material = w.exterior ? palette.plasterExt : palette.plasterInt;
-      if (customMat) {
-        wallMat = palette.getCachedMaterial(customMat.hex, customMat.roughness);
-      }
+      const resolveSideMat = (explicitMatId: string | undefined): THREE.Material => {
+        if (explicitMatId) {
+          const ex = EXPLICIT_SIDE_PAINT_HEX[explicitMatId];
+          if (ex) return palette.getCachedMaterial(ex.hex, ex.roughness);
+        }
+        const custom = CUSTOM_PAINT_HEX[w.materialId];
+        if (custom) return palette.getCachedMaterial(custom.hex, custom.roughness);
+        return w.exterior ? palette.plasterExt : palette.plasterInt;
+      };
+      const frontMat = resolveSideMat(w.frontMaterialId);
+      const backMat = resolveSideMat(w.backMaterialId);
+      const wallMat = frontMat;
+      const edgeMat = w.exterior ? palette.plasterExt : palette.plasterInt;
 
       if (showPlasterPaint) {
         const extra0 = lvIdx === 1 && w.exterior && w.height >= 2.8 ? roof.extraWallHeightAt(1, w.start.x, w.start.z) : 0;
@@ -1384,9 +1838,15 @@ export function buildProjectHouse(
         }
 
         const skinThickness = w.thickness + 0.022;
-        const geo = attachBvh(new THREE.ExtrudeGeometry(wallShape, { depth: skinThickness, bevelEnabled: false }));
-        geo.translate(0, 0, -skinThickness * 0.5);
-        const mesh = new THREE.Mesh(geo, wallMat);
+        const rawGeo = new THREE.ExtrudeGeometry(wallShape, { depth: skinThickness, bevelEnabled: false });
+        rawGeo.translate(0, 0, -skinThickness * 0.5);
+        let meshMat: THREE.Material | THREE.Material[] = frontMat;
+        if (frontMat !== backMat) {
+          splitWallExtrudeMaterialGroups(rawGeo);
+          meshMat = [frontMat, backMat, edgeMat];
+        }
+        const geo = attachBvh(rawGeo);
+        const mesh = new THREE.Mesh(geo, meshMat);
         mesh.position.set(w.start.x, baseLvY, w.start.z);
         mesh.rotation.y = ang;
         mesh.castShadow = true;
@@ -1557,6 +2017,20 @@ export function buildProjectHouse(
             grp.add(bodyM, capM);
             resources.push(bodyG, capG);
           }
+
+          // Subtle threshold strip for doors/arches so doorways remain readable in Cutaway/Rendah (BM-04)
+          for (const op of w.openings) {
+            if ((op.kind === "door" || op.kind === "arch") && op.sill < 0.25) {
+              const cx = w.start.x + ux * op.offset;
+              const cz = w.start.z + uz * op.offset;
+              const sillG = new THREE.BoxGeometry(op.width, 0.026, skinT + 0.015);
+              const sillM = new THREE.Mesh(sillG, palette.woodTeak);
+              sillM.position.set(cx, baseLvY + 0.013, cz);
+              sillM.rotation.y = ang;
+              grp.add(sillM);
+              resources.push(sillG);
+            }
+          }
           tagPickable(grp, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
           return grp;
         };
@@ -1585,19 +2059,42 @@ export function buildProjectHouse(
   }
 
   // 8. Roof Structure (Void + Skylight + Gutter/Downspouts + Carport Canopy)
-  if ((showTruss || showRoofCover) && opts.activeLevelView !== "lt1") {
+  const hasRoofedStructure =
+    project.levels.some((l) => l.walls.some((w) => w.kind !== "fence" && w.height >= 2.4)) ||
+    project.levels.some((l) => l.rooms.some((r) => r.program !== "garden" && r.program !== "carport"));
+  if ((showTruss || showRoofCover) && hasRoofedStructure && opts.activeLevelView !== "lt1") {
     const roofH = (x: number, z: number) => roof.heightAt(x, z) + lt1Y;
     const spanX = roof.maxX - roof.minX;
     const spanZ = roof.maxZ - roof.minZ;
     const midX = (roof.minX + roof.maxX) * 0.5;
-    const voidCut = { x0: 1.7, x1: roof.maxX + 0.1, z0: 15.35, z1: roof.maxZ + 0.1 };
-    const skylightHole: [number, number, number, number] = [0.14, 8.55, 1.3, 10.95];
+    const lt2VoidRoom = (project.levels[1]?.rooms ?? []).find((r) => r.program === "void");
+    const voidBounds = lt2VoidRoom ? polygonBounds(lt2VoidRoom.polygon) : null;
+    const voidCut = voidBounds
+      ? { x0: voidBounds.minX, x1: voidBounds.maxX + 0.1, z0: voidBounds.minZ, z1: voidBounds.maxZ + 0.1 }
+      : null;
+    const primaryStair = project.levels[0]?.stairs[0];
+    const stairVoidSlab = primaryStair
+      ? lt2VoidSlabs.find((s) => s.linkedStairId === primaryStair.id || s.id === `slab-void-${primaryStair.id}`)
+      : undefined;
+    const svb = stairVoidSlab ? polygonBounds(stairVoidSlab.polygon) : null;
+    const skylightHole: [number, number, number, number] | null = svb
+      ? [
+          Math.max(roof.minX + 0.14, svb.minX + 0.14),
+          Math.max(roof.minZ + 0.2, svb.minZ + 1.05),
+          Math.min(roof.maxX - 0.14, svb.maxX - 0.05),
+          Math.min(roof.maxZ - 0.2, svb.maxZ - 1.55),
+        ]
+      : null;
+    const validSkylightHole =
+      skylightHole && skylightHole[2] - skylightHole[0] >= 0.6 && skylightHole[3] - skylightHole[1] >= 0.8
+        ? skylightHole
+        : null;
 
     if (showTruss) {
       for (let i = 0; i < roof.trussCount; i++) {
         const z = roof.minZ + (i / Math.max(1, roof.trussCount - 1)) * spanZ;
         const tx0 = roof.minX + 0.05;
-        const tx1 = z >= 15.35 ? Math.min(roof.maxX - 0.05, 1.68) : roof.maxX - 0.05;
+        const tx1 = voidCut && z >= voidCut.z0 ? Math.min(roof.maxX - 0.05, voidCut.x0 - 0.02) : roof.maxX - 0.05;
         const tSpan = tx1 - tx0;
         if (tSpan < 0.25) continue;
         const tMidX = (tx0 + tx1) * 0.5;
@@ -1613,11 +2110,11 @@ export function buildProjectHouse(
       const thickness = 0.085 / Math.cos(slopeRad);
       const roofGeos: THREE.BufferGeometry[] = [];
       if (roof.roofType === "shed_front" || roof.roofType === "shed_back" || roof.roofType === "flat_deck") {
-        const g = buildCutoutRoofGeometry(roof.minX, roof.maxX, roof.minZ, roof.maxZ, voidCut, skylightHole, roofH, thickness);
+        const g = buildCutoutRoofGeometry(roof.minX, roof.maxX, roof.minZ, roof.maxZ, voidCut, validSkylightHole, roofH, thickness);
         if (g) roofGeos.push(g);
       } else {
-        const gL = buildCutoutRoofGeometry(roof.minX, midX, roof.minZ, roof.maxZ, voidCut, skylightHole, roofH, thickness);
-        const gR = buildCutoutRoofGeometry(midX, roof.maxX, roof.minZ, roof.maxZ, voidCut, skylightHole, roofH, thickness);
+        const gL = buildCutoutRoofGeometry(roof.minX, midX, roof.minZ, roof.maxZ, voidCut, validSkylightHole, roofH, thickness);
+        const gR = buildCutoutRoofGeometry(midX, roof.maxX, roof.minZ, roof.maxZ, voidCut, validSkylightHole, roofH, thickness);
         if (gL) roofGeos.push(gL);
         if (gR) roofGeos.push(gR);
       }
@@ -1632,44 +2129,48 @@ export function buildProjectHouse(
         opts.onExplodePiece?.(roofMesh, new THREE.Vector3(0, 3.2, 0));
       }
 
-      const voidEdgeY = roofH(3.35, 15.35);
-      batchRoof.addGeo(
-        "roof:fascia",
-        palette.lisplank,
-        "genteng",
-        "Lisplank Void Belakang",
-        createChamferBox(roof.maxX - 1.7 + 0.08, 0.14, 0.08, 0.01, 1),
-        (1.7 + roof.maxX) * 0.5,
-        voidEdgeY + 0.04,
-        15.35,
-        0,
-        [0, 3.2, 0],
-      );
+      if (voidCut) {
+        const voidEdgeY = roofH((voidCut.x0 + Math.min(roof.maxX, voidCut.x1)) * 0.5, voidCut.z0);
+        batchRoof.addGeo(
+          "roof:fascia",
+          palette.lisplank,
+          "genteng",
+          "Lisplank Void Belakang",
+          createChamferBox(Math.max(0.4, roof.maxX - voidCut.x0 + 0.08), 0.14, 0.08, 0.01, 1),
+          (voidCut.x0 + roof.maxX) * 0.5,
+          voidEdgeY + 0.04,
+          voidCut.z0,
+          0,
+          [0, 3.2, 0],
+        );
+      }
 
-      const [hx0, hz0, hx1, hz1] = skylightHole;
-      const hMidX = (hx0 + hx1) * 0.5;
-      const hMidZ = (hz0 + hz1) * 0.5;
-      const hW = hx1 - hx0;
-      const hD = hz1 - hz0;
-      const skyMinY = roofH(hMidX, hz0);
-      const skyMaxY = roofH(hMidX, hz1);
-      const skyAvgY = (skyMinY + skyMaxY) * 0.5 + 0.11;
-      const skyRotX = Math.atan2(skyMaxY - skyMinY, hD);
+      if (validSkylightHole) {
+        const [hx0, hz0, hx1, hz1] = validSkylightHole;
+        const hMidX = (hx0 + hx1) * 0.5;
+        const hMidZ = (hz0 + hz1) * 0.5;
+        const hW = hx1 - hx0;
+        const hD = hz1 - hz0;
+        const skyMinY = roofH(hMidX, hz0);
+        const skyMaxY = roofH(hMidX, hz1);
+        const skyAvgY = (skyMinY + skyMaxY) * 0.5 + 0.11;
+        const skyRotX = Math.atan2(skyMaxY - skyMinY, hD);
 
-      const curbFront = createChamferBox(hW + 0.08, 0.14, 0.05, 0.008, 1);
-      curbFront.translate(hMidX, skyMinY + 0.07, hz0);
-      const curbBack = createChamferBox(hW + 0.08, 0.14, 0.05, 0.008, 1);
-      curbBack.translate(hMidX, skyMaxY + 0.07, hz1);
-      batchRoof.addGeo("roof:skycurb", palette.aluDark, "plafon", "Rangka Skylight Tangga", curbFront, 0, 0, 0, 0, [0, 3.2, 0]);
-      batchRoof.addGeo("roof:skycurb", palette.aluDark, "plafon", "Rangka Skylight Tangga", curbBack, 0, 0, 0, 0, [0, 3.2, 0]);
+        const curbFront = createChamferBox(hW + 0.08, 0.14, 0.05, 0.008, 1);
+        curbFront.translate(hMidX, skyMinY + 0.07, hz0);
+        const curbBack = createChamferBox(hW + 0.08, 0.14, 0.05, 0.008, 1);
+        curbBack.translate(hMidX, skyMaxY + 0.07, hz1);
+        batchRoof.addGeo("roof:skycurb", palette.aluDark, "plafon", "Rangka Skylight Tangga", curbFront, 0, 0, 0, 0, [0, 3.2, 0]);
+        batchRoof.addGeo("roof:skycurb", palette.aluDark, "plafon", "Rangka Skylight Tangga", curbBack, 0, 0, 0, 0, [0, 3.2, 0]);
 
-      const skyGlass = new THREE.Mesh(attachBvh(new THREE.BoxGeometry(hW + 0.06, 0.035, hD + 0.06)), palette.glass);
-      skyGlass.position.set(hMidX, skyAvgY + 0.04, hMidZ);
-      skyGlass.rotation.x = -skyRotX;
-      roofGroup.add(skyGlass);
-      resources.push(skyGlass.geometry);
-      tagPickable(skyGlass, { kind: "part", id: "plafon" }, "Skylight Tangga Tempered Glass");
-      opts.onExplodePiece?.(skyGlass, new THREE.Vector3(0, 3.2, 0));
+        const skyGlass = new THREE.Mesh(attachBvh(new THREE.BoxGeometry(hW + 0.06, 0.035, hD + 0.06)), palette.glass);
+        skyGlass.position.set(hMidX, skyAvgY + 0.04, hMidZ);
+        skyGlass.rotation.x = -skyRotX;
+        roofGroup.add(skyGlass);
+        resources.push(skyGlass.geometry);
+        tagPickable(skyGlass, { kind: "part", id: "plafon" }, "Skylight Tangga Tempered Glass");
+        opts.onExplodePiece?.(skyGlass, new THREE.Vector3(0, 3.2, 0));
+      }
 
       const eaveY = roofH(midX, roof.minZ) - 0.03;
       batchRoof.addGeo(
@@ -1685,8 +2186,8 @@ export function buildProjectHouse(
         [0, 2.85, 0],
       );
       for (const [dx, wallZ] of [
-        [0.14, 3.04],
-        [project.site.width - 0.14, 3.92],
+        [roof.minX + 0.14, Math.max(roof.minZ + 0.5, 3.04)],
+        [roof.maxX - 0.14, Math.max(roof.minZ + 0.5, 3.92)],
       ] as [number, number][]) {
         const curve = new THREE.CatmullRomCurve3([
           new THREE.Vector3(dx, eaveY - 0.05, roof.minZ + 0.06),
@@ -1702,34 +2203,37 @@ export function buildProjectHouse(
         }
       }
 
-      const cpMinX = 1.48;
-      const cpMaxX = project.site.width;
-      const cpW = cpMaxX - cpMinX;
-      const cpMidX = (cpMinX + cpMaxX) * 0.5;
-      const cpZ0 = -0.35;
-      const cpZ1 = 4.45;
-      const cpHeightAt = (_x: number, z: number) => lt2Y - 0.34 - (cpZ1 - z) * 0.055;
-      const cpGeo = buildCutoutRoofGeometry(cpMinX, cpMaxX, cpZ0, cpZ1, null, null, cpHeightAt, 0.065);
-      if (cpGeo) {
-        const cpRoof = new THREE.Mesh(cpGeo, palette.roofCover);
-        cpRoof.castShadow = true;
-        cpRoof.receiveShadow = true;
-        roofGroup.add(cpRoof);
-        resources.push(cpGeo);
-        tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport Depan");
-        opts.onExplodePiece?.(cpRoof, new THREE.Vector3(0, 1.9, -0.45));
-      }
+      if (carportRoom) {
+        const cb = polygonBounds(carportRoom.polygon);
+        const cpMinX = Math.max(0, cb.minX - 0.02);
+        const cpMaxX = Math.min(project.site.width, cb.maxX);
+        const cpW = cpMaxX - cpMinX;
+        const cpMidX = (cpMinX + cpMaxX) * 0.5;
+        const cpZ0 = cb.minZ - 0.35;
+        const cpZ1 = cb.maxZ - 0.05;
+        const cpHeightAt = (_x: number, z: number) => lt2Y - 0.34 - (cpZ1 - z) * 0.055;
+        const cpGeo = buildCutoutRoofGeometry(cpMinX, cpMaxX, cpZ0, cpZ1, null, null, cpHeightAt, 0.065);
+        if (cpGeo) {
+          const cpRoof = new THREE.Mesh(cpGeo, palette.roofCover);
+          cpRoof.castShadow = true;
+          cpRoof.receiveShadow = true;
+          roofGroup.add(cpRoof);
+          resources.push(cpGeo);
+          tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport Depan");
+          opts.onExplodePiece?.(cpRoof, new THREE.Vector3(0, 1.9, -0.45));
+        }
 
-      const cpFrontY = cpHeightAt(cpMidX, cpZ0);
-      const cpAvgY = (cpHeightAt(cpMinX, cpZ0) + cpHeightAt(cpMinX, cpZ1)) * 0.5;
-      const cpTilt = Math.atan(0.055);
-      batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpFrontY - 0.03, cpZ0 + 0.03, cpW, 0.1, 0.06, {
-        explodeOff: [0, 1.75, -0.45],
-      });
-      batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMinX + 0.03, cpAvgY - 0.03, (cpZ0 + cpZ1) * 0.5, 0.06, 0.1, cpZ1 - cpZ0, {
-        rotX: cpTilt,
-        explodeOff: [0, 1.75, -0.45],
-      });
+        const cpFrontY = cpHeightAt(cpMidX, cpZ0);
+        const cpAvgY = (cpHeightAt(cpMinX, cpZ0) + cpHeightAt(cpMinX, cpZ1)) * 0.5;
+        const cpTilt = Math.atan(0.055);
+        batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpFrontY - 0.03, cpZ0 + 0.03, cpW, 0.1, 0.06, {
+          explodeOff: [0, 1.75, -0.45],
+        });
+        batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMinX + 0.03, cpAvgY - 0.03, (cpZ0 + cpZ1) * 0.5, 0.06, 0.1, cpZ1 - cpZ0, {
+          rotX: cpTilt,
+          explodeOff: [0, 1.75, -0.45],
+        });
+      }
     }
   }
 
@@ -1744,7 +2248,7 @@ export function buildProjectHouse(
   flushCollector(batchRoof, roofGroup);
 
   // 9. Furniture, Movable HVAC, Lights & Outdoor Condensers
-  if (showProps) {
+  if (showProps && !opts.skipProps) {
     for (const lv of project.levels) {
       if (lv.index === 1 && (opts.activeLevelView === "lt1" || opts.hideUpperPropsInLt1)) continue;
       const lvIdx = (lv.index === 1 ? 1 : 0) as 0 | 1;
@@ -1753,35 +2257,16 @@ export function buildProjectHouse(
       lvGrp.position.y = baseY;
 
       for (const f of lv.furniture) {
-        const mesh = buildFurnitureMesh(f, palette, resources, contactShadowMat);
-        if (lvIdx === 0) {
-          if (f.category === "vehicle" && f.position.z < 4.5) {
-            mesh.position.y += Math.max(0.08, peil.carportPeilM) - lt1Y;
-          } else if (f.position.x < 1.5 && f.position.z < 3.0) {
-            mesh.position.y += 0.08 - lt1Y;
-          } else if (f.position.z >= 3.0 && f.position.z <= 4.0 && f.position.x < 2.25) {
-            mesh.position.y += Math.max(0.12, peil.terracePeilM) - lt1Y;
-          }
-        }
+        const mesh = buildProjectFurnitureObject(f, lvIdx, peil, palette, resources, contactShadowMat);
         lvGrp.add(mesh);
-        tagPickable(mesh, { kind: "furniture", id: f.id, levelIndex: lvIdx }, f.name);
+        pickables.push(mesh);
       }
 
       for (const hv of lv.hvac) {
-        const mesh = buildHvacMesh(hv, palette, resources, animatedFans);
-        lvGrp.add(mesh);
-        tagPickable(mesh, { kind: "hvac", id: hv.id, levelIndex: lvIdx }, hv.name);
-        if (hv.type === "ac_split") {
-          const isFront = hv.position.z < 9.5;
-          const extZ = isFront ? 3.84 : 15.42;
-          const extX = isFront
-            ? hv.position.x > 2.8
-              ? Math.min(4.45, hv.position.x)
-              : 3.15
-            : Math.max(2.1, Math.min(4.45, hv.position.x));
-          const outUnit = buildAcCondenserUnit(extX, 2.72, extZ, isFront ? 0 : Math.PI, resources);
-          lvGrp.add(outUnit);
-          tagPickable(outUnit, { kind: "hvac", id: hv.id, levelIndex: lvIdx }, `Outdoor ${hv.name}`);
+        const wrap = buildProjectHvacObject(hv, lvIdx, palette, resources, animatedFans);
+        lvGrp.add(wrap);
+        for (const c of wrap.children) {
+          if (c.userData?.sel) pickables.push(c);
         }
       }
 
@@ -1792,41 +2277,10 @@ export function buildProjectHouse(
       const activeIdSet = new Set(activeLightsOnLevel.slice(-maxHardwareLightsPerLevel).map((x) => x.id));
 
       for (const l of lv.lights) {
-        const mesh = buildLightFixtureMesh(l, palette, resources);
-        lvGrp.add(mesh);
-        tagPickable(mesh, { kind: "light", id: l.id, levelIndex: lvIdx }, l.name);
-        if (activeIdSet.has(l.id)) {
-          const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de;
-          const clampedY = Math.min(lv.height - 0.25, Math.max(0.25, l.position.y));
-          if (l.type === "garden") {
-            const pt = new THREE.PointLight(lightHex, (l.lumens / 500) * l.dimmer * 1.4, 2.6, 1.6);
-            pt.position.set(l.position.x, clampedY, l.position.z);
-            lvGrp.add(pt);
-          } else {
-            // Downward-aimed SpotLight illuminates only this floor & never bleeds upward through slab into LT2 or downward into LT1
-            const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
-            const rotY = l.rotationY ?? 0;
-            const fwdOff = l.type === "wall" ? 1.15 : 0;
-            const spot = new THREE.SpotLight(
-              lightHex,
-              (l.lumens / 450) * l.dimmer * 2.5,
-              Math.min(3.85, lv.height + 0.15),
-              halfAngle,
-              0.78,
-              1.4,
-            );
-            spot.position.set(
-              l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.1 : 0),
-              clampedY - 0.04,
-              l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.1 : 0),
-            );
-            spot.target.position.set(
-              l.position.x + Math.sin(rotY) * fwdOff,
-              0,
-              l.position.z + Math.cos(rotY) * fwdOff,
-            );
-            lvGrp.add(spot, spot.target);
-          }
+        const wrap = buildProjectLightObject(l, lvIdx, lv.height, palette, resources, activeIdSet.has(l.id));
+        lvGrp.add(wrap);
+        for (const c of wrap.children) {
+          if (c.userData?.sel) pickables.push(c);
         }
       }
 
@@ -1966,6 +2420,7 @@ export function buildProjectHouse(
     lt2StructuralGroup,
     roofGroup,
     wallCutawayRecords,
+    columnCutawayRecords,
     brickBatches,
     pickables,
     resources,

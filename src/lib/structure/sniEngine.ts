@@ -136,10 +136,12 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     map.set(key, { x: rx, z: rz, isMain, maxH: wallH });
   };
 
-  // Register standard 5x17 structural grid alignment first so wall spans align with beam grids
+  // Register standard 5x17 structural grid alignment only when real full-height structural walls exist (exclude fences!)
   const lt1Walls = project.levels[0]?.walls ?? [];
   const lt2Walls = project.levels[1]?.walls ?? [];
-  if (lt1Walls.length > 0) {
+  const lt1StructWalls = lt1Walls.filter((w) => w.kind !== "fence" && w.height >= 1.8);
+  const lt2StructWalls = lt2Walls.filter((w) => w.kind !== "fence" && w.height >= 1.8);
+  if (lt1StructWalls.length > 0) {
     if (lt1Walls.some((w) => w.start.z < 1.0 || w.end.z < 1.0)) {
       addLevelNode(0, 1.5, 0.05, true, 3.2);
       addLevelNode(0, 4.95, 0.05, true, 3.2);
@@ -151,7 +153,7 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     addLevelNode(0, 1.35, 7.5, false, 3.6);
     addLevelNode(0, 1.35, 12.5, false, 3.6);
   }
-  if (lt2Walls.length > 0) {
+  if (lt2StructWalls.length > 0) {
     for (const gz of [7.5, 10.5, 12.5, 15.35]) {
       addLevelNode(1, 0.05, gz, true, 3.6);
       addLevelNode(1, 4.95, gz, true, 3.6);
@@ -164,7 +166,7 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     const lv = project.levels[lvIdx];
     if (!lv) continue;
     for (const w of lv.walls) {
-      if (w.height < 1.8) continue;
+      if (w.kind === "fence" || w.height < 1.8) continue;
       addLevelNode(lvIdx, w.start.x, w.start.z, w.exterior, w.height);
       addLevelNode(lvIdx, w.end.x, w.end.z, w.exterior, w.height);
 

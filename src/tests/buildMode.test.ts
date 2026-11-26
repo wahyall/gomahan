@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   applyTerrainBrushToHeights,
+  canStackOnFurniture,
   computeProjectRoomFloodCells,
   createOpeningForWall,
   isWallCutawayCandidate,
@@ -9,9 +10,12 @@ import {
   UNIFIED_BUILD_CATALOG,
   useBuildModeStore,
   validateFootprintPlacement,
+  validateObjectFootprint,
+  validatePoolPlacement,
   validateProjectStairPlacement,
 } from "@/features/buildMode";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
+import { computeRoofMetrics } from "@/lib/geometry/roofAndStairs";
 import { CURRENT_PROJECT_SCHEMA_VERSION, parseVersionedProjectSave } from "@/lib/model/schema";
 import { buildRabSummary } from "@/lib/quantities/rabEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
@@ -263,5 +267,188 @@ describe("Unified Single-Source Build Mode (Project + Zundo Undo/Redo)", () => {
       store.loadProject(parsed.data);
       expect(useStudioStore.getState().project.budgetCapIdr).toBe(395_000_000);
     }
+  });
+
+  it("isolates fences from masonry, SNI structural columns, and openings (BM-03, BM-07)", () => {
+    const store = useStudioStore.getState();
+    store.resetLotClean();
+    store.addWall(0, {
+      id: "fence-1",
+      name: "Pagar Depan",
+      kind: "fence",
+      start: { x: 0, z: 0 },
+      end: { x: 5, z: 0 },
+      thickness: 0.08,
+      height: 1.2,
+      materialId: "wall_andesit",
+      exterior: true,
+      openings: [],
+    });
+
+    const proj = useStudioStore.getState().project;
+    const derived = buildDerivedModel(proj);
+    const struct = computeStructuralReport(derived);
+
+    expect(derived.totalWallLengthM).toBe(0);
+    expect(derived.masonry.totalBuyBricks).toBe(0);
+    expect(struct.columns.length).toBe(0);
+    expect(computeRoofMetrics(proj).areaM2).toBe(0);
+
+    const doorOnFence = snapOpeningToProjectWalls(proj.levels[0]!.walls, 2.5, 0.02, 0.9, undefined, 0, 2.15);
+    expect(doorOnFence?.valid).toBe(false);
+    expect(doorOnFence?.reason).toContain("pagar");
+  });
+
+  it("enforces oriented OBB collision, surface stacking whitelist, pool validation, and flood blockers (BM-06, BM-09, BM-12)", () => {
+    const store = useStudioStore.getState();
+    store.resetProject();
+    const proj = useStudioStore.getState().project;
+
+    // Wall-mounted AC blocking a door window fails 2D opening check
+    const doorWall = proj.levels[0]!.walls.find((w) => w.openings.some((o) => o.kind === "door"))!;
+    const doorOp = doorWall.openings.find((o) => o.kind === "door")!;
+    const wallAcBlocked = validateObjectFootprint({
+      project: proj,
+      levelIndex: 0,
+      x: doorWall.start.x,
+      y: 1.2,
+      z: doorWall.start.z,
+      sizeX: 0.85,
+      sizeZ: 0.22,
+      rotationY: 0,
+      mountKind: "wall",
+      tool: "hvac",
+      wallSnap: { valid: true, wall: doorWall, offsetM: doorOp.offset },
+    });
+    expect(wallAcBlocked.valid).toBe(false);
+
+    // Surface stacking whitelist: small lamp/plant ok on coffee table; sofa rejected
+    const tableHost = proj.levels[0]!.furniture.find((f) => f.catalogId === "coffee_table")!;
+    expect(canStackOnFurniture({ tool: "light", sizeX: 0.35, sizeZ: 0.35 }, tableHost).valid).toBe(true);
+    expect(canStackOnFurniture({ tool: "furniture", category: "seating", sizeX: 1.8, sizeZ: 0.9 }, tableHost).valid).toBe(false);
+
+    // Alt bypass allows placing even over colliding floor items (MoveObjects)
+    const blockedFloor = validateObjectFootprint({
+      project: proj,
+      levelIndex: 0,
+      x: tableHost.position.x,
+      y: 0,
+      z: tableHost.position.z,
+      sizeX: 1.0,
+      sizeZ: 0.8,
+      rotationY: 0,
+      mountKind: "surface",
+      altBypass: false,
+    });
+    expect(blockedFloor.valid).toBe(false);
+    const bypassedFloor = validateObjectFootprint({
+      project: proj,
+      levelIndex: 0,
+      x: tableHost.position.x,
+      y: 0,
+      z: tableHost.position.z,
+      sizeX: 1.0,
+      sizeZ: 0.8,
+      rotationY: 0,
+      mountKind: "surface",
+      altBypass: true,
+    });
+    expect(bypassedFloor.valid).toBe(true);
+
+    // Wardrobe (1.6 x 0.58m) pressed flush (0 cm to 2.6 cm plaster tolerance) against exterior wall (inner face x=0.10 -> center x=0.39m) must succeed,
+    // while deep penetration into wall core (x=0.33m -> left edge at 0.04m inside 0.10m wall) must still be rejected
+    const flushWardrobe = validateObjectFootprint({
+      project: proj,
+      levelIndex: 1,
+      x: 0.39,
+      y: 0,
+      z: 13.85,
+      sizeX: 1.6,
+      sizeZ: 0.58,
+      rotationY: Math.PI / 2,
+      mountKind: "surface",
+      tool: "furniture",
+      catalogId: "wardrobe",
+      category: "storage",
+      excludeEntityId: "f2-wardrobe3",
+    });
+    expect(flushWardrobe.valid).toBe(true);
+
+    const collidingWardrobe = validateObjectFootprint({
+      project: proj,
+      levelIndex: 1,
+      x: 0.33,
+      y: 0,
+      z: 13.85,
+      sizeX: 1.6,
+      sizeZ: 0.58,
+      rotationY: Math.PI / 2,
+      mountKind: "surface",
+      tool: "furniture",
+      catalogId: "wardrobe",
+      category: "storage",
+      excludeEntityId: "f2-wardrobe3",
+    });
+    expect(collidingWardrobe.valid).toBe(false);
+    expect(collidingWardrobe.reason).toBe("Bertabrakan dengan dinding");
+
+    // Pool placement inside living room rejected; open backyard garden (x=2..4.5m, z=15.5..16.5m) accepted
+    expect(validatePoolPlacement(proj, 2, 10, 6, 14).valid).toBe(false);
+    expect(validatePoolPlacement(proj, 4, 31, 8, 32).valid).toBe(true);
+
+    // Flood cells skip blocked void/pool polygons
+    const voidSlab = proj.levels[1]!.slabs.find((s) => s.isVoid)!;
+    const voidMidX = voidSlab.polygon.reduce((s, p) => s + p.x, 0) / voidSlab.polygon.length;
+    const voidMidZ = voidSlab.polygon.reduce((s, p) => s + p.z, 0) / voidSlab.polygon.length;
+    const vGx = Math.floor(voidMidX / 0.5);
+    const vGz = Math.floor(voidMidZ / 0.5);
+    const cells = computeProjectRoomFloodCells(proj.levels[1]!.walls, 10, 34, 0.5, 4, 24, [voidSlab.polygon]);
+    expect(cells.some((c) => c.gx === vGx && c.gz === vGz)).toBe(false);
+  });
+
+  it("supports dual-sided wall paint, paintRoomWalls, paintRoomFloor tile cleanup, and UX store invariants (BM-05, BM-10, BM-15)", () => {
+    const store = useStudioStore.getState();
+    store.resetLotClean();
+    store.addRoomAndWalls(0, [
+      { id: "w1", name: "N", kind: "wall", start: { x: 1, z: 5 }, end: { x: 4, z: 5 }, thickness: 0.12, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+      { id: "w2", name: "E", kind: "wall", start: { x: 4, z: 5 }, end: { x: 4, z: 9 }, thickness: 0.12, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+      { id: "w3", name: "S", kind: "wall", start: { x: 4, z: 9 }, end: { x: 1, z: 9 }, thickness: 0.12, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+      { id: "w4", name: "W", kind: "wall", start: { x: 1, z: 9 }, end: { x: 1, z: 5 }, thickness: 0.12, height: 3.6, materialId: "wall_ext_ivory", exterior: true, openings: [] },
+    ]);
+
+    const room = useStudioStore.getState().project.levels[0]!.rooms[0]!;
+    // Add a custom tile inside room then paintRoomFloor -> stale tile inside polygon must be cleared
+    store.setFloorTileOverrides([{ levelIndex: 0, gx: 4, gz: 12, materialId: "wood_oak" }]);
+    expect(useStudioStore.getState().project.buildExtras?.floorTiles.length).toBe(1);
+    store.paintRoomFloor(0, room.id, "terrazzo_bath");
+    expect(useStudioStore.getState().project.buildExtras?.floorTiles.length).toBe(0);
+
+    // Paint all inward wall sides of room in 1 Undo without overwriting outward sides
+    const pastBefore = useStudioStore.temporal.getState().pastStates.length;
+    store.paintRoomWalls(0, room.id, "wall_sage");
+    expect(useStudioStore.temporal.getState().pastStates.length).toBe(pastBefore + 1);
+    const paintedWalls = useStudioStore.getState().project.levels[0]!.walls;
+    // Clockwise room (1,5)->(4,5)->(4,9)->(1,9)->(1,5): inward side is right normal (frontMaterialId)
+    expect(paintedWalls.every((w) => w.frontMaterialId === "wall_sage")).toBe(true);
+    expect(paintedWalls.every((w) => w.backMaterialId !== "wall_sage")).toBe(true);
+
+    // Check Build Mode store defaults & UX ergonomics (BM-10, BM-15)
+    const bm = useBuildModeStore.getState();
+    expect(bm.activeLevel).toBe(0);
+    expect(bm.wallVisibility).toBe("cutaway");
+    bm.selectCatalogById("tool_select");
+    bm.setCategory("floors");
+    expect(useBuildModeStore.getState().activeTool).toBe("select");
+
+    bm.setActiveLevel(2);
+    bm.selectCatalogById("furn_sofa_l");
+    expect(useBuildModeStore.getState().activeLevel).toBe(1);
+    useBuildModeStore.getState().rotatePlacementStep(1);
+    expect(useBuildModeStore.getState().placementRotationStep).toBe(1);
+
+    // Zundo equality guard ignores UI selection changes
+    const undoDepthBefore = useStudioStore.temporal.getState().pastStates.length;
+    store.setSelected({ kind: "room", levelIndex: 0, id: room.id });
+    expect(useStudioStore.temporal.getState().pastStates.length).toBe(undoDepthBefore);
   });
 });

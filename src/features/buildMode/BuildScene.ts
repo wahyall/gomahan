@@ -15,13 +15,13 @@ import {
   isWallCutawayCandidate,
   snapOpeningToProjectWalls,
   snapWallEndpoint,
-  validateFootprintPlacement,
   validateProjectStairPlacement,
   worldToGridVertex,
   type GridPoint,
 } from "@/features/buildMode/geometryUtils";
+import { validateObjectFootprint, validatePoolPlacement } from "@/features/buildMode/placementValidator";
 import { UNIFIED_BUILD_CATALOG } from "@/features/buildMode/projectCatalog";
-import type { FloorBrushMode, TerrainBrushMode } from "@/features/buildMode/store";
+import type { FloorBrushMode, TerrainBrushMode, WallPaintMode } from "@/features/buildMode/store";
 import type {
   BuildCatalogEntry,
   BuildToolId,
@@ -30,19 +30,39 @@ import type {
 } from "@/features/buildMode/types";
 import { simsAudio } from "@/lib/audio/simsAudio";
 import { AdaptiveRenderGovernor } from "@/lib/scene/adaptiveQuality";
+import { isIndoorRoomProgram, pointInPolygon } from "@/lib/geometry/rooms";
+import { computeRoofMetrics } from "@/lib/geometry/roofAndStairs";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
-import type { FurnitureItem, HvacType, HvacUnit, LightFixture, LightType, Room, Stair, Wall } from "@/lib/model/types";
+import type {
+  FurnitureCategory,
+  FurnitureItem,
+  HvacType,
+  HvacUnit,
+  LightFixture,
+  LightType,
+  Opening,
+  RoofType,
+  Room,
+  Stair,
+  Vec2,
+  Wall,
+} from "@/lib/model/types";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { createChamferBox, createContactShadowTexture, mergeGeometryBatch } from "@/lib/scene/geometryHelpers";
 import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, makeSunSpriteTexture, type MaterialPalette } from "@/lib/scene/materials";
 import {
+  buildProjectFurnitureObject,
   buildProjectHouse,
+  buildProjectHvacObject,
+  buildProjectLightObject,
   buildStaticNeighborhood,
   type BrickWallBatch,
+  type ColumnCutawayRecord,
   type WallCutawayRecord,
 } from "@/lib/scene/projectHouseBuilder";
+import { buildFurnitureMesh, buildHvacMesh, buildLightFixtureMesh } from "@/lib/scene/propsBuilder";
 import type { SelectionTarget, ViewState } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 
@@ -63,17 +83,24 @@ export interface BuildSceneActions {
   onHoverCell: (gx: number, gz: number, worldX: number, worldZ: number, inBounds: boolean) => void;
   onHoverPart?: (label: string | null, x: number, y: number) => void;
   onPreviewHud: (hud: { label: string; valid: boolean } | null) => void;
-  onEyedropCatalog: (catalogId: string) => void;
+  onEyedropCatalog: (catalogId: string, swatchHex?: string | null) => void;
   onStats?: (stats: BuildSceneStats) => void;
   // Direct Single-Source-of-Truth Project Mutations
   onAddWall: (lv: 0 | 1, wall: Wall) => void;
   onAddRoomAndWalls: (lv: 0 | 1, walls: Wall[], room?: Room) => void;
   onUpdateWall: (lv: 0 | 1, wallId: string, patch: Partial<Wall>) => void;
+  onPushPullWall?: (lv: 0 | 1, wallId: string, deltaNormalM: number, altFree?: boolean) => void;
+  onPaintRoomWalls?: (lv: 0 | 1, roomId: string, materialId: string) => void;
   onDeleteWall: (lv: 0 | 1, wallId: string) => void;
+  onDeleteWallsBatch?: (lv: 0 | 1, wallIds: string[]) => void;
   onAddOpening: (lv: 0 | 1, wallId: string, op: ReturnType<typeof createOpeningForWall>) => void;
+  onUpdateOpening?: (lv: 0 | 1, wallId: string, opId: string, patch: Partial<Opening>) => void;
   onDeleteOpening: (lv: 0 | 1, wallId: string, opId: string) => void;
   onPaintRoomFloor: (lv: 0 | 1, roomId: string, matId: string) => void;
+  onDeleteRoom?: (lv: 0 | 1, roomId: string) => void;
   onSetFloorTiles: (tiles: { levelIndex: number; gx: number; gz: number; materialId: string }[]) => void;
+  onDeleteFloorTile?: (lv: 0 | 1, gx: number, gz: number) => void;
+  onDeleteFloorTilesBatch?: (tiles: { levelIndex: number; gx: number; gz: number }[]) => void;
   onAddStair: (lv: 0 | 1, stair: Stair, voidPoly: { x: number; z: number }[]) => void;
   onDeleteStair: (lv: 0 | 1, stairId: string) => void;
   onAddFurniture: (lv: 0 | 1, item: FurnitureItem) => void;
@@ -88,6 +115,7 @@ export interface BuildSceneActions {
   onAddPool: (pool: { id: string; gx1: number; gz1: number; gx2: number; gz2: number; depth: number }) => void;
   onDeletePool: (poolId: string) => void;
   onSetTerrainHeights: (heights: number[]) => void;
+  onPlacementCommitted?: (tool: BuildToolId, keepTool: boolean) => void;
 }
 
 export interface BuildViewOptions {
@@ -101,9 +129,13 @@ export interface BuildViewOptions {
   showBricksOverlay: boolean;
   activeTool: BuildToolId;
   selectedCatalogId: string;
+  selectedSwatchHex?: string | null;
   floorBrushMode: FloorBrushMode;
   terrainBrushMode: TerrainBrushMode;
-  placementRotationQuarter: 0 | 1 | 2 | 3;
+  wallPaintMode?: WallPaintMode;
+  placementRotationStep: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  placementFlipSwing?: 1 | -1;
+  pendingRoofType?: RoofType | null;
 }
 
 let seq = 0;
@@ -136,21 +168,42 @@ export class BuildScene {
   private readonly envGroup = new THREE.Group();
   private readonly neighborsGroup = new THREE.Group();
   private readonly houseContainer = new THREE.Group();
+  private readonly propsContainer = new THREE.Group();
+  private readonly propLevelRoots: [THREE.Group, THREE.Group] = [new THREE.Group(), new THREE.Group()];
   private readonly simGroup = new THREE.Group();
   private readonly dimsGroup = new THREE.Group();
   private readonly overlayGroup = new THREE.Group();
   private readonly previewGroup = new THREE.Group();
   private readonly selectedRing: THREE.Mesh;
+  private readonly pushPullGizmoGroup = new THREE.Group();
+  private roomOutlineLoop: THREE.LineLoop | null = null;
+  private liveTerrainTempMesh: THREE.Mesh | null = null;
 
   private staticDisposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private dynResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   private simResources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+  private propEntries = new Map<
+    string,
+    {
+      sig: string;
+      lvIdx: 0 | 1;
+      root: THREE.Object3D;
+      resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[];
+      fanBlades: THREE.Object3D[];
+    }
+  >();
+  private ghostCache = new Map<
+    string,
+    { group: THREE.Group; tintMeshes: THREE.Mesh[]; disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] }
+  >();
   private levelRoots: [THREE.Group, THREE.Group] | null = null;
   private lt2StructuralGroup: THREE.Group | null = null;
   private roofGroup: THREE.Group | null = null;
   private wallCutawayRecords: WallCutawayRecord[] = [];
+  private columnCutawayRecords: ColumnCutawayRecord[] = [];
   private brickBatches: BrickWallBatch[] = [];
   private brickExplodeMap = new Map<THREE.InstancedMesh, { n: number; pos: Float32Array; quat: Float32Array; scl: Float32Array }>();
+  private houseAnimatedFans: THREE.Object3D[] = [];
   private animatedFans: THREE.Object3D[] = [];
   private airParticlesMesh: THREE.InstancedMesh | null = null;
   private airParticleStates: { x: number; y: number; z: number; lv: 0 | 1; life: number }[] = [];
@@ -182,6 +235,7 @@ export class BuildScene {
   private selected: SelectionTarget = null;
   private envKey = "";
   private buildSignature = "";
+  private propsSignature = "";
   private simSignature = "";
   private lastCutawayYaw = Number.NaN;
   private lastCutawayKey = "";
@@ -210,14 +264,19 @@ export class BuildScene {
     showBricksOverlay: false,
     activeTool: "select",
     selectedCatalogId: "tool_select",
+    selectedSwatchHex: null,
     floorBrushMode: "fill",
     terrainBrushMode: "raise",
-    placementRotationQuarter: 0,
+    wallPaintMode: "side",
+    placementRotationStep: 0,
+    placementFlipSwing: 1,
+    pendingRoofType: null,
   };
 
   // Interactive Tool Drag / Move State
   private dragStartVertex: GridPoint | null = null;
   private dragStartCell: GridPoint | null = null;
+  private sledgeDragStart: { x: number; z: number } | null = null;
   private brushStrokeCells = new Map<string, { levelIndex: number; gx: number; gz: number; materialId: string }>();
   private terrainScratch: number[] | null = null;
   private isBrushDown = false;
@@ -235,6 +294,38 @@ export class BuildScene {
     origMeshPos: THREE.Vector3;
     origMeshRotY: number;
     yRenderOffset: number;
+  } | null = null;
+  private pushPullDragState: {
+    lvIdx: 0 | 1;
+    wallId: string;
+    startWorldX: number;
+    startWorldZ: number;
+    midX: number;
+    midZ: number;
+    nx: number;
+    nz: number;
+    len: number;
+    height: number;
+    thickness: number;
+    baseY: number;
+    deltaM: number;
+  } | null = null;
+  private openingDragState: {
+    lvIdx: 0 | 1;
+    wallId: string;
+    opId: string;
+    width: number;
+    height: number;
+    sill: number;
+    label: string;
+    origOffset: number;
+    nextWallId: string;
+    nextOffset: number;
+    nextWorldX: number;
+    nextWorldZ: number;
+    nextYaw: number;
+    valid: boolean;
+    reason?: string;
   } | null = null;
   private qualityOverride: BuildQualityTier = "auto";
   private activeTier: "high" | "medium" | "low" = "high";
@@ -281,10 +372,29 @@ export class BuildScene {
   private altHeld = false;
   private lastWorldPos = { x: 2.5, z: 8.5, inBounds: false };
   private pointerDownPos = { x: 0, y: 0 };
+  private rightDownPos: { x: number; y: number } | null = null;
 
   private readonly validMat = new THREE.MeshBasicMaterial({ color: "#2ed68d", transparent: true, opacity: 0.45, depthWrite: false });
   private readonly invalidMat = new THREE.MeshBasicMaterial({ color: "#ef5350", transparent: true, opacity: 0.52, depthWrite: false });
   private readonly cyanMat = new THREE.MeshBasicMaterial({ color: "#38bdf8", transparent: true, opacity: 0.45, depthWrite: false });
+  private readonly ghostValidMat = new THREE.MeshStandardMaterial({
+    color: "#2ed68d",
+    emissive: "#15803d",
+    emissiveIntensity: 0.42,
+    transparent: true,
+    opacity: 0.58,
+    depthWrite: false,
+    roughness: 0.55,
+  });
+  private readonly ghostInvalidMat = new THREE.MeshStandardMaterial({
+    color: "#ef5350",
+    emissive: "#991b1b",
+    emissiveIntensity: 0.45,
+    transparent: true,
+    opacity: 0.6,
+    depthWrite: false,
+    roughness: 0.55,
+  });
 
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointerNdc = new THREE.Vector2();
@@ -454,7 +564,7 @@ export class BuildScene {
     this.selectedRing.renderOrder = 998;
     this.staticDisposables.push(ringGeo, ringMat);
 
-    const hoverGeo = new THREE.PlaneGeometry(0.5, 0.5);
+    const hoverGeo = new THREE.PlaneGeometry(0.25, 0.25);
     hoverGeo.rotateX(-Math.PI / 2);
     const hoverMat = new THREE.MeshBasicMaterial({
       color: "#3bc48d",
@@ -468,7 +578,43 @@ export class BuildScene {
     this.overlayGroup.add(this.hoverTileMesh);
     this.staticDisposables.push(hoverGeo, hoverMat);
 
-    this.scene.add(this.envGroup, this.neighborsGroup, this.houseContainer, this.simGroup, this.dimsGroup, this.overlayGroup, this.previewGroup, this.selectedRing);
+    // Sims 4 Wall Push-Pull double-arrow gizmo handle
+    const shaftGeo = new THREE.CylinderGeometry(0.032, 0.032, 0.72, 10);
+    shaftGeo.rotateX(Math.PI / 2);
+    const coneFwdGeo = new THREE.ConeGeometry(0.095, 0.22, 12);
+    coneFwdGeo.rotateX(Math.PI / 2);
+    coneFwdGeo.translate(0, 0, 0.43);
+    const coneBackGeo = new THREE.ConeGeometry(0.095, 0.22, 12);
+    coneBackGeo.rotateX(-Math.PI / 2);
+    coneBackGeo.translate(0, 0, -0.43);
+    const hitSphereGeo = new THREE.SphereGeometry(0.36, 10, 8);
+    const gizmoMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, depthTest: false, transparent: true, opacity: 0.95 });
+    const hitGizmoMat = new THREE.MeshBasicMaterial({ visible: false });
+    const shaftM = new THREE.Mesh(shaftGeo, gizmoMat);
+    const fwdM = new THREE.Mesh(coneFwdGeo, gizmoMat);
+    const backM = new THREE.Mesh(coneBackGeo, gizmoMat);
+    const hitM = new THREE.Mesh(hitSphereGeo, hitGizmoMat);
+    for (const gm of [shaftM, fwdM, backM, hitM]) {
+      gm.userData.isPushPullGizmo = true;
+      gm.renderOrder = 999;
+      this.pushPullGizmoGroup.add(gm);
+    }
+    this.pushPullGizmoGroup.visible = false;
+    this.overlayGroup.add(this.pushPullGizmoGroup);
+    this.staticDisposables.push(shaftGeo, coneFwdGeo, coneBackGeo, hitSphereGeo, gizmoMat, hitGizmoMat);
+
+    this.propsContainer.add(this.propLevelRoots[0], this.propLevelRoots[1]);
+    this.scene.add(
+      this.envGroup,
+      this.neighborsGroup,
+      this.houseContainer,
+      this.propsContainer,
+      this.simGroup,
+      this.dimsGroup,
+      this.overlayGroup,
+      this.previewGroup,
+      this.selectedRing,
+    );
 
     this.handleResize();
     this.setupPostPipeline();
@@ -525,7 +671,25 @@ export class BuildScene {
     this.envGroup.clear();
     this.neighborsGroup.clear();
     this.houseContainer.clear();
+    this.propsContainer.clear();
     this.dimsGroup.clear();
+    for (const ent of this.propEntries.values()) {
+      for (const r of ent.resources) r.dispose();
+    }
+    this.propEntries.clear();
+    for (const g of this.ghostCache.values()) {
+      for (const r of g.disposables) r.dispose();
+    }
+    this.ghostCache.clear();
+    if (this.roomOutlineLoop) {
+      this.roomOutlineLoop.geometry.dispose();
+      (this.roomOutlineLoop.material as THREE.Material).dispose();
+      this.roomOutlineLoop = null;
+    }
+    if (this.liveTerrainTempMesh) {
+      this.liveTerrainTempMesh.geometry.dispose();
+      this.liveTerrainTempMesh = null;
+    }
     for (const r of this.dynResources) r.dispose();
     for (const r of this.simResources) r.dispose();
     for (const r of this.staticDisposables) r.dispose();
@@ -535,6 +699,8 @@ export class BuildScene {
     this.validMat.dispose();
     this.invalidMat.dispose();
     this.cyanMat.dispose();
+    this.ghostValidMat.dispose();
+    this.ghostInvalidMat.dispose();
     this.envTex?.dispose();
     this.palette.dispose();
     this.renderer.dispose();
@@ -773,22 +939,47 @@ export class BuildScene {
     }
     this.dragStartVertex = null;
     this.dragStartCell = null;
+    this.sledgeDragStart = null;
+    this.pushPullDragState = null;
+    this.openingDragState = null;
     this.draggingEntity = null;
     this.draggingMesh = null;
     this.dragPendingCommit = null;
     this.isBrushDown = false;
     this.brushStrokeCells.clear();
     this.terrainScratch = null;
+    if (this.liveTerrainTempMesh) {
+      this.overlayGroup.remove(this.liveTerrainTempMesh);
+      this.liveTerrainTempMesh.geometry.dispose();
+      this.liveTerrainTempMesh = null;
+    }
     this.clearPreviewMeshes();
     this.actions.onPreviewHud(null);
   }
 
   private clearPreviewMeshes(): void {
     this.hoverHighlightMesh.visible = false;
-    for (const c of this.previewGroup.children) {
+    for (const c of [...this.previewGroup.children]) {
+      this.previewGroup.remove(c);
+      if (c.userData?.isCachedGhost) continue;
       if (c instanceof THREE.Mesh || c instanceof THREE.LineSegments) c.geometry.dispose();
     }
-    this.previewGroup.clear();
+  }
+
+  public setSelected(selected: SelectionTarget): void {
+    this.selected = selected;
+    if (this.derived) {
+      this.updateSelectionRing(this.derived, selected);
+    }
+  }
+
+  public rotateActiveDrag(deltaStep: -1 | 1): boolean {
+    if (!this.draggingEntity || !this.dragPendingCommit || !this.draggingMesh) return false;
+    const stepRad = (deltaStep > 0 ? 1 : -1) * (Math.PI / 4);
+    const nextRot = (this.dragPendingCommit.rotationY ?? this.dragPendingCommit.origMeshRotY) + stepRad;
+    this.dragPendingCommit.rotationY = nextRot;
+    this.draggingMesh.rotation.y = nextRot;
+    return true;
   }
 
   public updateProjectData(
@@ -922,26 +1113,49 @@ export class BuildScene {
         }
       : null;
 
+    const previewRoofType =
+      this.viewOpts.pendingRoofType && this.viewOpts.pendingRoofType !== project.systems.roofType
+        ? this.viewOpts.pendingRoofType
+        : null;
+
     const sig = JSON.stringify({
-      u: project.updatedAt,
-      sys: project.systems,
+      sys: previewRoofType ? { ...project.systems, roofType: previewRoofType } : project.systems,
       peil: project.site.peil,
       sp: project.structuralParams,
       soil: project.site.soil,
       fm: project.floodMitigation,
-      lv: project.levels.map((l) => [l.walls, l.rooms, l.slabs, l.stairs, l.furniture, l.lights, l.hvac]),
+      lv: project.levels.map((l) => [l.id, l.index, l.name, l.height, l.walls, l.rooms, l.slabs, l.stairs]),
       ext: project.buildExtras,
       brk: this.viewOpts.showBricksOverlay,
       vf: vFlags,
+      pr: previewRoofType,
     });
 
     if (sig !== this.buildSignature) {
       this.buildSignature = sig;
-      this.rebuildFromProject(derived, struct);
+      if (previewRoofType) {
+        const previewProject = {
+          ...project,
+          systems: { ...project.systems, roofType: previewRoofType },
+        };
+        const previewRoof = computeRoofMetrics(previewProject);
+        this.rebuildFromProject({ ...derived, project: previewProject, roof: previewRoof }, struct);
+      } else {
+        this.rebuildFromProject(derived, struct);
+      }
+    }
+
+    const pSig = JSON.stringify({
+      lv: project.levels.map((l) => [l.index, l.height, l.furniture, l.lights, l.hvac]),
+      peil: project.site.peil,
+      stg: this.studioView?.stage ?? 0,
+    });
+    if (pSig !== this.propsSignature) {
+      this.propsSignature = pSig;
+      this.syncPropsIncremental(derived);
     }
 
     const simSig = JSON.stringify({
-      u: project.updatedAt,
       al: this.viewOpts.activeLevel,
       lux: this.studioView?.showLuxHeatmap ?? false,
       air: this.studioView?.showAirParticles ?? false,
@@ -971,8 +1185,11 @@ export class BuildScene {
   public setViewOptions(opts: BuildViewOptions): void {
     const levelChanged = this.viewOpts.activeLevel !== opts.activeLevel;
     const bricksChanged = this.viewOpts.showBricksOverlay !== opts.showBricksOverlay;
+    const roofPreviewChanged = (this.viewOpts.pendingRoofType ?? null) !== (opts.pendingRoofType ?? null);
     const toolChanged =
-      this.viewOpts.activeTool !== opts.activeTool || this.viewOpts.selectedCatalogId !== opts.selectedCatalogId;
+      this.viewOpts.activeTool !== opts.activeTool ||
+      this.viewOpts.selectedCatalogId !== opts.selectedCatalogId ||
+      (this.viewOpts.selectedSwatchHex ?? null) !== (opts.selectedSwatchHex ?? null);
 
     this.viewOpts = opts;
     this.neighborsGroup.visible = opts.neighborsVisible && (this.studioView?.showNeighbors ?? true);
@@ -980,9 +1197,26 @@ export class BuildScene {
     this.cameraCtrl.setSnap90Enabled(opts.snap90Enabled);
     this.cameraCtrl.setEdgeScrollEnabled(opts.edgeScrollEnabled);
 
-    if (toolChanged) this.cancelActivePreview();
-    if (bricksChanged && this.derived && this.struct) {
-      this.rebuildFromProject(this.derived, this.struct);
+    if (toolChanged) {
+      this.cancelActivePreview();
+      if (this.derived) this.updateSelectionRing(this.derived, this.selected);
+    }
+    if ((bricksChanged || roofPreviewChanged) && this.derived && this.struct) {
+      const previewRoofType =
+        opts.pendingRoofType && opts.pendingRoofType !== this.derived.project.systems.roofType ? opts.pendingRoofType : null;
+      if (previewRoofType) {
+        const previewProject = {
+          ...this.derived.project,
+          systems: { ...this.derived.project.systems, roofType: previewRoofType },
+        };
+        this.rebuildFromProject(
+          { ...this.derived, project: previewProject, roof: computeRoofMetrics(previewProject) },
+          this.struct,
+        );
+      } else {
+        this.rebuildFromProject(this.derived, this.struct);
+      }
+      this.buildSignature = "";
     }
 
     if (levelChanged) {
@@ -1011,10 +1245,17 @@ export class BuildScene {
     for (const r of this.dynResources) r.dispose();
     this.dynResources = [];
     this.animatedFans = [];
+    this.houseAnimatedFans = [];
     this.explodePieces = [];
     this.explodeInstanced = [];
     this.brickExplodeMap.clear();
     this.brickBatches = [];
+    this.columnCutawayRecords = [];
+    if (this.liveTerrainTempMesh) {
+      this.overlayGroup.remove(this.liveTerrainTempMesh);
+      this.liveTerrainTempMesh.geometry.dispose();
+      this.liveTerrainTempMesh = null;
+    }
 
     const showBricksOverlay = this.viewOpts.showBricksOverlay;
     const sv = this.studioView;
@@ -1025,7 +1266,7 @@ export class BuildScene {
       showBricks,
       showStructure: sv?.showStructure ?? true,
       showTerrain: sv?.showTerrain ?? true,
-      showRoof: sv?.showRoof ?? true,
+      showRoof: (sv?.showRoof ?? true) || Boolean(this.viewOpts.pendingRoofType),
       showRangka: sv?.showRangka ?? true,
       showFinishing,
       xrayRebar: sv?.xrayRebar ?? false,
@@ -1034,6 +1275,7 @@ export class BuildScene {
       hiddenParts: new Set(sv?.hiddenParts ?? []),
       activeLevelView: "all",
       supportWallCutaway: true,
+      skipProps: true,
       onExplodePiece: (obj, off) => {
         this.explodePieces.push({ obj, base: obj.position.clone(), off });
       },
@@ -1048,8 +1290,10 @@ export class BuildScene {
     this.lt2StructuralGroup = built.lt2StructuralGroup;
     this.roofGroup = built.roofGroup;
     this.wallCutawayRecords = built.wallCutawayRecords;
+    this.columnCutawayRecords = built.columnCutawayRecords;
     this.brickBatches = built.brickBatches;
-    this.animatedFans = built.animatedFans;
+    this.houseAnimatedFans = built.animatedFans;
+    this.rebuildAnimatedFanList();
     this.lastCutawayYaw = Number.NaN;
     this.lastCutawayKey = "";
 
@@ -1178,12 +1422,109 @@ export class BuildScene {
     this._s1.set(1, 1, 1);
   }
 
-  private applyWireframe(wf: boolean): void {
-    this.houseContainer.traverse((o) => {
-      if (o instanceof THREE.Mesh && (o.material instanceof THREE.MeshStandardMaterial || o.material instanceof THREE.MeshPhysicalMaterial)) {
-        o.material.wireframe = wf;
+  private rebuildAnimatedFanList(): void {
+    const combined: THREE.Object3D[] = [...this.houseAnimatedFans];
+    for (const ent of this.propEntries.values()) {
+      for (const f of ent.fanBlades) combined.push(f);
+    }
+    this.animatedFans = combined;
+  }
+
+  private syncPropsIncremental(derived: DerivedProjectModel): void {
+    const { project } = derived;
+    const peil = project.site.peil;
+    const lt1Y = peil.floor1PeilM;
+    const lt2Y = lt1Y + (project.levels[0]?.height ?? 3.6);
+    this.propLevelRoots[0].position.y = lt1Y;
+    this.propLevelRoots[1].position.y = lt2Y;
+
+    const stage = this.studioView?.stage ?? 0;
+    const showProps = stage === 0 || stage >= 9;
+    this.propsContainer.visible = showProps;
+
+    const desiredKeys = new Set<string>();
+
+    const disposePropKey = (key: string) => {
+      const existing = this.propEntries.get(key);
+      if (!existing) return;
+      this.propLevelRoots[existing.lvIdx].remove(existing.root);
+      for (const r of existing.resources) r.dispose();
+      this.propEntries.delete(key);
+    };
+
+    if (showProps) {
+      const peilKey = `${peil.floor1PeilM.toFixed(3)}:${peil.carportPeilM.toFixed(3)}:${peil.terracePeilM.toFixed(3)}`;
+      for (const lv of project.levels) {
+        const lvIdx = (lv.index === 1 ? 1 : 0) as 0 | 1;
+        const targetGroup = this.propLevelRoots[lvIdx];
+
+        for (const f of lv.furniture) {
+          const key = `furn:${lvIdx}:${f.id}`;
+          desiredKeys.add(key);
+          const sig = `${f.catalogId}|${f.name}|${f.colorHex}|${f.accentHex ?? ""}|${f.position.x.toFixed(3)},${f.position.y.toFixed(3)},${f.position.z.toFixed(3)}|${f.rotationY.toFixed(4)}|${f.size.x.toFixed(3)},${f.size.y.toFixed(3)},${f.size.z.toFixed(3)}|${peilKey}`;
+          const prev = this.propEntries.get(key);
+          if (prev && prev.sig === sig) continue;
+          if (prev) disposePropKey(key);
+          const res: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+          const root = buildProjectFurnitureObject(f, lvIdx, peil, this.palette, res, this.contactShadowMat);
+          targetGroup.add(root);
+          this.propEntries.set(key, { sig, lvIdx, root, resources: res, fanBlades: [] });
+        }
+
+        for (const hv of lv.hvac) {
+          const key = `hvac:${lvIdx}:${hv.id}`;
+          desiredKeys.add(key);
+          const sig = `${hv.type}|${hv.name}|${hv.on}|${hv.speedLevel}|${hv.position.x.toFixed(3)},${hv.position.y.toFixed(3)},${hv.position.z.toFixed(3)}|${hv.rotationY.toFixed(4)}`;
+          const prev = this.propEntries.get(key);
+          if (prev && prev.sig === sig) continue;
+          if (prev) disposePropKey(key);
+          const res: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+          const fans: THREE.Object3D[] = [];
+          const root = buildProjectHvacObject(hv, lvIdx, this.palette, res, fans);
+          targetGroup.add(root);
+          this.propEntries.set(key, { sig, lvIdx, root, resources: res, fanBlades: fans });
+        }
+
+        const activeLights = lv.lights.filter((x) => x.on && x.dimmer > 0);
+        const activeIdSet = new Set(activeLights.slice(-7).map((x) => x.id));
+        for (const l of lv.lights) {
+          const key = `light:${lvIdx}:${l.id}`;
+          desiredKeys.add(key);
+          const isDyn = activeIdSet.has(l.id);
+          const sig = `${l.type}|${l.name}|${l.on}|${isDyn}|${l.lumens}|${l.colorTempK}|${l.dimmer}|${lv.height.toFixed(2)}|${l.position.x.toFixed(3)},${l.position.y.toFixed(3)},${l.position.z.toFixed(3)}|${(l.rotationY ?? 0).toFixed(4)}`;
+          const prev = this.propEntries.get(key);
+          if (prev && prev.sig === sig) continue;
+          if (prev) disposePropKey(key);
+          const res: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+          const root = buildProjectLightObject(l, lvIdx, lv.height, this.palette, res, isDyn);
+          targetGroup.add(root);
+          this.propEntries.set(key, { sig, lvIdx, root, resources: res, fanBlades: [] });
+        }
       }
-    });
+    }
+
+    for (const key of [...this.propEntries.keys()]) {
+      if (!desiredKeys.has(key)) disposePropKey(key);
+    }
+
+    this.rebuildAnimatedFanList();
+    this.applyLevelAndWallVisibility();
+  }
+
+  private applyWireframe(wf: boolean): void {
+    const applyOn = (root: THREE.Object3D) => {
+      root.traverse((o) => {
+        if (!(o instanceof THREE.Mesh)) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of mats) {
+          if (m instanceof THREE.MeshStandardMaterial || m instanceof THREE.MeshPhysicalMaterial) {
+            m.wireframe = wf;
+          }
+        }
+      });
+    };
+    applyOn(this.houseContainer);
+    applyOn(this.propsContainer);
   }
 
   private rebuildGridOverlay(): void {
@@ -1195,25 +1536,41 @@ export class BuildScene {
     }
     const wM = this.derived?.project.site.width ?? 5;
     const dM = this.derived?.project.site.depth ?? 17;
-    const cols = Math.round(wM / 0.5);
-    const rows = Math.round(dM / 0.5);
+    const gridCs = 0.25;
+    const cols = Math.round(wM / gridCs);
+    const rows = Math.round(dM / gridCs);
     const y = this.getActiveFloorY() + 0.025;
 
     const positions: number[] = [];
     const colors: number[] = [];
     const majorCol = new THREE.Color("#dbe7f2");
-    const minorCol = new THREE.Color("#9db2c4");
+    const midCol = new THREE.Color("#95abc0");
+    const fineCol = new THREE.Color("#63778b");
     const borderCol = new THREE.Color("#f09b4b");
 
     for (let gx = 0; gx <= cols; gx++) {
-      const x = gx * 0.5;
-      const c = gx === 0 || gx === cols ? borderCol : gx % 2 === 0 ? majorCol : minorCol;
+      const x = gx * gridCs;
+      const c =
+        gx === 0 || gx === cols
+          ? borderCol
+          : gx % 4 === 0
+            ? majorCol
+            : gx % 2 === 0
+              ? midCol
+              : fineCol;
       positions.push(x, y, 0, x, y, dM);
       colors.push(c.r, c.g, c.b, c.r, c.g, c.b);
     }
     for (let gz = 0; gz <= rows; gz++) {
-      const z = gz * 0.5;
-      const c = gz === 0 || gz === rows ? borderCol : gz % 2 === 0 ? majorCol : minorCol;
+      const z = gz * gridCs;
+      const c =
+        gz === 0 || gz === rows
+          ? borderCol
+          : gz % 4 === 0
+            ? majorCol
+            : gz % 2 === 0
+              ? midCol
+              : fineCol;
       positions.push(0, y, z, wM, y, z);
       colors.push(c.r, c.g, c.b, c.r, c.g, c.b);
     }
@@ -1230,15 +1587,23 @@ export class BuildScene {
   private applyLevelAndWallVisibility(): void {
     const exploded = this.explodeTarget > 0.05;
     const lv = exploded ? 2 : this.viewOpts.activeLevel;
+    const hasRoofPreview = Boolean(
+      this.viewOpts.pendingRoofType &&
+        this.derived &&
+        this.viewOpts.pendingRoofType !== this.derived.project.systems.roofType,
+    );
     if (this.levelRoots) {
       this.levelRoots[0].visible = true;
       this.levelRoots[1].visible = lv >= 1;
     }
+    this.propLevelRoots[0].visible = true;
+    this.propLevelRoots[1].visible = lv >= 1;
     if (this.lt2StructuralGroup) {
       this.lt2StructuralGroup.visible = lv >= 1;
     }
     if (this.roofGroup) {
-      if (exploded || this.viewOpts.roofVisibility === "show") this.roofGroup.visible = true;
+      if (hasRoofPreview) this.roofGroup.visible = true;
+      else if (exploded || this.viewOpts.roofVisibility === "show") this.roofGroup.visible = true;
       else if (this.viewOpts.roofVisibility === "hide") this.roofGroup.visible = false;
       else this.roofGroup.visible = lv >= 2;
     }
@@ -1280,6 +1645,7 @@ export class BuildScene {
     }
 
     const hiddenWallIds = new Set<string>();
+    const hiddenWalls: WallCutawayRecord[] = [];
     for (const rec of this.wallCutawayRecords) {
       if (exploded || this.viewOpts.wallVisibility === "up") {
         rec.fullGroup.visible = true;
@@ -1290,6 +1656,7 @@ export class BuildScene {
         rec.cutawayGroup.visible = false;
         rec.downGroup.visible = true;
         hiddenWallIds.add(rec.wallId);
+        hiddenWalls.push(rec);
       } else {
         const isFront = isWallCutawayCandidate(
           rec.startX,
@@ -1300,11 +1667,47 @@ export class BuildScene {
           camPos.z,
           tgt.x,
           tgt.z,
+          rec.exterior,
         );
         rec.fullGroup.visible = !isFront;
         rec.cutawayGroup.visible = isFront;
         rec.downGroup.visible = false;
-        if (isFront) hiddenWallIds.add(rec.wallId);
+        if (isFront) {
+          hiddenWallIds.add(rec.wallId);
+          hiddenWalls.push(rec);
+        }
+      }
+    }
+
+    // Keep structural column heights synced with Cutaway / Down mode (BM-04)
+    for (const colRec of this.columnCutawayRecords) {
+      if (exploded || this.viewOpts.wallVisibility === "up") {
+        colRec.fullObj.visible = true;
+        colRec.cutawayObj.visible = false;
+        colRec.downObj.visible = false;
+      } else if (this.viewOpts.wallVisibility === "down") {
+        colRec.fullObj.visible = false;
+        colRec.cutawayObj.visible = false;
+        colRec.downObj.visible = true;
+      } else {
+        let onCutawayWall = false;
+        for (const hw of hiddenWalls) {
+          if (hw.levelIndex !== colRec.levelIndex) continue;
+          const wdx = hw.endX - hw.startX;
+          const wdz = hw.endZ - hw.startZ;
+          const wLenSq = wdx * wdx + wdz * wdz;
+          if (wLenSq < 1e-6) continue;
+          const t = Math.max(0, Math.min(1, ((colRec.x - hw.startX) * wdx + (colRec.z - hw.startZ) * wdz) / wLenSq));
+          const px = hw.startX + wdx * t;
+          const pz = hw.startZ + wdz * t;
+          if (Math.hypot(colRec.x - px, colRec.z - pz) < 0.35) {
+            onCutawayWall = true;
+            break;
+          }
+        }
+        colRec.fullObj.visible = !onCutawayWall;
+        colRec.cutawayObj.visible = onCutawayWall;
+        colRec.downObj.visible = false;
       }
     }
 
@@ -1336,6 +1739,10 @@ export class BuildScene {
   }
 
   private updateSelectionRing(derived: DerivedProjectModel, sel: SelectionTarget): void {
+    this.pushPullGizmoGroup.visible = false;
+    if (this.roomOutlineLoop) {
+      this.roomOutlineLoop.visible = false;
+    }
     if (!sel || sel.kind === "part") {
       this.selectedRing.visible = false;
       return;
@@ -1345,7 +1752,10 @@ export class BuildScene {
       this.selectedRing.visible = false;
       return;
     }
-    const baseY = sel.levelIndex === 0 ? derived.project.site.peil.floor1PeilM : derived.project.site.peil.floor1PeilM + (derived.project.levels[0]?.height ?? 3.6);
+    const baseY =
+      sel.levelIndex === 0
+        ? derived.project.site.peil.floor1PeilM
+        : derived.project.site.peil.floor1PeilM + (derived.project.levels[0]?.height ?? 3.6);
     let pt: { x: number; y: number; z: number } | null = null;
     if (sel.kind === "furniture") {
       const f = lv.furniture.find((x) => x.id === sel.id);
@@ -1358,7 +1768,54 @@ export class BuildScene {
       if (l) pt = { x: l.position.x, y: baseY + 0.06, z: l.position.z };
     } else if (sel.kind === "wall") {
       const w = lv.walls.find((x) => x.id === sel.id);
-      if (w) pt = { x: (w.start.x + w.end.x) * 0.5, y: baseY + 0.05, z: (w.start.z + w.end.z) * 0.5 };
+      if (w) {
+        const midX = (w.start.x + w.end.x) * 0.5;
+        const midZ = (w.start.z + w.end.z) * 0.5;
+        pt = { x: midX, y: baseY + 0.05, z: midZ };
+        const dx = w.end.x - w.start.x;
+        const dz = w.end.z - w.start.z;
+        const len = Math.hypot(dx, dz);
+        if (len >= 0.25 && this.viewOpts.activeTool === "select") {
+          const nx = -dz / len;
+          const nz = dx / len;
+          this.pushPullGizmoGroup.position.set(midX, baseY + Math.min(1.05, Math.max(0.45, w.height * 0.42)), midZ);
+          this.pushPullGizmoGroup.rotation.y = Math.atan2(nx, nz);
+          this.pushPullGizmoGroup.visible = true;
+        }
+      }
+    } else if (sel.kind === "opening") {
+      const w = lv.walls.find((x) => x.id === sel.wallId);
+      const op = w?.openings.find((o) => o.id === sel.id);
+      if (w && op) {
+        const dx = w.end.x - w.start.x;
+        const dz = w.end.z - w.start.z;
+        const len = Math.hypot(dx, dz) || 1;
+        pt = {
+          x: w.start.x + (dx / len) * op.offset,
+          y: baseY + op.sill + 0.05,
+          z: w.start.z + (dz / len) * op.offset,
+        };
+      }
+    } else if (sel.kind === "room") {
+      const r = lv.rooms.find((x) => x.id === sel.id);
+      if (r && r.polygon.length >= 3) {
+        const pts = r.polygon.map((p) => new THREE.Vector3(p.x, baseY + 0.045, p.z));
+        if (!this.roomOutlineLoop) {
+          const g = new THREE.BufferGeometry().setFromPoints(pts);
+          const m = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.92, depthTest: false });
+          this.roomOutlineLoop = new THREE.LineLoop(g, m);
+          this.roomOutlineLoop.renderOrder = 997;
+          this.overlayGroup.add(this.roomOutlineLoop);
+        } else {
+          this.roomOutlineLoop.geometry.dispose();
+          this.roomOutlineLoop.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+        }
+        this.roomOutlineLoop.visible = true;
+      }
+      this.selectedRing.visible = false;
+      return;
+    } else if (sel.kind === "floorTile") {
+      pt = { x: (sel.gx + 0.5) * 0.5, y: baseY + 0.035, z: (sel.gz + 0.5) * 0.5 };
     } else if (sel.kind === "stair") {
       const st = lv.stairs.find((x) => x.id === sel.id);
       if (st) pt = { x: (st.start.x + st.end.x) * 0.5, y: baseY + 0.08, z: (st.start.z + st.end.z) * 0.5 };
@@ -1493,12 +1950,24 @@ export class BuildScene {
     }
   }
 
-  private raycastHit(e: PointerEvent, ignoreParts = true): { sel: NonNullable<SelectionTarget>; label: string; obj: THREE.Object3D } | null {
+  private raycastHit(
+    e: PointerEvent,
+    ignoreParts = true,
+  ): {
+    sel: NonNullable<SelectionTarget>;
+    label: string;
+    obj: THREE.Object3D;
+    point: THREE.Vector3;
+    faceNormalWorld?: THREE.Vector3;
+  } | null {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
-    const hits = this.raycaster.intersectObjects(this.houseContainer.children, true);
+    const hits = this.raycaster.intersectObjects([this.propsContainer, this.houseContainer], true);
+    const project = this.derived?.project;
+    const lt2BaseY = project ? project.site.peil.floor1PeilM + (project.levels[0]?.height ?? 3.6) - 0.12 : 4.0;
+
     for (const h of hits) {
       let cur: THREE.Object3D | null = h.object;
       let vis = true;
@@ -1510,15 +1979,330 @@ export class BuildScene {
         cur = cur.parent;
       }
       if (!vis) continue;
+
+      const faceNormalWorld = h.face
+        ? new THREE.Vector3().copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize()
+        : undefined;
+
+      const customTileMeta = h.object.userData?.customTileMeta as { levelIndex: 0 | 1; materialId: string } | undefined;
+      if (customTileMeta) {
+        const gx = Math.floor(h.point.x / 0.5);
+        const gz = Math.floor(h.point.z / 0.5);
+        return {
+          sel: {
+            kind: "floorTile",
+            id: `${customTileMeta.levelIndex}:${gx}:${gz}`,
+            levelIndex: customTileMeta.levelIndex,
+            gx,
+            gz,
+          },
+          label: `Ubin Lantai (${gx}, ${gz})`,
+          obj: h.object,
+          point: h.point.clone(),
+          faceNormalWorld,
+        };
+      }
+
       cur = h.object;
       while (cur) {
         if (cur.userData?.sel) {
           const sel = cur.userData.sel as NonNullable<SelectionTarget>;
-          if (ignoreParts && sel.kind === "part") break;
-          return { sel, label: String(cur.userData.label ?? "Elemen"), obj: cur };
+          if (sel.kind === "part" && ignoreParts) {
+            if (sel.id === "lantai" && project) {
+              const hitLv = (h.point.y >= lt2BaseY ? 1 : 0) as 0 | 1;
+              const gx = Math.floor(h.point.x / 0.5);
+              const gz = Math.floor(h.point.z / 0.5);
+              const hasTile = (project.buildExtras?.floorTiles ?? []).some(
+                (ct) => ct.levelIndex === hitLv && ct.gx === gx && ct.gz === gz,
+              );
+              if (hasTile) {
+                return {
+                  sel: { kind: "floorTile", id: `${hitLv}:${gx}:${gz}`, levelIndex: hitLv, gx, gz },
+                  label: `Ubin Lantai (${gx}, ${gz})`,
+                  obj: cur,
+                  point: h.point.clone(),
+                  faceNormalWorld,
+                };
+              }
+              const rm = findRoomAtPoint(project.levels[hitLv]?.rooms ?? [], h.point.x, h.point.z);
+              if (rm) {
+                return {
+                  sel: { kind: "room", id: rm.id, levelIndex: hitLv },
+                  label: `Ruangan ${rm.name}`,
+                  obj: cur,
+                  point: h.point.clone(),
+                  faceNormalWorld,
+                };
+              }
+            }
+            break;
+          }
+          return { sel, label: String(cur.userData.label ?? "Elemen"), obj: cur, point: h.point.clone(), faceNormalWorld };
         }
         cur = cur.parent;
       }
+    }
+    return null;
+  }
+
+  private getBlockedPolysForLevel(lvIdx: 0 | 1): Vec2[][] {
+    const project = this.derived?.project;
+    if (!project) return [];
+    const polys: Vec2[][] = [];
+    if (lvIdx === 1) {
+      for (const sl of project.levels[1]?.slabs ?? []) {
+        if (sl.isVoid && sl.polygon.length >= 3) polys.push(sl.polygon);
+      }
+    } else {
+      for (const pl of project.buildExtras?.pools ?? []) {
+        const x1 = Math.min(pl.gx1, pl.gx2) * 0.5;
+        const x2 = (Math.max(pl.gx1, pl.gx2) + 1) * 0.5;
+        const z1 = Math.min(pl.gz1, pl.gz2) * 0.5;
+        const z2 = (Math.max(pl.gz1, pl.gz2) + 1) * 0.5;
+        polys.push([
+          { x: x1, z: z1 },
+          { x: x2, z: z1 },
+          { x: x2, z: z2 },
+          { x: x1, z: z2 },
+        ]);
+      }
+    }
+    return polys;
+  }
+
+  private isCellBlocked(lvIdx: 0 | 1, gx: number, gz: number): boolean {
+    const blocked = this.getBlockedPolysForLevel(lvIdx);
+    if (blocked.length === 0) return false;
+    const pt = { x: (gx + 0.5) * 0.5, z: (gz + 0.5) * 0.5 };
+    return blocked.some((poly) => pointInPolygon(pt, poly));
+  }
+
+  private getIndoorProtectedPolys(): Vec2[][] {
+    const lv0 = this.derived?.project.levels[0];
+    if (!lv0) return [];
+    return lv0.rooms.filter((r) => isIndoorRoomProgram(r.program) && r.polygon.length >= 3).map((r) => r.polygon);
+  }
+
+  private updateLiveTerrainMesh(heights: number[]): void {
+    const project = this.derived?.project;
+    const cols = Math.round((project?.site.width ?? 5) / 0.5);
+    const rows = Math.round((project?.site.depth ?? 17) / 0.5);
+    let targetMesh: THREE.Mesh | null = null;
+    this.houseContainer.traverse((o) => {
+      if (o instanceof THREE.Mesh && o.userData?.isTerrainMesh) {
+        targetMesh = o;
+      }
+    });
+    if (!targetMesh) {
+      if (!this.liveTerrainTempMesh) {
+        const tGeo = new THREE.PlaneGeometry((project?.site.width ?? 5) + 0.4, (project?.site.depth ?? 17) + 0.4, cols, rows);
+        tGeo.rotateX(-Math.PI / 2);
+        tGeo.translate((project?.site.width ?? 5) * 0.5, 0.02, (project?.site.depth ?? 17) * 0.5);
+        this.liveTerrainTempMesh = new THREE.Mesh(tGeo, this.palette.grass);
+        this.liveTerrainTempMesh.receiveShadow = true;
+        this.overlayGroup.add(this.liveTerrainTempMesh);
+      }
+      targetMesh = this.liveTerrainTempMesh;
+    }
+    const pos = targetMesh.geometry.getAttribute("position");
+    const stride = cols + 1;
+    for (let iz = 0; iz <= rows; iz++) {
+      for (let ix = 0; ix <= cols; ix++) {
+        const idx = iz * stride + ix;
+        if (idx < pos.count) {
+          pos.setY(idx, 0.02 + (heights[idx] ?? 0));
+        }
+      }
+    }
+    pos.needsUpdate = true;
+    targetMesh.geometry.computeVertexNormals();
+  }
+
+  private getOrCreatePreviewGhost(item: BuildCatalogEntry, valid: boolean, swatchHex: string | null): THREE.Group {
+    const hex = swatchHex ?? item.swatchHex;
+    const key = `${item.id}:${hex}`;
+    let entry = this.ghostCache.get(key);
+    if (!entry) {
+      const group = new THREE.Group();
+      group.userData.isCachedGhost = true;
+      const disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
+      const tintMeshes: THREE.Mesh[] = [];
+      let inner: THREE.Object3D;
+      const sz = item.sizeM ?? [0.6, 0.6, 0.6];
+      if (item.toolId === "furniture") {
+        inner = buildFurnitureMesh(
+          {
+            id: "__ghost__",
+            catalogId: item.materialId ?? "sofa_l",
+            name: item.name,
+            category: item.furnitureCategory ?? "seating",
+            position: { x: 0, y: 0, z: 0 },
+            size: { x: sz[0], y: sz[1], z: sz[2] },
+            rotationY: 0,
+            colorHex: hex,
+            accentHex: item.accentHex,
+          },
+          this.palette,
+          disposables,
+        );
+      } else if (item.toolId === "hvac" && item.hvacMeta) {
+        inner = buildHvacMesh(
+          {
+            id: "__ghost__",
+            name: item.name,
+            type: item.hvacMeta.type,
+            position: { x: 0, y: 0, z: 0 },
+            rotationY: 0,
+            pkRating: item.hvacMeta.pkRating,
+            flowRateM3h: item.hvacMeta.flowRateM3h,
+            coolingCapacityW: item.hvacMeta.coolingCapacityW,
+            powerW: item.hvacMeta.powerW,
+            setpointC: item.hvacMeta.setpointC,
+            speedLevel: 2,
+            on: true,
+          },
+          this.palette,
+          disposables,
+          [],
+        );
+      } else if (item.toolId === "light" && item.lightMeta) {
+        inner = buildLightFixtureMesh(
+          {
+            id: "__ghost__",
+            name: item.name,
+            type: item.lightMeta.type,
+            position: { x: 0, y: 0, z: 0 },
+            rotationY: 0,
+            lumens: item.lightMeta.lumens,
+            colorTempK: item.lightMeta.colorTempK,
+            beamAngleDeg: item.lightMeta.beamAngleDeg,
+            dimmer: 1,
+            on: true,
+          },
+          this.palette,
+          disposables,
+        );
+      } else {
+        const g = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
+        disposables.push(g);
+        inner = new THREE.Mesh(g, this.ghostValidMat);
+      }
+      inner.position.set(0, 0, 0);
+      inner.rotation.set(0, 0, 0);
+      inner.traverse((o) => {
+        if (o instanceof THREE.Mesh) {
+          if (o.geometry.type === "PlaneGeometry" && o.rotation.x < -1.4) {
+            o.visible = false;
+            return;
+          }
+          o.castShadow = false;
+          o.receiveShadow = false;
+          tintMeshes.push(o);
+        }
+      });
+      const arrowGeo = new THREE.ConeGeometry(0.1, 0.24, 10);
+      arrowGeo.rotateX(Math.PI / 2);
+      arrowGeo.translate(0, 0.08, sz[2] * 0.5 + 0.16);
+      disposables.push(arrowGeo);
+      const arrowMesh = new THREE.Mesh(arrowGeo, this.ghostValidMat);
+      tintMeshes.push(arrowMesh);
+
+      group.add(inner, arrowMesh);
+      entry = { group, tintMeshes, disposables };
+      this.ghostCache.set(key, entry);
+    }
+    const mat = valid ? this.ghostValidMat : this.ghostInvalidMat;
+    for (const m of entry.tintMeshes) {
+      m.material = mat;
+    }
+    return entry.group;
+  }
+
+  private resolveWallPaintTarget(
+    hitRes: NonNullable<ReturnType<BuildScene["raycastHit"]>>,
+    shiftHeld: boolean,
+  ): {
+    wall: Wall;
+    lvIdx: 0 | 1;
+    sideKey: "frontMaterialId" | "backMaterialId";
+    room: Room | null;
+  } | null {
+    if (!this.derived || hitRes.sel.kind !== "wall") return null;
+    const lvIdx = hitRes.sel.levelIndex as 0 | 1;
+    const lv = this.derived.project.levels[lvIdx];
+    const w = lv?.walls.find((x) => x.id === hitRes.sel.id);
+    if (!lv || !w) return null;
+    const dx = w.end.x - w.start.x;
+    const dz = w.end.z - w.start.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const rnx = -dz / len;
+    const rnz = dx / len;
+    let dot = 1;
+    if (hitRes.faceNormalWorld) {
+      dot = hitRes.faceNormalWorld.x * rnx + hitRes.faceNormalWorld.z * rnz;
+    } else {
+      const camPos = this.cameraCtrl.activeCamera.position;
+      dot = (camPos.x - hitRes.point.x) * rnx + (camPos.z - hitRes.point.z) * rnz;
+    }
+    const sideKey: "frontMaterialId" | "backMaterialId" = dot >= 0 ? "frontMaterialId" : "backMaterialId";
+    const sgn = dot >= 0 ? 1 : -1;
+    let room: Room | null = null;
+    if (this.viewOpts.wallPaintMode === "room" || shiftHeld) {
+      room =
+        findRoomAtPoint(lv.rooms, hitRes.point.x + rnx * sgn * 0.35, hitRes.point.z + rnz * sgn * 0.35) ??
+        findRoomAtPoint(lv.rooms, (w.start.x + w.end.x) * 0.5 + rnx * sgn * 0.35, (w.start.z + w.end.z) * 0.5 + rnz * sgn * 0.35);
+    }
+    return { wall: w, lvIdx, sideKey, room };
+  }
+
+  private resolveEyedropper(hitRes: NonNullable<ReturnType<BuildScene["raycastHit"]>>): { catalogId: string; swatchHex?: string | null } | null {
+    if (!this.derived) return null;
+    const project = this.derived.project;
+    const s = hitRes.sel;
+    if (s.kind === "furniture") {
+      const f = project.levels[s.levelIndex]?.furniture.find((x) => x.id === s.id);
+      if (f) return { catalogId: `furn_${f.catalogId}`, swatchHex: f.colorHex };
+    } else if (s.kind === "hvac") {
+      const h = project.levels[s.levelIndex]?.hvac.find((x) => x.id === s.id);
+      if (h) {
+        const cands = UNIFIED_BUILD_CATALOG.filter((c) => c.hvacMeta?.type === h.type);
+        cands.sort((a, b) => Math.abs((a.hvacMeta?.coolingCapacityW ?? 0) - h.coolingCapacityW) - Math.abs((b.hvacMeta?.coolingCapacityW ?? 0) - h.coolingCapacityW));
+        if (cands[0]) return { catalogId: cands[0].id };
+      }
+    } else if (s.kind === "light") {
+      const l = project.levels[s.levelIndex]?.lights.find((x) => x.id === s.id);
+      if (l) {
+        const cands = UNIFIED_BUILD_CATALOG.filter((c) => c.lightMeta?.type === l.type);
+        cands.sort((a, b) => Math.abs((a.lightMeta?.lumens ?? 0) - l.lumens) - Math.abs((b.lightMeta?.lumens ?? 0) - l.lumens));
+        if (cands[0]) return { catalogId: cands[0].id };
+      }
+    } else if (s.kind === "wall") {
+      const w = project.levels[s.levelIndex]?.walls.find((x) => x.id === s.id);
+      if (w?.kind === "fence") return { catalogId: "tool_fence" };
+      const ptTarget = this.resolveWallPaintTarget(hitRes, false);
+      const sideMatId = ptTarget ? w?.[ptTarget.sideKey] ?? w?.materialId : w?.materialId;
+      const match = UNIFIED_BUILD_CATALOG.find((c) => c.toolId === "wall_paint" && c.materialId === sideMatId);
+      return { catalogId: match?.id ?? "tool_wall_straight" };
+    } else if (s.kind === "opening") {
+      const w = project.levels[s.levelIndex]?.walls.find((x) => x.id === s.wallId);
+      const op = w?.openings.find((o) => o.id === s.id);
+      if (op) {
+        const cands = UNIFIED_BUILD_CATALOG.filter((c) => c.toolId === "opening" && c.openingKind === op.kind);
+        cands.sort((a, b) => Math.abs((a.sizeM?.[0] ?? 0.9) - op.width) - Math.abs((b.sizeM?.[0] ?? 0.9) - op.width));
+        if (cands[0]) return { catalogId: cands[0].id };
+      }
+    } else if (s.kind === "floorTile") {
+      const tile = (project.buildExtras?.floorTiles ?? []).find((t) => t.levelIndex === s.levelIndex && t.gx === s.gx && t.gz === s.gz);
+      const match = UNIFIED_BUILD_CATALOG.find((c) => c.toolId === "floor_tile" && c.materialId === tile?.materialId);
+      if (match) return { catalogId: match.id };
+    } else if (s.kind === "room") {
+      const rm = project.levels[s.levelIndex]?.rooms.find((r) => r.id === s.id);
+      const match = UNIFIED_BUILD_CATALOG.find((c) => c.toolId === "floor_tile" && c.materialId === rm?.floorMaterialId);
+      if (match) return { catalogId: match.id };
+    } else if (s.kind === "stair") {
+      return { catalogId: "stair_straight" };
+    } else if (s.kind === "pool") {
+      return { catalogId: "outdoor_pool" };
     }
     return null;
   }
@@ -1550,15 +2334,30 @@ export class BuildScene {
     wallOffset: number,
     defaultElev: number,
     excludeEntityId?: string,
-  ): { x: number; y: number; z: number; rotationY?: number; valid: boolean; surfaceLabel: string } {
-    if (!this.derived) return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Luar area" };
+  ): {
+    x: number;
+    y: number;
+    z: number;
+    rotationY?: number;
+    valid: boolean;
+    surfaceLabel: string;
+    hostFurniture?: FurnitureItem;
+    wallSnap?: ReturnType<typeof snapOpeningToProjectWalls>;
+    altBypass: boolean;
+  } {
+    const altBypass = e.altKey || this.altHeld;
+    if (!this.derived) {
+      return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Luar area", altBypass };
+    }
     const project = this.derived.project;
     const baseY =
       lvIdx === 0
         ? project.site.peil.floor1PeilM
         : project.site.peil.floor1PeilM + (project.levels[0]?.height ?? 3.6);
     const lv = project.levels[lvIdx];
-    if (!lv) return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Lantai tidak tersedia" };
+    if (!lv) {
+      return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Lantai tidak tersedia", altBypass };
+    }
 
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
@@ -1568,23 +2367,28 @@ export class BuildScene {
 
     const targets: THREE.Object3D[] = [];
     if (this.levelRoots) targets.push(this.levelRoots[lvIdx]);
+    if (mountKind === "surface") targets.push(this.propLevelRoots[lvIdx]);
     if (lvIdx === 1 && this.lt2StructuralGroup && mountKind === "surface") targets.push(this.lt2StructuralGroup);
 
     const hits = targets.length > 0 ? this.raycaster.intersectObjects(targets, true) : [];
 
-    const isVisibleAndNotExcluded = (obj: THREE.Object3D): { ok: boolean; selKind?: string } => {
+    const isVisibleAndNotExcluded = (obj: THREE.Object3D): { ok: boolean; selKind?: string; selId?: string } => {
       let cur: THREE.Object3D | null = obj;
       let selKind: string | undefined;
+      let selId: string | undefined;
       while (cur) {
         if (!cur.visible) return { ok: false };
         if (cur.userData?.sel) {
           const s = cur.userData.sel as NonNullable<SelectionTarget>;
           if (excludeEntityId && "id" in s && s.id === excludeEntityId) return { ok: false };
-          if (!selKind) selKind = s.kind;
+          if (!selKind) {
+            selKind = s.kind;
+            if ("id" in s) selId = s.id;
+          }
         }
         cur = cur.parent;
       }
-      return { ok: true, selKind };
+      return { ok: true, selKind, selId };
     };
 
     if (mountKind === "wall") {
@@ -1614,7 +2418,8 @@ export class BuildScene {
           const py = rawLocalY >= 0.35 && rawLocalY <= lv.height - 0.15 ? rawLocalY : defaultElev;
           const rotY = Math.atan2(nx, nz);
           const inBounds = px >= 0.02 && px <= project.site.width - 0.02 && pz >= 0.02 && pz <= project.site.depth - 0.02;
-          return { x: px, y: py, z: pz, rotationY: rotY, valid: inBounds, surfaceLabel: "Permukaan Dinding" };
+          const wallSnap = snapOpeningToProjectWalls(lv.walls, h.point.x, h.point.z, 0.45);
+          return { x: px, y: py, z: pz, rotationY: rotY, valid: inBounds, surfaceLabel: "Permukaan Dinding", wallSnap, altBypass };
         }
       }
 
@@ -1641,6 +2446,8 @@ export class BuildScene {
           rotationY: Math.atan2(nx, nz),
           valid: true,
           surfaceLabel: `Dinding (${w.name})`,
+          wallSnap,
+          altBypass,
         };
       }
       return {
@@ -1649,8 +2456,11 @@ export class BuildScene {
         z: this.lastWorldPos.z,
         valid: false,
         surfaceLabel: "Arahkan ke permukaan dinding",
+        altBypass,
       };
     }
+
+    const snapCoord = (v: number) => (altBypass ? v : Math.round(v * 20) / 20);
 
     if (mountKind === "surface") {
       for (const h of hits) {
@@ -1659,19 +2469,23 @@ export class BuildScene {
         if (check.selKind === "wall") continue;
         this._tmpNorm.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
         if (this._tmpNorm.y < 0.65) continue;
-        const px = e.shiftKey ? Math.round(h.point.x * 2) / 2 : h.point.x;
-        const pz = e.shiftKey ? Math.round(h.point.z * 2) / 2 : h.point.z;
         const rawLocalY = h.point.y - baseY;
+        const hostFurniture =
+          check.selKind === "furniture" && check.selId && rawLocalY >= 0.08
+            ? lv.furniture.find((f) => f.id === check.selId)
+            : undefined;
+        const px = snapCoord(h.point.x);
+        const pz = snapCoord(h.point.z);
         const py = rawLocalY < 0.08 ? 0 : Math.min(lv.height - 0.3, rawLocalY);
         const inBounds = px >= 0.08 && px <= project.site.width - 0.08 && pz >= 0.08 && pz <= project.site.depth - 0.08;
-        const label = check.selKind === "furniture" ? "Atas Furnitur" : "Permukaan Lantai";
-        return { x: px, y: py, z: pz, valid: inBounds, surfaceLabel: label };
+        const label = hostFurniture ? `Atas ${hostFurniture.name}` : "Permukaan Lantai";
+        return { x: px, y: py, z: pz, valid: inBounds, surfaceLabel: label, hostFurniture, altBypass };
       }
     }
 
-    // Fallback or ceiling mount: smooth continuous XZ on active floor plane
-    const px = e.shiftKey ? Math.round(this.lastWorldPos.x * 2) / 2 : this.lastWorldPos.x;
-    const pz = e.shiftKey ? Math.round(this.lastWorldPos.z * 2) / 2 : this.lastWorldPos.z;
+    // Fallback or ceiling mount: default 0.5m grid snap unless Alt held
+    const px = snapCoord(this.lastWorldPos.x);
+    const pz = snapCoord(this.lastWorldPos.z);
     const inBounds = px >= 0.08 && px <= project.site.width - 0.08 && pz >= 0.08 && pz <= project.site.depth - 0.08;
     return {
       x: px,
@@ -1679,6 +2493,7 @@ export class BuildScene {
       z: pz,
       valid: inBounds,
       surfaceLabel: mountKind === "ceiling" ? "Plafon Ruangan" : "Permukaan Lantai",
+      altBypass,
     };
   }
 
@@ -1701,6 +2516,7 @@ export class BuildScene {
       tool === "wall_straight" ||
       tool === "wall_room" ||
       tool === "wall_diagonal" ||
+      tool === "wall_paint" ||
       tool === "fence" ||
       tool === "floor_tile" ||
       tool === "opening" ||
@@ -1714,30 +2530,98 @@ export class BuildScene {
       return;
     }
 
+    if (tool === "sledgehammer" && this.sledgeDragStart) {
+      const wx = this.lastWorldPos.x;
+      const wz = this.lastWorldPos.z;
+      const minX = Math.max(0, Math.min(this.sledgeDragStart.x, wx));
+      const maxX = Math.min(project.site.width, Math.max(this.sledgeDragStart.x, wx));
+      const minZ = Math.max(0, Math.min(this.sledgeDragStart.z, wz));
+      const maxZ = Math.min(project.site.depth, Math.max(this.sledgeDragStart.z, wz));
+      const wM = Math.max(0.25, maxX - minX);
+      const dM = Math.max(0.25, maxZ - minZ);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.25, dM), this.invalidMat);
+      box.position.set((minX + maxX) * 0.5, baseY + 0.14, (minZ + maxZ) * 0.5);
+      this.previewGroup.add(box);
+      const tileCount = (project.buildExtras?.floorTiles ?? []).filter((t) => {
+        const cx = (t.gx + 0.5) * cs;
+        const cz = (t.gz + 0.5) * cs;
+        return t.levelIndex === lvIdx && cx >= minX && cx <= maxX && cz >= minZ && cz <= maxZ;
+      }).length;
+      const wallCount = lv.walls.filter((w) => {
+        const mx = (w.start.x + w.end.x) * 0.5;
+        const mz = (w.start.z + w.end.z) * 0.5;
+        return mx >= minX && mx <= maxX && mz >= minZ && mz <= maxZ;
+      }).length;
+      this.actions.onPreviewHud({
+        label: `Hapus Area: ${tileCount} ubin · ${wallCount} dinding`,
+        valid: tileCount + wallCount > 0,
+      });
+      return;
+    }
+
     if (tool === "select" || tool === "sledgehammer" || tool === "eyedropper" || tool === "wall_paint") {
       const hitRes = this.raycastHit(e, true);
-      if (hitRes && (tool !== "wall_paint" || hitRes.sel.kind === "wall")) {
-        this._hoverBox.setFromObject(hitRes.obj);
-        this._hoverBox.getSize(this._hoverSize);
-        this._hoverBox.getCenter(this._hoverCenter);
-        this.hoverHighlightMesh.material =
-          tool === "sledgehammer" ? this.invalidMat : tool === "wall_paint" ? this.validMat : this.cyanMat;
-        this.hoverHighlightMesh.scale.set(
-          Math.max(0.18, this._hoverSize.x + 0.06),
-          Math.max(0.18, this._hoverSize.y + 0.06),
-          Math.max(0.18, this._hoverSize.z + 0.06),
-        );
-        this.hoverHighlightMesh.position.copy(this._hoverCenter);
-        this.hoverHighlightMesh.visible = true;
+      if (tool === "wall_paint") {
+        if (hitRes?.sel.kind === "wall") {
+          const target = this.resolveWallPaintTarget(hitRes, e.shiftKey);
+          this._hoverBox.setFromObject(hitRes.obj);
+          this._hoverBox.getSize(this._hoverSize);
+          this._hoverBox.getCenter(this._hoverCenter);
+          this.hoverHighlightMesh.material = this.validMat;
+          this.hoverHighlightMesh.scale.set(
+            Math.max(0.18, this._hoverSize.x + 0.06),
+            Math.max(0.18, this._hoverSize.y + 0.06),
+            Math.max(0.18, this._hoverSize.z + 0.06),
+          );
+          this.hoverHighlightMesh.position.copy(this._hoverCenter);
+          this.hoverHighlightMesh.visible = true;
+          const sideText = target?.room
+            ? `1 Ruangan (${target.room.name})`
+            : target?.sideKey === "frontMaterialId"
+              ? "Sisi Depan/Luar"
+              : "Sisi Belakang/Dalam";
+          this.actions.onPreviewHud({ label: `Cat ${sideText}: ${item.name}`, valid: true });
+        } else {
+          this.actions.onPreviewHud({ label: "Arahkan ke permukaan dinding untuk mengecat", valid: false });
+        }
+        return;
+      }
+
+      if (hitRes) {
+        if (hitRes.sel.kind === "room") {
+          const rm = lv.rooms.find((r) => r.id === hitRes.sel.id);
+          if (rm && rm.polygon.length >= 3) {
+            const xs = rm.polygon.map((p) => p.x);
+            const zs = rm.polygon.map((p) => p.z);
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const minZ = Math.min(...zs);
+            const maxZ = Math.max(...zs);
+            this.hoverHighlightMesh.material = tool === "sledgehammer" ? this.invalidMat : this.cyanMat;
+            this.hoverHighlightMesh.scale.set(Math.max(0.4, maxX - minX), 0.12, Math.max(0.4, maxZ - minZ));
+            this.hoverHighlightMesh.position.set((minX + maxX) * 0.5, baseY + 0.07, (minZ + maxZ) * 0.5);
+            this.hoverHighlightMesh.visible = true;
+          }
+        } else {
+          this._hoverBox.setFromObject(hitRes.obj);
+          this._hoverBox.getSize(this._hoverSize);
+          this._hoverBox.getCenter(this._hoverCenter);
+          this.hoverHighlightMesh.material = tool === "sledgehammer" ? this.invalidMat : this.cyanMat;
+          this.hoverHighlightMesh.scale.set(
+            Math.max(0.18, this._hoverSize.x + 0.06),
+            Math.max(0.18, this._hoverSize.y + 0.06),
+            Math.max(0.18, this._hoverSize.z + 0.06),
+          );
+          this.hoverHighlightMesh.position.copy(this._hoverCenter);
+          this.hoverHighlightMesh.visible = true;
+        }
         this.actions.onPreviewHud({
           label:
             tool === "sledgehammer"
               ? `Hapus: ${hitRes.label}`
-              : tool === "wall_paint"
-                ? `Cat: ${item.name}`
-                : tool === "eyedropper"
-                  ? `Salin: ${hitRes.label}`
-                  : `Pilih / Seret: ${hitRes.label}`,
+              : tool === "eyedropper"
+                ? `Salin: ${hitRes.label}`
+                : `Pilih / Seret: ${hitRes.label}`,
           valid: true,
         });
       } else {
@@ -1750,54 +2634,76 @@ export class BuildScene {
     const wz = this.lastWorldPos.z;
     const gx = Math.max(0, Math.min(cols - 1, Math.floor(wx / cs)));
     const gz = Math.max(0, Math.min(rows - 1, Math.floor(wz / cs)));
-    const curVert = worldToGridVertex(wx, wz, cs, cols, rows);
+    const wallCs = 0.25;
+    const wallCols = Math.round(project.site.width / wallCs);
+    const wallRows = Math.round(project.site.depth / wallCs);
+    const curWallVert = worldToGridVertex(wx, wz, wallCs, wallCols, wallRows);
 
     if ((tool === "wall_straight" || tool === "wall_diagonal" || tool === "fence") && this.dragStartVertex) {
-      const endV = snapWallEndpoint(this.dragStartVertex, curVert, cols, rows, tool === "wall_diagonal" || e.altKey || this.altHeld);
-      const dx = (endV.gx - this.dragStartVertex.gx) * cs;
-      const dz = (endV.gz - this.dragStartVertex.gz) * cs;
+      const endV = snapWallEndpoint(
+        this.dragStartVertex,
+        curWallVert,
+        wallCols,
+        wallRows,
+        tool === "wall_diagonal" || e.altKey || this.altHeld,
+      );
+      const dx = (endV.gx - this.dragStartVertex.gx) * wallCs;
+      const dz = (endV.gz - this.dragStartVertex.gz) * wallCs;
       const len = Math.hypot(dx, dz);
-      const valid = len >= 0.45;
+      const valid = len >= 0.24;
       if (valid) {
         const h = tool === "fence" ? 1.2 : lvH;
         const m = new THREE.Mesh(new THREE.BoxGeometry(len + 0.12, h, 0.14), this.validMat);
-        m.position.set(this.dragStartVertex.gx * cs + dx * 0.5, baseY + h * 0.5, this.dragStartVertex.gz * cs + dz * 0.5);
+        m.position.set(this.dragStartVertex.gx * wallCs + dx * 0.5, baseY + h * 0.5, this.dragStartVertex.gz * wallCs + dz * 0.5);
         m.rotation.y = -Math.atan2(dz, dx);
         this.previewGroup.add(m);
       }
-      this.actions.onPreviewHud({ label: `${tool === "fence" ? "Pagar" : "Dinding"} ${len.toFixed(1)} m`, valid });
+      this.actions.onPreviewHud({
+        label: valid ? `${tool === "fence" ? "Pagar" : "Dinding"} ${len.toFixed(2)} m` : "Minimal panjang 0.25 m",
+        valid,
+      });
       return;
     }
 
     if (tool === "wall_room" && this.dragStartVertex) {
-      const x1 = Math.min(this.dragStartVertex.gx, curVert.gx);
-      const x2 = Math.max(this.dragStartVertex.gx, curVert.gx);
-      const z1 = Math.min(this.dragStartVertex.gz, curVert.gz);
-      const z2 = Math.max(this.dragStartVertex.gz, curVert.gz);
-      const wM = (x2 - x1) * cs;
-      const dM = (z2 - z1) * cs;
+      const x1 = Math.min(this.dragStartVertex.gx, curWallVert.gx);
+      const x2 = Math.max(this.dragStartVertex.gx, curWallVert.gx);
+      const z1 = Math.min(this.dragStartVertex.gz, curWallVert.gz);
+      const z2 = Math.max(this.dragStartVertex.gz, curWallVert.gz);
+      const wM = (x2 - x1) * wallCs;
+      const dM = (z2 - z1) * wallCs;
       const valid = x2 - x1 >= 2 && z2 - z1 >= 2;
-      if (wM >= 0.5 && dM >= 0.5) {
+      if (wM >= 0.25 && dM >= 0.25) {
         const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.14, dM), valid ? this.validMat : this.invalidMat);
-        m.position.set((x1 + x2) * 0.5 * cs, baseY + 0.08, (z1 + z2) * 0.5 * cs);
+        m.position.set((x1 + x2) * 0.5 * wallCs, baseY + 0.08, (z1 + z2) * 0.5 * wallCs);
         this.previewGroup.add(m);
       }
-      this.actions.onPreviewHud({ label: `Ruangan ${wM.toFixed(1)} × ${dM.toFixed(1)} m`, valid });
+      this.actions.onPreviewHud({
+        label: valid ? `Ruangan ${wM.toFixed(2)} × ${dM.toFixed(2)} m` : "Ruangan minimal 0.50 × 0.50 m",
+        valid,
+      });
       return;
     }
 
     if (tool === "floor_tile") {
+      const blocked = this.getBlockedPolysForLevel(lvIdx);
       if (this.viewOpts.floorBrushMode === "fill") {
-        if (!this.lastWorldPos.inBounds) return;
-        const cells = computeProjectRoomFloodCells(lv.walls, cols, rows, cs, gx, gz);
+        if (!this.lastWorldPos.inBounds) {
+          this.actions.onPreviewHud({ label: "Di luar batas kavling", valid: false });
+          return;
+        }
+        const cells = computeProjectRoomFloodCells(lv.walls, cols, rows, cs, gx, gz, blocked);
         const geos = cells.slice(0, 500).map((c) => {
-          const g = new THREE.BoxGeometry(cs, 0.05, cs);
-          g.translate((c.gx + 0.5) * cs, baseY + 0.04, (c.gz + 0.5) * cs);
+          const g = new THREE.BoxGeometry(cs, 0.03, cs);
+          g.translate((c.gx + 0.5) * cs, baseY + 0.035, (c.gz + 0.5) * cs);
           return g;
         });
         const merged = mergeGeometryBatch(geos);
         if (merged) this.previewGroup.add(new THREE.Mesh(merged, this.validMat));
-        this.actions.onPreviewHud({ label: `Isi Ruangan: ${(cells.length * cs * cs).toFixed(1)} m²`, valid: cells.length > 0 });
+        this.actions.onPreviewHud({
+          label: cells.length > 0 ? `Isi Ruangan: ${(cells.length * cs * cs).toFixed(1)} m²` : "Area diblokir void / kolam",
+          valid: cells.length > 0,
+        });
         return;
       }
       if (this.viewOpts.floorBrushMode === "rect" && this.dragStartCell) {
@@ -1807,16 +2713,16 @@ export class BuildScene {
         const maxZ = Math.max(this.dragStartCell.gz, gz);
         const wM = (maxX - minX + 1) * cs;
         const dM = (maxZ - minZ + 1) * cs;
-        const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.05, dM), this.validMat);
-        m.position.set((minX + maxX + 1) * 0.5 * cs, baseY + 0.04, (minZ + maxZ + 1) * 0.5 * cs);
+        const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.03, dM), this.validMat);
+        m.position.set((minX + maxX + 1) * 0.5 * cs, baseY + 0.035, (minZ + maxZ + 1) * 0.5 * cs);
         this.previewGroup.add(m);
         this.actions.onPreviewHud({ label: `Lantai ${wM.toFixed(1)} × ${dM.toFixed(1)} m`, valid: true });
         return;
       }
       if (this.brushStrokeCells.size > 0) {
         const geos = [...this.brushStrokeCells.values()].map((c) => {
-          const g = new THREE.BoxGeometry(cs, 0.05, cs);
-          g.translate((c.gx + 0.5) * cs, baseY + 0.04, (c.gz + 0.5) * cs);
+          const g = new THREE.BoxGeometry(cs, 0.03, cs);
+          g.translate((c.gx + 0.5) * cs, baseY + 0.035, (c.gz + 0.5) * cs);
           return g;
         });
         const merged = mergeGeometryBatch(geos);
@@ -1834,18 +2740,39 @@ export class BuildScene {
         this.actions.onPreviewHud({ label: `Dekatkan ke dinding (${item.name})`, valid: false });
         return;
       }
+      const swing = this.viewOpts.placementFlipSwing ?? 1;
       const m = new THREE.Mesh(new THREE.BoxGeometry(ow, oh, 0.22), snap.valid ? this.validMat : this.invalidMat);
       m.position.set(snap.worldX, baseY + sill + oh * 0.5, snap.worldZ);
       m.rotation.y = snap.yaw;
+      const dirArrow = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.24, 10), snap.valid ? this.validMat : this.invalidMat);
+      dirArrow.rotation.x = swing >= 0 ? Math.PI / 2 : -Math.PI / 2;
+      dirArrow.position.set(0, -oh * 0.25, swing >= 0 ? 0.28 : -0.28);
+      m.add(dirArrow);
       this.previewGroup.add(m);
-      this.actions.onPreviewHud({ label: snap.valid ? `${item.name} (Klik Pasang)` : snap.reason ?? "Tidak muat", valid: snap.valid });
+      this.actions.onPreviewHud({
+        label: snap.valid ? `${item.name} (Klik Pasang · R flip arah)` : snap.reason ?? "Tidak muat",
+        valid: snap.valid,
+      });
       return;
     }
 
     if (tool === "stair") {
       const [wC, lC] = item.footprintCells ?? [2, 8];
-      const rq = this.viewOpts.placementRotationQuarter;
-      const res = validateProjectStairPlacement(lv.stairs, lvIdx, gx, gz, wC, lC, rq, cols, rows, cs);
+      const rq = (this.viewOpts.placementRotationStep % 4) as 0 | 1 | 2 | 3;
+      const res = validateProjectStairPlacement(
+        lv.stairs,
+        lvIdx,
+        gx,
+        gz,
+        wC,
+        lC,
+        rq,
+        cols,
+        rows,
+        cs,
+        lv.walls,
+        project.buildExtras?.pools ?? [],
+      );
       const fp = getStairSpan(wC, lC, rq);
       const m = new THREE.Mesh(new THREE.BoxGeometry(fp.spanCols * cs, 1.4, fp.spanRows * cs), res.valid ? this.validMat : this.invalidMat);
       m.position.set((gx + fp.spanCols * 0.5) * cs, baseY + 0.7, (gz + fp.spanRows * 0.5) * cs);
@@ -1861,11 +2788,17 @@ export class BuildScene {
       const maxZ = Math.max(this.dragStartCell.gz, gz);
       const wM = (maxX - minX + 1) * cs;
       const dM = (maxZ - minZ + 1) * cs;
-      const valid = this.viewOpts.activeLevel === 0 && maxX - minX >= 1 && maxZ - minZ >= 1;
-      const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.22, dM), valid ? this.cyanMat : this.invalidMat);
+      const check =
+        this.viewOpts.activeLevel === 0
+          ? validatePoolPlacement(project, minX, minZ, maxX, maxZ, cs)
+          : { valid: false, reason: "Kolam hanya untuk Lantai 1" };
+      const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.22, dM), check.valid ? this.cyanMat : this.invalidMat);
       m.position.set((minX + maxX + 1) * 0.5 * cs, baseY + 0.08, (minZ + maxZ + 1) * 0.5 * cs);
       this.previewGroup.add(m);
-      this.actions.onPreviewHud({ label: valid ? `Kolam ${wM.toFixed(1)} × ${dM.toFixed(1)} m` : "Kolam min 1×1m di Lantai 1", valid });
+      this.actions.onPreviewHud({
+        label: check.valid ? `Kolam ${wM.toFixed(1)} × ${dM.toFixed(1)} m` : check.reason ?? "Kolam tidak valid",
+        valid: check.valid,
+      });
       return;
     }
 
@@ -1880,7 +2813,7 @@ export class BuildScene {
     }
 
     if (tool === "furniture" || tool === "hvac" || tool === "light") {
-      const [sx, sy, sz] =
+      const [sx, , sz] =
         tool === "furniture"
           ? item.sizeM ?? [0.8, 0.8, 0.8]
           : tool === "hvac"
@@ -1896,19 +2829,34 @@ export class BuildScene {
       const defaultElev =
         tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
       const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
-      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
+      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationStep * (Math.PI / 4);
       const fpCheck = placed.valid
-        ? validateFootprintPlacement(project, lvIdx, placed.x, placed.z, sx, sz, rot, mountKind, placed.y)
+        ? validateObjectFootprint({
+            project,
+            levelIndex: lvIdx,
+            x: placed.x,
+            y: placed.y,
+            z: placed.z,
+            sizeX: sx,
+            sizeZ: sz,
+            rotationY: rot,
+            mountKind,
+            tool,
+            catalogId: item.materialId,
+            category: item.furnitureCategory,
+            hostFurniture: placed.hostFurniture,
+            wallSnap: placed.wallSnap,
+            altBypass: placed.altBypass,
+          })
         : { valid: false, reason: placed.surfaceLabel };
       const isValid = placed.valid && fpCheck.valid;
-      const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), isValid ? this.validMat : this.invalidMat);
-      const centerY = mountKind === "surface" ? baseY + placed.y + sy * 0.5 : baseY + placed.y;
-      m.position.set(placed.x, centerY, placed.z);
-      m.rotation.y = rot;
-      this.previewGroup.add(m);
+      const ghost = this.getOrCreatePreviewGhost(item, isValid, this.viewOpts.selectedSwatchHex ?? null);
+      ghost.position.set(placed.x, baseY + placed.y, placed.z);
+      ghost.rotation.y = rot;
+      this.previewGroup.add(ghost);
       this.actions.onPreviewHud({
         label: isValid
-          ? `${item.name} · ${placed.surfaceLabel} (R putar · Shift snap)`
+          ? `${item.name} (${this.viewOpts.placementRotationStep * 45}°) · ${placed.surfaceLabel} (R putar · Alt bebas · Shift+Klik beruntun)`
           : fpCheck.reason ?? placed.surfaceLabel,
         valid: isValid,
       });
@@ -1932,20 +2880,91 @@ export class BuildScene {
     }
 
     const cs = 0.5;
+    const fineCs = 0.25;
+    const fineCols = Math.round(this.derived.project.site.width / fineCs);
+    const fineRows = Math.round(this.derived.project.site.depth / fineCs);
+    const fineGx = Math.floor(hit.x / fineCs);
+    const fineGz = Math.floor(hit.z / fineCs);
+    const inBounds = fineGx >= 0 && fineGx < fineCols && fineGz >= 0 && fineGz < fineRows;
     const cols = Math.round(this.derived.project.site.width / cs);
     const rows = Math.round(this.derived.project.site.depth / cs);
     const gx = Math.floor(hit.x / cs);
     const gz = Math.floor(hit.z / cs);
-    const inBounds = gx >= 0 && gx < cols && gz >= 0 && gz < rows;
     this.lastWorldPos = { x: hit.x, z: hit.z, inBounds };
 
     const showGridHover = inBounds && this.viewOpts.activeTool !== "select" && !this.draggingEntity;
     this.hoverTileMesh.visible = showGridHover;
     if (showGridHover) {
-      this.hoverTileMesh.position.set((gx + 0.5) * cs, this.getActiveFloorY() + 0.03, (gz + 0.5) * cs);
+      this.hoverTileMesh.position.set((fineGx + 0.5) * fineCs, this.getActiveFloorY() + 0.03, (fineGz + 0.5) * fineCs);
     }
 
-    // Drag moving an already-selected Furniture / HVAC / Light item directly along surfaces (walls/floors/tables)
+    // 1. Live Wall Push-Pull Arrow Drag
+    if (this.pushPullDragState) {
+      const pp = this.pushPullDragState;
+      const rawProj = (hit.x - pp.startWorldX) * pp.nx + (hit.z - pp.startWorldZ) * pp.nz;
+      const snapped = e.altKey || this.altHeld ? Math.round(rawProj * 20) / 20 : Math.round(rawProj * 4) / 4;
+      pp.deltaM = snapped;
+      this.clearPreviewMeshes();
+      const prevBox = new THREE.Mesh(
+        new THREE.BoxGeometry(pp.len + pp.thickness, pp.height, pp.thickness),
+        Math.abs(snapped) >= 0.05 ? this.validMat : this.cyanMat,
+      );
+      prevBox.position.set(
+        pp.midX + pp.nx * snapped,
+        pp.baseY + pp.height * 0.5,
+        pp.midZ + pp.nz * snapped,
+      );
+      prevBox.rotation.y = -Math.atan2(pp.nx, -pp.nz) + Math.PI * 0.5;
+      // Align preview along wall tangent
+      const wObj = this.derived.project.levels[pp.lvIdx]?.walls.find((x) => x.id === pp.wallId);
+      if (wObj) {
+        prevBox.rotation.y = -Math.atan2(wObj.end.z - wObj.start.z, wObj.end.x - wObj.start.x);
+      }
+      this.previewGroup.add(prevBox);
+      this.actions.onPreviewHud({
+        label: `Geser Dinding ${snapped >= 0 ? "+" : ""}${snapped.toFixed(2)} m · Lepas untuk terapkan`,
+        valid: true,
+      });
+      return;
+    }
+
+    // 2. Live Opening Slide Drag along Wall (BM-08)
+    if (this.openingDragState) {
+      const od = this.openingDragState;
+      const lv = this.derived.project.levels[od.lvIdx];
+      if (lv) {
+        const baseY = this.getActiveFloorY();
+        const snap = snapOpeningToProjectWalls(lv.walls, hit.x, hit.z, od.width, od.opId, od.sill, od.height);
+        this.clearPreviewMeshes();
+        if (snap) {
+          od.nextWallId = snap.wall.id;
+          od.nextOffset = snap.offsetM;
+          od.nextWorldX = snap.worldX;
+          od.nextWorldZ = snap.worldZ;
+          od.nextYaw = snap.yaw;
+          od.valid = snap.valid;
+          od.reason = snap.reason;
+          const m = new THREE.Mesh(
+            new THREE.BoxGeometry(od.width, od.height, 0.24),
+            snap.valid ? this.validMat : this.invalidMat,
+          );
+          m.position.set(snap.worldX, baseY + od.sill + od.height * 0.5, snap.worldZ);
+          m.rotation.y = snap.yaw;
+          this.previewGroup.add(m);
+          this.actions.onPreviewHud({
+            label: snap.valid ? `Geser ${od.label} (Lepas simpan)` : snap.reason ?? "Tidak muat",
+            valid: snap.valid,
+          });
+        } else {
+          od.valid = false;
+          od.reason = "Arahkan ke dinding";
+          this.actions.onPreviewHud({ label: "Arahkan bukaan ke dinding terdekat", valid: false });
+        }
+      }
+      return;
+    }
+
+    // 3. Drag moving an already-selected Furniture / HVAC / Light item directly along surfaces (walls/floors/tables)
     if (this.draggingEntity) {
       const lotW = this.derived.project.site.width;
       const lotD = this.derived.project.site.depth;
@@ -1954,18 +2973,24 @@ export class BuildScene {
         const lvIdx = pending.lvIdx;
         const lv = this.derived.project.levels[lvIdx];
         if (!lv) return;
-        let nextPlaced: { x: number; y: number; z: number; rotationY?: number; valid: boolean; surfaceLabel: string } | null = null;
+        let nextPlaced: ReturnType<BuildScene["raycastSurfaceForPlacement"]> | null = null;
         let sx = 0.45;
         let sz = 0.45;
         let mountK: "wall" | "ceiling" | "surface" = "surface";
+        let fCat: FurnitureCategory | undefined;
+        let catId: string | undefined;
+        let toolKind: BuildToolId = "furniture";
         if (pending.kind === "furniture") {
           const curF = lv.furniture.find((x) => x.id === pending.id);
           if (curF) {
             sx = curF.size.x;
             sz = curF.size.z;
+            fCat = curF.category;
+            catId = curF.catalogId;
           }
           nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, "surface", 0, pending.origPos.y, pending.id);
         } else if (pending.kind === "hvac") {
+          toolKind = "hvac";
           const cur = lv.hvac.find((x) => x.id === pending.id);
           if (cur) {
             mountK = this.getMountKind("hvac", cur.type, undefined);
@@ -1973,6 +2998,7 @@ export class BuildScene {
             nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mountK, wallOff, pending.origPos.y, pending.id);
           }
         } else if (pending.kind === "light") {
+          toolKind = "light";
           const cur = lv.lights.find((x) => x.id === pending.id);
           if (cur) {
             mountK = this.getMountKind("light", undefined, cur.type);
@@ -1982,7 +3008,24 @@ export class BuildScene {
 
         const dragRot = nextPlaced?.rotationY ?? pending.rotationY ?? 0;
         const fpOk = nextPlaced?.valid
-          ? validateFootprintPlacement(this.derived.project, lvIdx, nextPlaced.x, nextPlaced.z, sx, sz, dragRot, mountK, nextPlaced.y)
+          ? validateObjectFootprint({
+              project: this.derived.project,
+              levelIndex: lvIdx,
+              x: nextPlaced.x,
+              y: nextPlaced.y,
+              z: nextPlaced.z,
+              sizeX: sx,
+              sizeZ: sz,
+              rotationY: dragRot,
+              mountKind: mountK,
+              tool: toolKind,
+              catalogId: catId,
+              category: fCat,
+              hostFurniture: nextPlaced.hostFurniture,
+              wallSnap: nextPlaced.wallSnap,
+              excludeEntityId: pending.id,
+              altBypass: nextPlaced.altBypass,
+            })
           : { valid: false, reason: nextPlaced?.surfaceLabel ?? "Area tidak valid" };
 
         if (nextPlaced && nextPlaced.valid && fpOk.valid) {
@@ -2006,7 +3049,7 @@ export class BuildScene {
             this.hoverHighlightMesh.visible = true;
           }
           this.actions.onPreviewHud({
-            label: `Geser ${pending.label} (${cx.toFixed(1)}m, ${cz.toFixed(1)}m · Lepas simpan)`,
+            label: `Geser ${pending.label} (${cx.toFixed(1)}m, ${cz.toFixed(1)}m · R putar · Lepas simpan)`,
             valid: true,
           });
         } else {
@@ -2022,20 +3065,32 @@ export class BuildScene {
     if (this.isBrushDown && inBounds) {
       const tool = this.viewOpts.activeTool;
       const item = this.getActiveCatalogItem();
-      if (tool === "floor_tile" && this.viewOpts.floorBrushMode === "tile") {
-        this.brushStrokeCells.set(`${this.viewOpts.activeLevel}:${gx}:${gz}`, {
-          levelIndex: Math.min(1, this.viewOpts.activeLevel),
+      const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
+      if (tool === "floor_tile" && this.viewOpts.floorBrushMode === "tile" && !this.isCellBlocked(lvIdx, gx, gz)) {
+        this.brushStrokeCells.set(`${lvIdx}:${gx}:${gz}`, {
+          levelIndex: lvIdx,
           gx,
           gz,
           materialId: item.materialId ?? "granite_warm",
         });
       } else if (tool === "terrain" && this.terrainScratch) {
         const v = worldToGridVertex(hit.x, hit.z, cs, cols, rows);
-        this.terrainScratch = applyTerrainBrushToHeights(this.terrainScratch, cols, rows, v.gx, v.gz, this.viewOpts.terrainBrushMode, 0.12);
+        this.terrainScratch = applyTerrainBrushToHeights(
+          this.terrainScratch,
+          cols,
+          rows,
+          v.gx,
+          v.gz,
+          this.viewOpts.terrainBrushMode,
+          0.12,
+          2.5,
+          this.getIndoorProtectedPolys(),
+        );
+        this.updateLiveTerrainMesh(this.terrainScratch);
       }
     }
 
-    this.actions.onHoverCell(gx, gz, hit.x, hit.z, inBounds);
+    this.actions.onHoverCell(fineGx, fineGz, hit.x, hit.z, inBounds);
     if (this.viewOpts.activeTool === "select" && !this.dragPendingCommit && this.actions.onHoverPart) {
       const nowMs = performance.now();
       if (nowMs - this.lastHoverMs > 70) {
@@ -2051,7 +3106,16 @@ export class BuildScene {
 
   private handlePointerDown(e: PointerEvent): void {
     if (e.button === 2) {
-      if (this.dragStartVertex || this.dragStartCell || this.isBrushDown || this.draggingEntity) {
+      this.rightDownPos = { x: e.clientX, y: e.clientY };
+      if (
+        this.dragStartVertex ||
+        this.dragStartCell ||
+        this.sledgeDragStart ||
+        this.isBrushDown ||
+        this.draggingEntity ||
+        this.pushPullDragState ||
+        this.openingDragState
+      ) {
         this.cancelActivePreview();
       }
       return;
@@ -2068,7 +3132,85 @@ export class BuildScene {
     const tool = this.viewOpts.activeTool;
 
     if (tool === "select") {
+      // Check Push-Pull Arrow Gizmo first when a wall is selected
+      if (this.pushPullGizmoGroup.visible && this.selected?.kind === "wall") {
+        const rect = this.canvas.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+          this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
+          const gHits = this.raycaster.intersectObject(this.pushPullGizmoGroup, true);
+          if (gHits.length > 0) {
+            const lvIdx = this.selected.levelIndex as 0 | 1;
+            const w = this.derived.project.levels[lvIdx]?.walls.find((x) => x.id === this.selected?.id);
+            if (w) {
+              const dx = w.end.x - w.start.x;
+              const dz = w.end.z - w.start.z;
+              const len = Math.hypot(dx, dz) || 1;
+              const nx = -dz / len;
+              const nz = dx / len;
+              const baseY =
+                lvIdx === 0
+                  ? this.derived.project.site.peil.floor1PeilM
+                  : this.derived.project.site.peil.floor1PeilM + (this.derived.project.levels[0]?.height ?? 3.6);
+              this.pushPullDragState = {
+                lvIdx,
+                wallId: w.id,
+                startWorldX: this.lastWorldPos.x,
+                startWorldZ: this.lastWorldPos.z,
+                midX: (w.start.x + w.end.x) * 0.5,
+                midZ: (w.start.z + w.end.z) * 0.5,
+                nx,
+                nz,
+                len,
+                height: w.height,
+                thickness: w.thickness,
+                baseY,
+                deltaM: 0,
+              };
+              try {
+                this.canvas.setPointerCapture?.(e.pointerId);
+              } catch {
+                // ignore
+              }
+              return;
+            }
+          }
+        }
+      }
+
       const hitRes = this.raycastHit(e, true);
+      if (hitRes && hitRes.sel.kind === "opening") {
+        const sel = hitRes.sel;
+        const lvIdx = sel.levelIndex as 0 | 1;
+        const w = this.derived.project.levels[lvIdx]?.walls.find((x) => x.id === sel.wallId);
+        const op = w?.openings.find((o) => o.id === sel.id);
+        if (w && op) {
+          this.openingDragState = {
+            lvIdx,
+            wallId: w.id,
+            opId: op.id,
+            width: op.width,
+            height: op.height,
+            sill: op.sill,
+            label: op.label,
+            origOffset: op.offset,
+            nextWallId: w.id,
+            nextOffset: op.offset,
+            nextWorldX: hitRes.point.x,
+            nextWorldZ: hitRes.point.z,
+            nextYaw: 0,
+            valid: true,
+          };
+          try {
+            this.canvas.setPointerCapture?.(e.pointerId);
+          } catch {
+            // ignore
+          }
+          this.actions.onSelect(sel);
+          return;
+        }
+      }
+
       if (hitRes && (hitRes.sel.kind === "furniture" || hitRes.sel.kind === "hvac" || hitRes.sel.kind === "light")) {
         const sel = hitRes.sel;
         const lvIdx = sel.levelIndex as 0 | 1;
@@ -2110,24 +3252,33 @@ export class BuildScene {
       return;
     }
 
+    if (tool === "sledgehammer") {
+      this.sledgeDragStart = { x: this.lastWorldPos.x, z: this.lastWorldPos.z };
+      return;
+    }
+
     if (tool === "wall_straight" || tool === "wall_room" || tool === "wall_diagonal" || tool === "fence") {
       if (this.viewOpts.activeLevel === 2) {
         simsAudio.play("warning");
         return;
       }
-      this.dragStartVertex = curVert;
+      const wallCs = 0.25;
+      const wallCols = Math.round(this.derived.project.site.width / wallCs);
+      const wallRows = Math.round(this.derived.project.site.depth / wallCs);
+      this.dragStartVertex = worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, wallCs, wallCols, wallRows);
     } else if (tool === "floor_tile") {
       if (this.viewOpts.activeLevel === 2) {
         simsAudio.play("warning");
         return;
       }
+      const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
       if (this.viewOpts.floorBrushMode === "rect") {
         this.dragStartCell = { gx, gz };
-      } else if (this.viewOpts.floorBrushMode === "tile" && this.lastWorldPos.inBounds) {
+      } else if (this.viewOpts.floorBrushMode === "tile" && this.lastWorldPos.inBounds && !this.isCellBlocked(lvIdx, gx, gz)) {
         this.isBrushDown = true;
         const item = this.getActiveCatalogItem();
-        this.brushStrokeCells.set(`${this.viewOpts.activeLevel}:${gx}:${gz}`, {
-          levelIndex: Math.min(1, this.viewOpts.activeLevel),
+        this.brushStrokeCells.set(`${lvIdx}:${gx}:${gz}`, {
+          levelIndex: lvIdx,
           gx,
           gz,
           materialId: item.materialId ?? "granite_warm",
@@ -2142,7 +3293,18 @@ export class BuildScene {
     } else if (tool === "terrain" && this.lastWorldPos.inBounds) {
       this.isBrushDown = true;
       const base = this.derived.project.buildExtras?.terrainHeights ?? [];
-      this.terrainScratch = applyTerrainBrushToHeights(base, cols, rows, curVert.gx, curVert.gz, this.viewOpts.terrainBrushMode, 0.2);
+      this.terrainScratch = applyTerrainBrushToHeights(
+        base,
+        cols,
+        rows,
+        curVert.gx,
+        curVert.gz,
+        this.viewOpts.terrainBrushMode,
+        0.2,
+        2.5,
+        this.getIndoorProtectedPolys(),
+      );
+      this.updateLiveTerrainMesh(this.terrainScratch);
     }
   }
 
@@ -2154,7 +3316,60 @@ export class BuildScene {
     } catch {
       // ignore
     }
+
+    // Brief right-click cancels tool or deselects without moving camera (BM-16)
+    if (e.button === 2 && this.rightDownPos) {
+      const distR = Math.hypot(e.clientX - this.rightDownPos.x, e.clientY - this.rightDownPos.y);
+      this.rightDownPos = null;
+      if (distR <= 5) {
+        if (this.viewOpts.activeTool !== "select") {
+          this.cancelActivePreview();
+          this.actions.onPlacementCommitted?.(this.viewOpts.activeTool, false);
+        } else if (this.selected !== null) {
+          this.actions.onSelect(null);
+        }
+      }
+      return;
+    }
+
     if (e.button !== 0 || !this.derived) return;
+
+    if (this.pushPullDragState) {
+      const pp = this.pushPullDragState;
+      this.pushPullDragState = null;
+      this.clearPreviewMeshes();
+      this.actions.onPreviewHud(null);
+      if (Math.abs(pp.deltaM) >= 0.05) {
+        this.actions.onPushPullWall?.(pp.lvIdx, pp.wallId, pp.deltaM, e.altKey || this.altHeld);
+        simsAudio.play("place");
+      }
+      return;
+    }
+
+    if (this.openingDragState) {
+      const od = this.openingDragState;
+      this.openingDragState = null;
+      this.clearPreviewMeshes();
+      this.actions.onPreviewHud(null);
+      const changed = od.nextWallId !== od.wallId || Math.abs(od.nextOffset - od.origOffset) >= 0.02;
+      if (changed && od.valid) {
+        if (od.nextWallId === od.wallId) {
+          this.actions.onUpdateOpening?.(od.lvIdx, od.wallId, od.opId, { offset: od.nextOffset });
+        } else {
+          const origOp = this.derived.project.levels[od.lvIdx]?.walls
+            .find((w) => w.id === od.wallId)
+            ?.openings.find((o) => o.id === od.opId);
+          if (origOp) {
+            this.actions.onDeleteOpening(od.lvIdx, od.wallId, od.opId);
+            this.actions.onAddOpening(od.lvIdx, od.nextWallId, { ...origOp, offset: od.nextOffset });
+          }
+        }
+        simsAudio.play("place");
+      } else if (!od.valid) {
+        simsAudio.play("warning");
+      }
+      return;
+    }
 
     if (this.draggingEntity) {
       const pending = this.dragPendingCommit;
@@ -2196,6 +3411,7 @@ export class BuildScene {
       (tool === "wall_straight" ||
         tool === "wall_room" ||
         tool === "wall_diagonal" ||
+        tool === "wall_paint" ||
         tool === "fence" ||
         tool === "floor_tile" ||
         tool === "opening" ||
@@ -2210,18 +3426,29 @@ export class BuildScene {
       return;
     }
 
-    // Dragged straight/diagonal/fence wall
+    // Dragged straight/diagonal/fence wall (0.25m precision grid)
+    const wallCs = 0.25;
+    const wallCols = Math.round(project.site.width / wallCs);
+    const wallRows = Math.round(project.site.depth / wallCs);
     if ((tool === "wall_straight" || tool === "wall_diagonal" || tool === "fence") && this.dragStartVertex) {
-      const endV = snapWallEndpoint(this.dragStartVertex, worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, cs, cols, rows), cols, rows, tool === "wall_diagonal" || e.altKey);
+      const endV = snapWallEndpoint(
+        this.dragStartVertex,
+        worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, wallCs, wallCols, wallRows),
+        wallCols,
+        wallRows,
+        tool === "wall_diagonal" || e.altKey,
+      );
       if (endV.gx !== this.dragStartVertex.gx || endV.gz !== this.dragStartVertex.gz) {
+        const isFence = tool === "fence";
         this.actions.onAddWall(lvIdx, {
-          id: uid(tool === "fence" ? "fence" : "wall"),
-          name: tool === "fence" ? "Pagar Baru" : "Dinding Baru",
-          start: { x: this.dragStartVertex.gx * cs, z: this.dragStartVertex.gz * cs },
-          end: { x: endV.gx * cs, z: endV.gz * cs },
-          thickness: tool === "fence" ? 0.08 : brickThick,
-          height: tool === "fence" ? 1.2 : lv.height,
-          materialId: tool === "fence" ? "wall_andesit" : "wall_ext_ivory",
+          id: uid(isFence ? "fence" : "wall"),
+          name: isFence ? "Pagar Baru" : "Dinding Baru",
+          kind: isFence ? "fence" : "wall",
+          start: { x: this.dragStartVertex.gx * wallCs, z: this.dragStartVertex.gz * wallCs },
+          end: { x: endV.gx * wallCs, z: endV.gz * wallCs },
+          thickness: isFence ? 0.08 : brickThick,
+          height: isFence ? 1.2 : lv.height,
+          materialId: isFence ? "wall_andesit" : "wall_ext_ivory",
           exterior: true,
           openings: [],
         });
@@ -2232,15 +3459,16 @@ export class BuildScene {
 
     // Dragged rectangle Room (4 walls + interior slab Room)
     if (tool === "wall_room" && this.dragStartVertex) {
-      const curVert = worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, cs, cols, rows);
-      const x1 = Math.min(this.dragStartVertex.gx, curVert.gx) * cs;
-      const x2 = Math.max(this.dragStartVertex.gx, curVert.gx) * cs;
-      const z1 = Math.min(this.dragStartVertex.gz, curVert.gz) * cs;
-      const z2 = Math.max(this.dragStartVertex.gz, curVert.gz) * cs;
-      if (x2 - x1 >= 1.0 && z2 - z1 >= 1.0) {
+      const curVert = worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, wallCs, wallCols, wallRows);
+      const x1 = Math.min(this.dragStartVertex.gx, curVert.gx) * wallCs;
+      const x2 = Math.max(this.dragStartVertex.gx, curVert.gx) * wallCs;
+      const z1 = Math.min(this.dragStartVertex.gz, curVert.gz) * wallCs;
+      const z2 = Math.max(this.dragStartVertex.gz, curVert.gz) * wallCs;
+      if (x2 - x1 >= 0.5 && z2 - z1 >= 0.5) {
         const mkW = (ax: number, az: number, bx: number, bz: number): Wall => ({
           id: uid("rmwall"),
           name: "Dinding Ruangan",
+          kind: "wall",
           start: { x: ax, z: az },
           end: { x: bx, z: bz },
           thickness: brickThick,
@@ -2282,10 +3510,12 @@ export class BuildScene {
       const tiles: { levelIndex: number; gx: number; gz: number; materialId: string }[] = [];
       for (let x = Math.min(this.dragStartCell.gx, gx); x <= Math.max(this.dragStartCell.gx, gx); x++) {
         for (let z = Math.min(this.dragStartCell.gz, gz); z <= Math.max(this.dragStartCell.gz, gz); z++) {
-          tiles.push({ levelIndex: lvIdx, gx: x, gz: z, materialId: item.materialId ?? "granite_warm" });
+          if (!this.isCellBlocked(lvIdx, x, z)) {
+            tiles.push({ levelIndex: lvIdx, gx: x, gz: z, materialId: item.materialId ?? "granite_warm" });
+          }
         }
       }
-      this.actions.onSetFloorTiles(tiles);
+      if (tiles.length > 0) this.actions.onSetFloorTiles(tiles);
       this.cancelActivePreview();
       return;
     }
@@ -2297,12 +3527,15 @@ export class BuildScene {
       const gx2 = Math.max(this.dragStartCell.gx, gx);
       const gz1 = Math.min(this.dragStartCell.gz, gz);
       const gz2 = Math.max(this.dragStartCell.gz, gz);
-      if (this.viewOpts.activeLevel === 0 && gx2 - gx1 >= 1 && gz2 - gz1 >= 1) {
+      const poolOk = this.viewOpts.activeLevel === 0 && validatePoolPlacement(project, gx1, gz1, gx2, gz2, cs).valid;
+      if (poolOk) {
         this.actions.onAddPool({ id: uid("pool"), gx1, gz1, gx2, gz2, depth: 1.25 });
+        this.cancelActivePreview();
+        this.actions.onPlacementCommitted?.(tool, e.shiftKey);
       } else {
         simsAudio.play("warning");
+        this.cancelActivePreview();
       }
-      this.cancelActivePreview();
       return;
     }
 
@@ -2312,17 +3545,64 @@ export class BuildScene {
       return;
     }
 
+    if (tool === "sledgehammer" && this.sledgeDragStart) {
+      const sx0 = this.sledgeDragStart.x;
+      const sz0 = this.sledgeDragStart.z;
+      const sx1 = this.lastWorldPos.x;
+      const sz1 = this.lastWorldPos.z;
+      this.sledgeDragStart = null;
+      const dragSpan = Math.hypot(sx1 - sx0, sz1 - sz0);
+      if (dragSpan > 0.4 && Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y) > 8) {
+        const minX = Math.min(sx0, sx1);
+        const maxX = Math.max(sx0, sx1);
+        const minZ = Math.min(sz0, sz1);
+        const maxZ = Math.max(sz0, sz1);
+        const rmTiles = (project.buildExtras?.floorTiles ?? []).filter((t) => {
+          const cx = (t.gx + 0.5) * cs;
+          const cz = (t.gz + 0.5) * cs;
+          return t.levelIndex === lvIdx && cx >= minX && cx <= maxX && cz >= minZ && cz <= maxZ;
+        });
+        const rmWalls = lv.walls
+          .filter((w) => {
+            const mx = (w.start.x + w.end.x) * 0.5;
+            const mz = (w.start.z + w.end.z) * 0.5;
+            return mx >= minX && mx <= maxX && mz >= minZ && mz <= maxZ;
+          })
+          .map((w) => w.id);
+        if (rmTiles.length > 0) this.actions.onDeleteFloorTilesBatch?.(rmTiles);
+        if (rmWalls.length > 0) this.actions.onDeleteWallsBatch?.(lvIdx, rmWalls);
+        if (rmTiles.length > 0 || rmWalls.length > 0) simsAudio.play("demolish");
+        this.cancelActivePreview();
+        return;
+      }
+    }
+
     const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
     if (dist > 6) return;
 
     // Room floor flood fill click
     if (tool === "floor_tile" && this.viewOpts.floorBrushMode === "fill") {
+      const blocked = this.getBlockedPolysForLevel(lvIdx);
       const roomHit = findRoomAtPoint(lv.rooms, this.lastWorldPos.x, this.lastWorldPos.z);
       if (roomHit) {
         this.actions.onPaintRoomFloor(lvIdx, roomHit.id, item.materialId ?? "granite_warm");
       } else if (this.lastWorldPos.inBounds) {
-        const cells = computeProjectRoomFloodCells(lv.walls, cols, rows, cs, Math.floor(this.lastWorldPos.x / cs), Math.floor(this.lastWorldPos.z / cs));
-        this.actions.onSetFloorTiles(cells.map((c) => ({ levelIndex: lvIdx, gx: c.gx, gz: c.gz, materialId: item.materialId ?? "granite_warm" })));
+        const cells = computeProjectRoomFloodCells(
+          lv.walls,
+          cols,
+          rows,
+          cs,
+          Math.floor(this.lastWorldPos.x / cs),
+          Math.floor(this.lastWorldPos.z / cs),
+          blocked,
+        );
+        if (cells.length > 0) {
+          this.actions.onSetFloorTiles(
+            cells.map((c) => ({ levelIndex: lvIdx, gx: c.gx, gz: c.gz, materialId: item.materialId ?? "granite_warm" })),
+          );
+        } else {
+          simsAudio.play("warning");
+        }
       }
       return;
     }
@@ -2337,7 +3617,10 @@ export class BuildScene {
         simsAudio.play("warning");
         return;
       }
-      this.actions.onAddOpening(lvIdx, snap.wall.id, createOpeningForWall(uid("op"), kind, snap.offsetM, ow, oh, sill, item.name));
+      const created = createOpeningForWall(uid("op"), kind, snap.offsetM, ow, oh, sill, item.name);
+      created.swing = this.viewOpts.placementFlipSwing ?? 1;
+      this.actions.onAddOpening(lvIdx, snap.wall.id, created);
+      simsAudio.play("place");
       return;
     }
 
@@ -2346,8 +3629,21 @@ export class BuildScene {
       const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.lastWorldPos.x / cs)));
       const gz = Math.max(0, Math.min(rows - 1, Math.floor(this.lastWorldPos.z / cs)));
       const [wC, lC] = item.footprintCells ?? [2, 8];
-      const rq = this.viewOpts.placementRotationQuarter;
-      const check = validateProjectStairPlacement(lv.stairs, lvIdx, gx, gz, wC, lC, rq, cols, rows, cs);
+      const rq = (this.viewOpts.placementRotationStep % 4) as 0 | 1 | 2 | 3;
+      const check = validateProjectStairPlacement(
+        lv.stairs,
+        lvIdx,
+        gx,
+        gz,
+        wC,
+        lC,
+        rq,
+        cols,
+        rows,
+        cs,
+        lv.walls,
+        project.buildExtras?.pools ?? [],
+      );
       if (!check.valid) {
         simsAudio.play("warning");
         return;
@@ -2368,6 +3664,8 @@ export class BuildScene {
         },
         check.voidPoly,
       );
+      simsAudio.play("place");
+      this.actions.onPlacementCommitted?.(tool, e.shiftKey);
       return;
     }
 
@@ -2380,9 +3678,25 @@ export class BuildScene {
         tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
       const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
       const [sx, , sz] = item.sizeM ?? [0.5, 0.5, 0.5];
-      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
+      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationStep * (Math.PI / 4);
       const fpCheck = placed.valid
-        ? validateFootprintPlacement(project, lvIdx, placed.x, placed.z, sx, sz, rot, mountKind, placed.y)
+        ? validateObjectFootprint({
+            project,
+            levelIndex: lvIdx,
+            x: placed.x,
+            y: placed.y,
+            z: placed.z,
+            sizeX: sx,
+            sizeZ: sz,
+            rotationY: rot,
+            mountKind,
+            tool,
+            catalogId: item.materialId,
+            category: item.furnitureCategory,
+            hostFurniture: placed.hostFurniture,
+            wallSnap: placed.wallSnap,
+            altBypass: placed.altBypass,
+          })
         : { valid: false };
       if (!placed.valid || !fpCheck.valid) {
         simsAudio.play("warning");
@@ -2398,7 +3712,7 @@ export class BuildScene {
           position: { x: placed.x, y: placed.y, z: placed.z },
           size: { x: fx, y: fy, z: fz },
           rotationY: rot,
-          colorHex: item.swatchHex,
+          colorHex: this.viewOpts.selectedSwatchHex ?? item.swatchHex,
           accentHex: item.accentHex,
         });
       } else if (tool === "hvac" && item.hvacMeta) {
@@ -2422,7 +3736,7 @@ export class BuildScene {
           name: item.name,
           type: item.lightMeta.type,
           position: { x: placed.x, y: placed.y, z: placed.z },
-          rotationY: placed.rotationY,
+          rotationY: placed.rotationY !== undefined ? placed.rotationY : rot,
           lumens: item.lightMeta.lumens,
           colorTempK: item.lightMeta.colorTempK,
           beamAngleDeg: item.lightMeta.beamAngleDeg,
@@ -2430,14 +3744,23 @@ export class BuildScene {
           on: true,
         });
       }
+      simsAudio.play("place");
+      this.actions.onPlacementCommitted?.(tool, e.shiftKey);
       return;
     }
 
     // Wall Paint / Sledgehammer / Eyedropper / Select
-    const hitRes = this.raycastHit(e);
+    const hitRes = this.raycastHit(e, true);
     if (tool === "wall_paint") {
       if (hitRes?.sel.kind === "wall") {
-        this.actions.onUpdateWall(hitRes.sel.levelIndex as 0 | 1, hitRes.sel.id, { materialId: item.materialId ?? "wall_ext_ivory" });
+        const target = this.resolveWallPaintTarget(hitRes, e.shiftKey);
+        const matId = item.materialId ?? "wall_ext_ivory";
+        if (target?.room && this.actions.onPaintRoomWalls) {
+          this.actions.onPaintRoomWalls(target.lvIdx, target.room.id, matId);
+        } else if (target) {
+          this.actions.onUpdateWall(target.lvIdx, target.wall.id, { [target.sideKey]: matId });
+        }
+        simsAudio.play("place");
       }
       return;
     }
@@ -2451,27 +3774,20 @@ export class BuildScene {
       else if (s.kind === "light") this.actions.onDeleteLight(s.levelIndex as 0 | 1, s.id);
       else if (s.kind === "stair") this.actions.onDeleteStair(s.levelIndex as 0 | 1, s.id);
       else if (s.kind === "pool") this.actions.onDeletePool(s.id);
+      else if (s.kind === "floorTile") this.actions.onDeleteFloorTile?.(s.levelIndex as 0 | 1, s.gx, s.gz);
+      else if (s.kind === "room") this.actions.onDeleteRoom?.(s.levelIndex as 0 | 1, s.id);
+      simsAudio.play("demolish");
       return;
     }
-    if (tool === "eyedropper" && hitRes) {
-      const s = hitRes.sel;
-      if (s.kind === "furniture") {
-        const f = project.levels[s.levelIndex]?.furniture.find((x) => x.id === s.id);
-        if (f) this.actions.onEyedropCatalog(`furn_${f.catalogId}`);
-      } else if (s.kind === "hvac") {
-        const h = project.levels[s.levelIndex]?.hvac.find((x) => x.id === s.id);
-        const match = UNIFIED_BUILD_CATALOG.find((c) => c.hvacMeta?.type === h?.type);
-        if (match) this.actions.onEyedropCatalog(match.id);
-      } else if (s.kind === "light") {
-        const l = project.levels[s.levelIndex]?.lights.find((x) => x.id === s.id);
-        const match = UNIFIED_BUILD_CATALOG.find((c) => c.lightMeta?.type === l?.type);
-        if (match) this.actions.onEyedropCatalog(match.id);
-      } else if (s.kind === "wall") {
-        const w = project.levels[s.levelIndex]?.walls.find((x) => x.id === s.id);
-        const match = UNIFIED_BUILD_CATALOG.find((c) => c.materialId === w?.materialId);
-        this.actions.onEyedropCatalog(match?.id ?? "tool_wall_straight");
+    if (tool === "eyedropper") {
+      const eyeHit = hitRes ?? this.raycastHit(e, false);
+      if (eyeHit) {
+        const res = this.resolveEyedropper(eyeHit);
+        if (res) {
+          this.actions.onEyedropCatalog(res.catalogId, res.swatchHex);
+          simsAudio.play("select");
+        }
       }
-      simsAudio.play("select");
       return;
     }
 
