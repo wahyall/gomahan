@@ -78,6 +78,7 @@ export interface StructuralReport {
   concreteVolumes: {
     leanConcreteM3: number;
     foundationM3: number;
+    pileCapConcreteM3: number;
     sloofM3: number;
     columnsM3: number;
     beamsM3: number;
@@ -243,27 +244,43 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
   const masonryDensityKnM3 =
     sys.brick.preset === "hebel" ? 7.5 : sys.brick.preset === "merah" ? 17.0 : 14.5;
   const masonryWeightKn = masonry.brickVolumeM3 * masonryDensityKnM3 + masonry.mortarVolumeM3 * 20;
-  const lt2Area = 5.0 * 13.0 - 1.65 * 3.3 - 1.35 * 5.0; // net structural slab area ~52.8 m2
+  const lv2RoomsArea = (derived.floors[1]?.rooms ?? [])
+    .filter((r) => r.room.program !== "void")
+    .reduce((s, r) => s + r.grossAreaM2, 0);
+  const lt2HasStructure = Boolean(project.levels[1] && (lt2Walls.length > 0 || lv2RoomsArea > 0));
+  const lt2Area = !lt2HasStructure ? 0 : lv2RoomsArea > 0 ? lv2RoomsArea : 52.8;
   const slabUnitKnM2 = sys.slab === "aac_panel" ? 1.8 : sys.slab === "bondek_wiremesh" ? 2.6 : 2.88;
   const slabWeightKn = lt2Area * (slabUnitKnM2 + 1.2) + lt2Area * sp.liveLoadRoomKpa * 0.25;
-  const roofWeightKn = roof.areaM2 * (sys.roofCover === "genteng_beton" ? 0.65 : 0.32);
-  const frameSelfWeightKn = isSteel ? 45 : 165;
+  const hasAnyHouse = lt1Walls.length > 0 || lt2Walls.length > 0 || lv2RoomsArea > 0;
+  const roofWeightKn = hasAnyHouse ? roof.areaM2 * (sys.roofCover === "genteng_beton" ? 0.65 : 0.32) : 0;
+  const frameSelfWeightKn = !hasAnyHouse ? 0 : isSteel ? 45 : 165;
   const totalWeightKn = masonryWeightKn + slabWeightKn + roofWeightKn + frameSelfWeightKn;
 
-  // Surabaya SE approximate short-period spectral acceleration Sds ~ 0.65g
+  // Guard denominator parameters against invalid 0 / negative values
+  const effSeismicR = Math.max(1, sp.seismicR);
+  const effFcMpa = Math.max(5, sp.concreteFcMpa);
+  const effFyMpa = Math.max(120, sp.rebarFyMpa);
+  const effSeismicI = Math.max(1, sp.seismicI);
   const sds = soil.siteClass === "SE" ? 0.65 : soil.siteClass === "SD" ? 0.56 : 0.42;
-  const seismicCoeffCs = Math.max(0.044 * sds * sp.seismicI, Math.min(0.18, sds / (sp.seismicR / sp.seismicI)));
+  const seismicCoeffCs =
+    totalWeightKn > 0
+      ? Math.max(0.044 * sds * effSeismicI, Math.min(sds * effSeismicI, sds / (effSeismicR / effSeismicI)))
+      : 0;
   const seismicBaseShearKn = totalWeightKn * seismicCoeffCs;
 
   // Analyze columns
   const colW = isSteel ? 0.15 : 0.20;
   const colD = isSteel ? 0.15 : 0.25;
   const colAreaMm2 = colW * 1000 * (colD * 1000);
-  // Approximate axial capacity phi * 0.80 * (0.85 * fc' * Ag + fy * Ast)
   const astMm2 = 6 * Math.PI * 6.5 * 6.5; // 6 D13 ~ 796 mm2
   const phiPnKn = isSteel
     ? 520
-    : (0.65 * 0.8 * (0.85 * sp.concreteFcMpa * (colAreaMm2 - astMm2) + sp.rebarFyMpa * astMm2)) / 1000;
+    : (0.65 * 0.8 * (0.85 * effFcMpa * (colAreaMm2 - astMm2) + effFyMpa * astMm2)) / 1000;
+
+  const mainColCount = mergedNodes.filter((m) => m.isMain).length;
+  const colMomentCapKnM = isSteel
+    ? 58
+    : Math.max(16, 45 * (effFyMpa / 420) * Math.pow(effFcMpa / 20, 0.35));
 
   const columns: StructuralColumnNode[] = [];
   let idx = 0;
@@ -272,10 +289,15 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     const isFrontCanopy = n.z < 1.0;
     const storeysAbove = n.maxLevel === 0 ? 1 : n.minLevel === 0 ? 2 : 1;
     const trib = isFrontCanopy ? 5.6 : n.isMain ? 7.8 : 4.2;
-    const axial = trib * (isFrontCanopy ? 3.5 : 13.5 * storeysAbove * 0.52);
-    const moment = (seismicBaseShearKn / Math.max(8, mergedNodes.length)) * 1.8;
+    const floorLoadFactor = 10.7 + sp.liveLoadRoomKpa * 1.4;
+    const axial = trib * (isFrontCanopy ? 3.5 : floorLoadFactor * storeysAbove * 0.52);
+    // Lateral seismic frame shear is carried primarily by main structural columns
+    const moment = n.isMain
+      ? (seismicBaseShearKn / Math.max(6, mainColCount)) * 1.8
+      : (seismicBaseShearKn / Math.max(8, mergedNodes.length)) * 0.6;
     const cap = n.isMain ? phiPnKn : 240;
-    const util = axial / cap + moment / 45;
+    const momentCap = n.isMain ? colMomentCapKnM : 28;
+    const util = axial / Math.max(1, cap) + moment / momentCap;
     columns.push({
       id: `K${n.isMain ? "1" : "P"}-${idx}`,
       x: n.x,
@@ -395,6 +417,7 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
   // Foundations (only columns grounded on LT1!)
   const foundations: FoundationElement[] = [];
   let fndConcreteM3 = 0;
+  let pileCapConcreteM3 = 0;
   let straussMetersTotal = 0;
   let batukaliM3 = 0;
 
@@ -406,34 +429,40 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     let label = "Footplate 100×100×30 cm";
     let straussM = 0;
     let concM3 = 0.3;
+    let capConcM3 = 0.3;
 
     if (sys.foundation === "footplate_batukali") {
       footArea = 1.0 * 1.0;
       label = "Footplate 100×100 + Batu Kali";
       concM3 = 0.32;
+      capConcM3 = 0.32;
     } else if (sys.foundation === "footplate_full") {
       footArea = 1.2 * 1.2;
       label = "Footplate Penuh 120×120×35 cm";
-      concM3 = 0.50;
+      concM3 = 0.5;
+      capConcM3 = 0.5;
     } else if (sys.foundation === "strauss_pile") {
       footArea = 0.9 * 0.9;
       straussM = 6.0; // 2 titik Ø30 × 3.0 m per pile cap
       label = "Pile Cap 90×90 + 2 Strauss Pile Ø30 (3m)";
-      concM3 = 0.28 + 2 * Math.PI * 0.15 * 0.15 * 3.0;
+      capConcM3 = 0.28;
+      concM3 = capConcM3 + 2 * Math.PI * 0.15 * 0.15 * 3.0;
     } else if (sys.foundation === "cakar_ayam") {
       footArea = 1.1 * 1.1;
       label = "Cakar Ayam Pelat 12cm + Buis Ø40";
       concM3 = 0.36;
+      capConcM3 = 0.36;
     } else {
-      // elevated_flood
       footArea = 1.2 * 1.2;
       label = "Footplate + Kolom Pedestal Tinggi (Panggung Banjir)";
       concM3 = 0.58 + peilExtraH * 0.09;
+      capConcM3 = concM3;
     }
 
     const qApplied = sys.foundation === "strauss_pile" ? pService / (footArea * 1.6) : pService / footArea;
     const punching = pService / 420;
     fndConcreteM3 += concM3;
+    pileCapConcreteM3 += capConcM3;
     straussMetersTotal += straussM;
 
     foundations.push({
@@ -453,19 +482,17 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
   }
 
   // Add strip batu kali under LT1 masonry walls when footplate_batukali is selected
-  const lt1WallLen = project.levels[0]!.walls.reduce((s, w) => s + Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z), 0);
-  if (sys.foundation === "footplate_batukali") {
+  const lt1WallLen = lt1Walls.reduce((s, w) => s + Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z), 0);
+  if (sys.foundation === "footplate_batukali" && lt1WallLen > 0) {
     batukaliM3 = lt1WallLen * 0.38 * (0.55 + peilExtraH);
-  } else if (sys.foundation === "cakar_ayam") {
-    // Full ground slab + buis
+  } else if (sys.foundation === "cakar_ayam" && lt1Walls.length > 0) {
     fndConcreteM3 += 5.0 * 13.0 * 0.12;
+    pileCapConcreteM3 += 5.0 * 13.0 * 0.12;
   }
 
-  // Concrete / Steel / Slab volumes
   const sloofLen = beams.filter((b) => b.kind === "sloof").reduce((s, b) => s + b.lengthM, 0);
   const balokLen = beams.filter((b) => b.kind === "balok_induk").reduce((s, b) => s + b.lengthM, 0);
   const ringLen = beams.filter((b) => b.kind === "ring_balk").reduce((s, b) => s + b.lengthM, 0);
-  const colHeightTotal = 3.6 + 3.6 + peilExtraH;
 
   const sloofM3 = sloofLen * 0.2 * 0.3;
   const colEffHeight = (c: StructuralColumnNode) => {
@@ -473,6 +500,11 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     const base = c.z < 1.0 ? 3.0 : c.maxHeightM ? Math.min(3.6, c.maxHeightM) : levelsSpanned * 3.6;
     return base + (c.minLevel === 0 ? peilExtraH : 0);
   };
+  const mainColHeightSum = mainCols.reduce((s, c) => s + colEffHeight(c), 0);
+  const pracColHeightSum = columns.filter((c) => !c.isMain).reduce((s, c) => s + colEffHeight(c), 0);
+  const allColHeightSum = mainColHeightSum + pracColHeightSum;
+  const avgMainColHeight = mainCols.length > 0 ? mainColHeightSum / mainCols.length : 0;
+
   const columnsM3 = isSteel
     ? 0
     : columns.reduce((s, c) => s + c.widthM * c.depthM * colEffHeight(c), 0);
@@ -484,7 +516,12 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
       : sys.slab === "bondek_wiremesh"
         ? lt2Area * 0.1
         : 0;
-  const stairsM3 = 4.6 * 1.05 * 0.15 + 20 * 0.5 * 0.18 * 0.25 * 1.05;
+  const lt1Stairs = project.levels[0]?.stairs ?? [];
+  const stairsM3 = lt1Stairs.reduce((s, st) => {
+    const run = Math.hypot(st.end.x - st.start.x, st.end.z - st.start.z);
+    const rise = st.floorHeight / Math.max(1, st.riserCount);
+    return s + run * st.width * 0.15 + st.riserCount * 0.5 * rise * st.treadDepth * st.width;
+  }, 0);
   const leanConcreteM3 = mainCols.length * 1.1 * 1.1 * 0.05 + lt1WallLen * 0.5 * 0.05;
   const totalConcreteM3 =
     leanConcreteM3 + fndConcreteM3 + sloofM3 + columnsM3 + beamsM3 + slabM3 + stairsM3 + ringBalkM3;
@@ -493,10 +530,12 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     ? columns.reduce((s, c) => s + colEffHeight(c) * 31.5, 0) + balokLen * 21.3
     : 0;
   const bondekM2 = sys.slab === "bondek_wiremesh" ? lt2Area * 1.05 : 0;
-  const wiremeshM2 = sys.slab === "bondek_wiremesh" ? lt2Area * 1.08 : sys.foundation === "cakar_ayam" ? 65 : 0;
+  const wiremeshM2 =
+    (sys.slab === "bondek_wiremesh" ? lt2Area * 1.08 : 0) +
+    (sys.foundation === "cakar_ayam" && lt1Walls.length > 0 ? 65 : 0);
   const aacFloorPanelM2 = sys.slab === "aac_panel" ? lt2Area * 1.05 : 0;
 
-  // Bar Bending Schedule (BBS)
+  const foundRebarKg = foundations.reduce((s, f) => s + f.rebarKg, 0);
   const bbs: BarBendingRow[] = [
     {
       barMark: "BM-01",
@@ -504,10 +543,10 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
       diameterMm: 13,
       shape: "Grid U-Hook",
       cutLengthM: 1.25,
-      count: mainCols.length * 14,
-      totalLengthM: mainCols.length * 14 * 1.25,
+      count: Math.round(foundRebarKg / (1.25 * rebarKgPerM(13))),
+      totalLengthM: foundRebarKg / rebarKgPerM(13),
       unitWeightKgM: rebarKgPerM(13),
-      totalWeightKg: mainCols.length * 14 * 1.25 * rebarKgPerM(13),
+      totalWeightKg: foundRebarKg,
     },
     {
       barMark: "BM-02",
@@ -525,11 +564,11 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
       element: "Tulangan Pokok Kolom Utama (6D13)",
       diameterMm: 13,
       shape: "Vertikal + Overlap 40D",
-      cutLengthM: colHeightTotal + 0.65,
+      cutLengthM: avgMainColHeight + 0.65,
       count: isSteel ? 0 : mainCols.length * 6,
-      totalLengthM: isSteel ? 0 : mainCols.length * 6 * (colHeightTotal + 0.65),
+      totalLengthM: isSteel ? 0 : (mainColHeightSum + mainCols.length * 0.65) * 6,
       unitWeightKgM: rebarKgPerM(13),
-      totalWeightKg: isSteel ? 0 : mainCols.length * 6 * (colHeightTotal + 0.65) * rebarKgPerM(13),
+      totalWeightKg: isSteel ? 0 : (mainColHeightSum + mainCols.length * 0.65) * 6 * rebarKgPerM(13),
     },
     {
       barMark: "BM-04",
@@ -548,11 +587,11 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
       diameterMm: 8,
       shape: "Kotak 135° Seismic Hook",
       cutLengthM: 0.96,
-      count: Math.ceil((sloofLen + balokLen + (isSteel ? 0 : mainCols.length * colHeightTotal)) / 0.13),
-      totalLengthM: Math.ceil((sloofLen + balokLen + (isSteel ? 0 : mainCols.length * colHeightTotal)) / 0.13) * 0.96,
+      count: Math.ceil((sloofLen + balokLen + (isSteel ? 0 : mainColHeightSum)) / 0.13),
+      totalLengthM: Math.ceil((sloofLen + balokLen + (isSteel ? 0 : mainColHeightSum)) / 0.13) * 0.96,
       unitWeightKgM: rebarKgPerM(8),
       totalWeightKg:
-        Math.ceil((sloofLen + balokLen + (isSteel ? 0 : mainCols.length * colHeightTotal)) / 0.13) *
+        Math.ceil((sloofLen + balokLen + (isSteel ? 0 : mainColHeightSum)) / 0.13) *
         0.96 *
         rebarKgPerM(8),
     },
@@ -562,10 +601,25 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
       diameterMm: 10,
       shape: "Grid 2 Lapis @150",
       cutLengthM: 5.2,
-      count: sys.slab === "rc_slab_12" ? Math.ceil((lt2Area * 2) / (0.15 * 0.8)) : 28,
-      totalLengthM: sys.slab === "rc_slab_12" ? lt2Area * 2 * 13.5 : 145,
+      count:
+        sys.slab === "rc_slab_12"
+          ? Math.ceil((lt2Area * 2) / (0.15 * 0.8))
+          : lt1Stairs.length > 0
+            ? 28
+            : 0,
+      totalLengthM:
+        sys.slab === "rc_slab_12"
+          ? lt2Area * 2 * 13.5
+          : lt1Stairs.length > 0
+            ? lt1Stairs.length * 145
+            : 0,
       unitWeightKgM: rebarKgPerM(10),
-      totalWeightKg: (sys.slab === "rc_slab_12" ? lt2Area * 2 * 13.5 : 145) * rebarKgPerM(10),
+      totalWeightKg:
+        (sys.slab === "rc_slab_12"
+          ? lt2Area * 2 * 13.5
+          : lt1Stairs.length > 0
+            ? lt1Stairs.length * 145
+            : 0) * rebarKgPerM(10),
     },
     {
       barMark: "BM-07",
@@ -573,17 +627,17 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
       diameterMm: 10,
       shape: "Lurus + Kait",
       cutLengthM: 12.0,
-      count: Math.ceil((ringLen * 4 + (columns.length - mainCols.length) * 4 * 6.8) / 11.4),
-      totalLengthM: (ringLen * 4 + (columns.length - mainCols.length) * 4 * 6.8) * 1.06,
+      count: Math.ceil((ringLen * 4 + pracColHeightSum * 4) / 11.4),
+      totalLengthM: (ringLen * 4 + pracColHeightSum * 4) * 1.06,
       unitWeightKgM: rebarKgPerM(10),
-      totalWeightKg: (ringLen * 4 + (columns.length - mainCols.length) * 4 * 6.8) * 1.06 * rebarKgPerM(10),
+      totalWeightKg: (ringLen * 4 + pracColHeightSum * 4) * 1.06 * rebarKgPerM(10),
     },
   ].filter((r) => r.totalWeightKg > 0);
 
   const totalRebarKg = bbs.reduce((s, r) => s + r.totalWeightKg, 0);
   const totalFormworkM2 =
     sloofLen * 0.6 +
-    (isSteel ? 0 : columns.length * 0.85 * colHeightTotal) +
+    (isSteel ? 0 : allColHeightSum * 0.85) +
     (isSteel ? 0 : balokLen * 0.9) +
     (sys.slab === "rc_slab_12" ? lt2Area : 0) +
     ringLen * 0.4 +
@@ -593,6 +647,10 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
   const driftLimit = 0.02;
 
   const warnings: string[] = [];
+  const overCols = columns.filter((c) => c.status === "PERIKSA");
+  if (overCols.length > 0) {
+    warnings.push(`${overCols.length} kolom melebihi kapasitas tekan/momen (rasio > 0,92); tingkatkan mutu beton atau perbesar dimensi kolom.`);
+  }
   const overBearing = foundations.filter((f) => f.status === "PERIKSA");
   if (overBearing.length > 0) {
     warnings.push(
@@ -628,6 +686,7 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     concreteVolumes: {
       leanConcreteM3,
       foundationM3: fndConcreteM3,
+      pileCapConcreteM3,
       sloofM3,
       columnsM3,
       beamsM3,
@@ -644,7 +703,7 @@ export function computeStructuralReport(derived: DerivedProjectModel): Structura
     aacFloorPanelM2,
     totalRebarKg,
     totalFormworkM2,
-    overallSafe: overBearing.length === 0 && overBeams.length === 0 && driftRatio <= driftLimit,
+    overallSafe: overCols.length === 0 && overBearing.length === 0 && overBeams.length === 0 && driftRatio <= driftLimit,
     warnings,
   };
 }

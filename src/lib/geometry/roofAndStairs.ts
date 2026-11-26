@@ -1,6 +1,6 @@
-import type { ArchitectureSystemConfig, Level, Project, RoofType, Stair } from "@/lib/model/types";
+import type { ArchitectureSystemConfig, Level, Project, RoofType, Slab, Stair } from "@/lib/model/types";
 import { wallLength } from "@/lib/geometry/walls";
-import type { FloorLevelMetrics } from "@/lib/geometry/rooms";
+import { isIndoorRoomProgram, type FloorLevelMetrics } from "@/lib/geometry/rooms";
 
 export interface RoofDerivedMetrics {
   roofType: RoofType;
@@ -46,17 +46,15 @@ export interface ValidationIssue {
 
 export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
   const sys: ArchitectureSystemConfig = project.systems;
-  const lt2 = project.levels[1] ?? project.levels[0]!;
-  const baseTop = lt2.elevation + lt2.height; // 7.20 m
+  const topLevel = project.levels[1] ?? project.levels[0];
+  const baseTop = topLevel ? topLevel.elevation + topLevel.height : 3.6;
   const effectiveSlopeDeg = sys.roofType === "flat_deck" ? 2 : sys.roofSlopeDeg;
   const rad = (effectiveSlopeDeg * Math.PI) / 180;
   const pitch = Math.tan(rad);
 
-  const sideOv = project.site.partyWallLeft || project.site.partyWallRight ? 0 : sys.overhangSideM;
-  const minX = 0 - (project.site.partyWallLeft ? 0 : sideOv);
-  const maxX = project.site.width + (project.site.partyWallRight ? 0 : sideOv);
+  const minX = 0 - (project.site.partyWallLeft ? 0 : sys.overhangSideM);
+  const maxX = project.site.width + (project.site.partyWallRight ? 0 : sys.overhangSideM);
 
-  // Main upper house starts at Z=4.00 (plus balcony at Z=3.00) to Z=17.00
   const roofStartZ = 3.0;
   const roofEndZ = project.site.depth;
   const minZ = roofStartZ - sys.overhangFrontM;
@@ -70,11 +68,10 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
     const zClamped = Math.max(minZ, Math.min(maxZ, z));
     const xClamped = Math.max(minX, Math.min(maxX, x));
     if (sys.roofType === "shed_front") {
-      // Lowest at front (minZ), rising toward rear (maxZ)
-      return baseTop + (zClamped - roofStartZ) * pitch;
+      return baseTop + Math.max(0, zClamped - roofStartZ) * pitch;
     }
     if (sys.roofType === "shed_back") {
-      return baseTop + (roofEndZ - zClamped) * pitch;
+      return baseTop + Math.max(0, roofEndZ - zClamped) * pitch;
     }
     if (sys.roofType === "gable") {
       const halfX = spanX * 0.5;
@@ -86,8 +83,7 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
       const dz = Math.min(zClamped - minZ, maxZ - zClamped);
       return baseTop + Math.min(dx, dz) * pitch;
     }
-    // flat_deck
-    return baseTop + 0.15 + (zClamped - roofStartZ) * pitch;
+    return baseTop + 0.15 + Math.max(0, zClamped - roofStartZ) * pitch;
   };
 
   if (sys.roofType === "shed_front") {
@@ -99,7 +95,7 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
   } else if (sys.roofType === "hip") {
     ridgeElevationM = baseTop + Math.min(spanX * 0.5, spanZ * 0.5) * pitch;
   } else {
-    ridgeElevationM = baseTop + 0.25;
+    ridgeElevationM = baseTop + 0.15 + (maxZ - roofStartZ) * pitch;
   }
 
   // Subtract rear void (1.70..5.00, 15.35..17.00) and stair skylight area from opaque roof cover if open,
@@ -135,7 +131,7 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
   const fasciaMeters = project.site.width * 2 + spanZ * 2;
 
   const extraWallHeightAt = (levelIndex: number, x: number, z: number): number => {
-    if (levelIndex !== lt2.index) return 0;
+    if (!topLevel || levelIndex !== topLevel.index) return 0;
     const h = heightAt(x, z);
     return Math.max(0, h - baseTop);
   };
@@ -163,12 +159,18 @@ export function computeRoofMetrics(project: Project): RoofDerivedMetrics {
   };
 }
 
-export function computeStairValidation(level: Level): StairValidation[] {
+export function computeStairValidation(level: Level, upperSlabs?: Slab[]): StairValidation[] {
+  const hasVoidCutout = (stairId: string) =>
+    upperSlabs?.some((s) => s.id === `slab-void-${stairId}` || Boolean(s.isVoid)) ?? true;
+  const maxSlabThick = upperSlabs?.reduce((m, s) => (s.isVoid ? m : Math.max(m, s.thickness)), 0.12) ?? 0.14;
+
   return level.stairs.map((stair) => {
     const riserHeightM = stair.floorHeight / Math.max(1, stair.riserCount);
     const totalRunM = (stair.riserCount - 1) * stair.treadDepth;
     const blondelM = 2 * riserHeightM + stair.treadDepth;
-    const headroomM = stair.floorHeight - 0.14 - riserHeightM * 2; // clear height above 2nd step
+    const voidPresent = hasVoidCutout(stair.id);
+    const stepsBeforeCeiling = voidPresent ? 2 : 5;
+    const headroomM = Math.max(0, stair.floorHeight - maxSlabThick - riserHeightM * stepsBeforeCeiling);
     return {
       stair,
       riserHeightM,
@@ -318,7 +320,7 @@ export function validateProjectModel(
     }
 
     // Stair checks
-    for (const sv of computeStairValidation(level)) {
+    for (const sv of computeStairValidation(level, project.levels[1]?.slabs)) {
       if (!sv.okBlondel) {
         issues.push({
           id: `stair-blondel-${sv.stair.id}`,
@@ -355,13 +357,10 @@ export function validateProjectModel(
     });
   }
 
-  // SNI natural lighting check across enclosed rooms
+  // SNI natural lighting check across enclosed rooms (skip when lot is clean/empty)
   const enclosedNet = floorMetrics.reduce(
     (s, lv) =>
-      s +
-      lv.rooms
-        .filter((r) => r.room.program !== "garden" && r.room.program !== "carport" && r.room.program !== "balcony" && r.room.program !== "void")
-        .reduce((a, r) => a + r.netAreaM2, 0),
+      s + lv.rooms.filter((r) => isIndoorRoomProgram(r.room.program)).reduce((a, r) => a + r.netAreaM2, 0),
     0,
   );
   const totalWin = floorMetrics.reduce(
@@ -369,7 +368,7 @@ export function validateProjectModel(
     0,
   );
   const ratioPct = enclosedNet > 0 ? (totalWin / enclosedNet) * 100 : 0;
-  if (ratioPct < 5) {
+  if (enclosedNet > 0 && ratioPct < 5) {
     issues.push({
       id: "sni-lighting-low",
       severity: "critical",
@@ -377,7 +376,7 @@ export function validateProjectModel(
       title: `Rasio jendela (${ratioPct.toFixed(1)}%) di bawah minimum SNI 5%`,
       detail: "Tambahkan lebar jendela di fasad depan atau dinding menghadap taman/void belakang.",
     });
-  } else if (ratioPct < 10) {
+  } else if (enclosedNet > 0 && ratioPct < 10) {
     issues.push({
       id: "sni-lighting-ideal",
       severity: "info",
@@ -404,14 +403,14 @@ export function validateProjectModel(
     }
   }
 
-  // Check roof vs top level
-  if (roof.slopeDeg < 5 && (project.systems.roofCover === "genteng_beton" || project.systems.roofCover === "genteng_keramik")) {
+  // Check roof pitch compatibility with clay/concrete tiles (>= 25 deg per SNI/manufacturer guide)
+  if (roof.slopeDeg < 25 && (project.systems.roofCover === "genteng_beton" || project.systems.roofCover === "genteng_keramik")) {
     issues.push({
       id: "roof-slope-genteng",
-      severity: "critical",
+      severity: roof.slopeDeg < 15 ? "critical" : "warning",
       category: "boundary",
       title: `Kemiringan atap ${roof.slopeDeg}° terlalu landai untuk genteng`,
-      detail: "Genteng beton/keramik mensyaratkan kemiringan ≥ 25° agar tidak tampias/bocor. Gunakan Standing Seam atau Spandek untuk sudut 10°.",
+      detail: "Genteng beton/keramik mensyaratkan kemiringan ≥ 25° agar tidak tampias/bocor. Gunakan Standing Seam atau Spandek untuk atap landai.",
     });
   }
 

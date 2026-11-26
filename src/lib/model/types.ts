@@ -253,15 +253,6 @@ export interface MepPoint {
   z: number;
 }
 
-export type MepRouteKind = "air_bersih" | "air_kotor" | "listrik_lampu" | "listrik_kontak" | "listrik_ac" | "air_hujan";
-
-export interface MepRoute {
-  id: ID;
-  kind: MepRouteKind;
-  label: string;
-  pts: Vec3[];
-}
-
 export interface Level {
   id: ID;
   name: string;
@@ -276,7 +267,6 @@ export interface Level {
   lights: LightFixture[];
   hvac: HvacUnit[];
   mepPoints: MepPoint[];
-  mepRoutes: MepRoute[];
 }
 
 export interface PriceItem {
@@ -353,14 +343,6 @@ export interface StructuralParams {
   drawingRevision: string;
 }
 
-export interface GamificationState {
-  mode: "pro";
-  budgetCapIdr: number; // default 450_000_000
-  soundEnabled: boolean;
-  completedQuests: string[];
-  siteChecklistDone: Record<string, boolean>;
-}
-
 export interface BuildTileOverride {
   levelIndex: number;
   gx: number;
@@ -398,6 +380,7 @@ export interface Project {
   structuralParams: StructuralParams;
   simulation: SimulationSettings;
   stageProgress: Record<string, StageProgress>;
-  gamification: GamificationState;
+  budgetCapIdr: number; // default 450_000_000
+  siteChecklistDone: Record<string, boolean>;
   buildExtras?: BuildExtras;
 }

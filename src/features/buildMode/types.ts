@@ -26,8 +26,6 @@ export type BuildToolId =
   | "wall_paint"
   | "fence"
   | "floor_tile"
-  | "floor_rect"
-  | "floor_fill"
   | "opening"
   | "stair"
   | "roof"

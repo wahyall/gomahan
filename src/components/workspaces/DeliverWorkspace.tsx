@@ -12,6 +12,7 @@ import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { SectionHeader, StudioCard, StudioSwitch } from "@/components/ui/StudioPrimitives";
 import { AlertTriangle, CheckCircle2, Download, FileArchive, FileSpreadsheet, FileText, Image as ImageIcon } from "lucide-react";
+import { toast } from "sonner";
 
 interface Props {
   bundleBase: Omit<ExportBundleInput, "isDraft" | "canvasSnapshotDataUrl">;
@@ -24,11 +25,14 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
   const patchStructuralParams = useStudioStore((s) => s.patchStructuralParams);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
   const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
+  const setInspectSubTab = useStudioStore((s) => s.setInspectSubTab);
+  const setInspectorTab = useStudioStore((s) => s.setInspectorTab);
 
   const criticalVal = bundleBase.derived.validation.filter((v) => v.severity === "critical");
   const missingPrices = bundleBase.rab.warnings.filter((w) => w.severity === "critical");
   const revSet = project.structuralParams.drawingRevision.trim().length > 0;
-  const engChecked = project.structuralParams.engineerReviewed;
+  const reviewerSet = project.structuralParams.reviewerName.trim().length > 0;
+  const engChecked = project.structuralParams.engineerReviewed && reviewerSet;
 
   const passedCount = [criticalVal.length === 0, missingPrices.length === 0, engChecked, revSet].filter(Boolean).length;
   const readyToIssue = passedCount === 4;
@@ -65,7 +69,15 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             <GateItem
               pass={criticalVal.length === 0}
               label={`Validasi Desain Bebas Error Kritis (${criticalVal.length} error)`}
-              action={!criticalVal.length ? undefined : () => openBuildPanel("inspection")}
+              action={
+                !criticalVal.length
+                  ? undefined
+                  : () => {
+                      setInspectSubTab("inspector");
+                      setInspectorTab("validasi");
+                      openBuildPanel("inspection");
+                    }
+              }
             />
             <GateItem
               pass={missingPrices.length === 0}
@@ -74,13 +86,17 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             />
             <GateItem
               pass={engChecked}
-              label="Checklist Review Struktur SNI Telah Dicentang"
+              label={
+                reviewerSet
+                  ? "Checklist Review & Nama Peninjau Terisi"
+                  : "Isi Nama Peninjau & Centang Review Teknis"
+              }
               action={engChecked ? undefined : () => openBuildPanel("structure")}
             />
-            <GateItem pass={revSet} label={`Revisi Gambar Kerja Terisi (${project.structuralParams.drawingRevision})`} />
+            <GateItem pass={revSet} label={`Revisi Gambar Kerja Terisi (${project.structuralParams.drawingRevision || "-"})`} />
           </div>
 
-          <div className="grid gap-3 border-t border-border pt-3 sm:grid-cols-[200px_1fr] sm:items-center">
+          <div className="grid gap-3 border-t border-border pt-3 sm:grid-cols-[180px_1fr] sm:items-center">
             <label className="block space-y-1">
               <span className="text-[11px] font-medium text-muted-foreground">Kode Revisi Gambar</span>
               <input
@@ -90,10 +106,22 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
                 className="h-9 w-full rounded-lg border border-input bg-[#111418] px-2.5 font-mono text-xs text-foreground focus:border-primary focus:outline-none"
               />
             </label>
+            <label className="block space-y-1">
+              <span className="text-[11px] font-medium text-muted-foreground">Nama Peninjau / No. SKK (Wajib untuk Final)</span>
+              <input
+                type="text"
+                placeholder="Contoh: Ir. Budi Santoso, ST (SKK Muda)"
+                value={project.structuralParams.reviewerName}
+                onChange={(e) => patchStructuralParams({ reviewerName: e.target.value })}
+                className="h-9 w-full rounded-lg border border-input bg-[#111418] px-2.5 text-xs text-foreground focus:border-primary focus:outline-none"
+              />
+            </label>
+          </div>
+          <div className="pt-1">
             <StudioSwitch
               label="Setujui Asumsi & Review Teknis Sebelum Delegasi"
-              description="Mengaktifkan cap terbit Final pada kop gambar PDF dan dokumen paket ZIP"
-              checked={engChecked}
+              description="Mengaktifkan cap terbit Final pada kop gambar PDF dan dokumen paket ZIP (syarat: nama peninjau & kode revisi terisi)"
+              checked={project.structuralParams.engineerReviewed}
               onChange={(v) => patchStructuralParams({ engineerReviewed: v })}
             />
           </div>
@@ -127,7 +155,12 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             title="04. Render Viewport 3D (JPG)"
             desc="Tangkapan resolusi tinggi dari sudut kamera viewport 3D aktif saat ini."
             btnLabel="Unduh JPG"
-            onClick={() => exportCanvasJpg(getCanvas())}
+            onClick={() => {
+              const ok = exportCanvasJpg(getCanvas(), undefined, getSnapshotDataUrl());
+              if (!ok) {
+                toast.warning("Snapshot viewport 3D belum tersedia. Buka Build Studio terlebih dahulu.");
+              }
+            }}
           />
           <ExportCard
             icon={<FileArchive className="h-5 w-5 text-primary" />}

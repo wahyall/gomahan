@@ -1,6 +1,15 @@
 "use client";
 
+import { useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import {
+  FC_MAX_MPA,
+  FC_MIN_MPA,
+  FY_MAX_MPA,
+  FY_MIN_MPA,
+  SEISMIC_R_MAX,
+  SEISMIC_R_MIN,
+} from "@/lib/model/constants";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum } from "@/lib/utils/format";
@@ -32,6 +41,7 @@ export function StructureWorkspace({
 
   const sp = project.structuralParams;
   const soil = project.site.soil;
+  const [showAllCols, setShowAllCols] = useState(false);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -72,10 +82,12 @@ export function StructureWorkspace({
             <button
               type="button"
               onClick={() => {
-                if (onFocusFoundation) {
+                if (!view.showTerrain) {
+                  patchView({ showTerrain: true });
+                } else if (onFocusFoundation) {
                   onFocusFoundation();
                 } else {
-                  patchView({ showTerrain: !view.showTerrain, showStructure: true });
+                  patchView({ showTerrain: false, showStructure: true });
                 }
               }}
               className={cn(
@@ -99,7 +111,7 @@ export function StructureWorkspace({
             sub={`Geser V = ${fmtNum(struct.seismicBaseShearKn, 1)} kN (Cs=${struct.seismicCoeffCs.toFixed(3)})`}
           />
           <KpiMetric
-            label="Total Beton K-250"
+            label={`Total Beton (fc' ${sp.concreteFcMpa} MPa)`}
             value={`${fmtNum(struct.concreteVolumes.totalConcreteM3, 2)} m³`}
             sub={`Bekisting ${fmtNum(struct.totalFormworkM2, 1)} m²`}
           />
@@ -128,7 +140,7 @@ export function StructureWorkspace({
                 min={40}
                 max={400}
                 value={soil.allowableBearingKpa}
-                onChange={(v) => patchSoil({ allowableBearingKpa: Math.max(40, v) })}
+                onChange={(v) => patchSoil({ allowableBearingKpa: v })}
               />
               <StudioSelect
                 label="Kelas Situs Gempa"
@@ -143,8 +155,8 @@ export function StructureWorkspace({
               <StudioNumberField
                 label="Mutu Beton fc'"
                 unit="MPa"
-                min={17}
-                max={40}
+                min={FC_MIN_MPA}
+                max={FC_MAX_MPA}
                 step={0.5}
                 value={sp.concreteFcMpa}
                 onChange={(v) => patchStructuralParams({ concreteFcMpa: v })}
@@ -152,11 +164,28 @@ export function StructureWorkspace({
               <StudioNumberField
                 label="Baja Tulangan fy"
                 unit="MPa"
-                min={240}
-                max={500}
+                min={FY_MIN_MPA}
+                max={FY_MAX_MPA}
                 step={10}
                 value={sp.rebarFyMpa}
                 onChange={(v) => patchStructuralParams({ rebarFyMpa: v })}
+              />
+              <StudioNumberField
+                label="Beban Hidup Ruang"
+                unit="kPa"
+                min={1.5}
+                max={5}
+                step={0.25}
+                value={sp.liveLoadRoomKpa}
+                onChange={(v) => patchStructuralParams({ liveLoadRoomKpa: v })}
+              />
+              <StudioNumberField
+                label="Faktor Gempa R"
+                min={SEISMIC_R_MIN}
+                max={SEISMIC_R_MAX}
+                step={0.5}
+                value={sp.seismicR}
+                onChange={(v) => patchStructuralParams({ seismicR: v })}
               />
             </div>
           </StudioCard>
@@ -227,7 +256,18 @@ export function StructureWorkspace({
           </div>
 
           <div className="studio-surface overflow-hidden rounded-xl">
-            <div className="border-b border-border px-3.5 py-2.5 text-xs font-semibold">Pemeriksaan Kolom Utama</div>
+            <div className="flex items-center justify-between gap-2 border-b border-border px-3.5 py-2.5 text-xs font-semibold">
+              <span>Pemeriksaan Kolom ({struct.columns.length} Titik)</span>
+              {struct.columns.length > 12 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllCols((v) => !v)}
+                  className="text-[11px] font-medium text-primary hover:underline"
+                >
+                  {showAllCols ? "Tampilkan 12 Utama" : `Lihat semua ${struct.columns.length} kolom`}
+                </button>
+              )}
+            </div>
             <div className="max-h-64 overflow-y-auto">
               <table className="w-full text-xs">
                 <thead className="sticky top-0 bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
@@ -239,7 +279,7 @@ export function StructureWorkspace({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border tabular-nums">
-                  {struct.columns.slice(0, 12).map((c) => (
+                  {(showAllCols ? struct.columns : struct.columns.slice(0, 12)).map((c) => (
                     <tr key={c.id} className="hover:bg-white/[0.02]">
                       <td className="px-3 py-2 font-mono font-semibold">
                         {c.id} <span className="font-normal text-muted-foreground">({Math.round(c.widthM * 100)}×{Math.round(c.depthM * 100)})</span>

@@ -17,6 +17,7 @@ export function CommandPalette() {
   const open = useStudioStore((s) => s.commandPaletteOpen);
   const setOpen = useStudioStore((s) => s.setCommandPaletteOpen);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
+  const setGuideOpen = useStudioStore((s) => s.setGuideOpen);
   const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
   const setBrickPreset = useStudioStore((s) => s.setBrickPreset);
   const patchView = useStudioStore((s) => s.patchView);
@@ -72,10 +73,8 @@ export function CommandPalette() {
       ["walk", "Buka Walk Mode Realistis", "Shift+V"],
       ["drawings", "Buka Gambar Kerja 2D (Denah / Potongan / MEP)"],
       ["rab", "Buka RAB & Harga Satuan Surabaya"],
-      ["timeline", "Buka Jadwal Gantt & S-Curve Cash Flow"],
-      ["site", "Buka Mode Lapangan Mandor (Site Mode)"],
+      ["timeline", "Buka Jadwal Gantt, S-Curve & Mode Lapangan"],
       ["deliver", "Buka Ekspor Paket Kontraktor (PDF / Excel / ZIP)"],
-      ["guide", "Buka Panduan Standar Arsitektur Indonesia"],
     ];
 
     const panels: [StudioPanelId, string][] = [
@@ -86,6 +85,11 @@ export function CommandPalette() {
       ["inspection", "Buka Panel Outliner, Validasi & Pengaturan Proyek"],
     ];
 
+    const switchTo3dIfNeeded = () => {
+      const curr = useStudioStore.getState().workspace;
+      if (curr !== "build" && curr !== "walk") setWorkspace("build");
+    };
+
     return [
       ...ws.map(([id, label, shortcut]) => ({
         id: `ws-${id}`,
@@ -94,36 +98,74 @@ export function CommandPalette() {
         shortcut,
         run: () => setWorkspace(id),
       })),
+      {
+        id: "open-guide",
+        label: "Buka Panduan Standar Arsitektur & SNI",
+        category: "Ruang Kerja",
+        run: () => setGuideOpen(true),
+      },
       ...panels.map(([panelId, label]) => ({
         id: `panel-${panelId}`,
         label,
         category: "Panel Analisis Studio",
         run: () => openBuildPanel(panelId),
       })),
-      { id: "brick-hebel", label: "Ganti Dinding ke Bata Putih / Hebel AAC", category: "Material", run: () => setBrickPreset("hebel") },
-      { id: "brick-merah", label: "Ganti Dinding ke Bata Merah SNI", category: "Material", run: () => setBrickPreset("merah") },
-      { id: "brick-custom", label: "Gunakan Ukuran Bata Custom", category: "Material", run: () => setBrickPreset("custom") },
+      {
+        id: "brick-hebel",
+        label: "Ganti Dinding ke Bata Putih / Hebel AAC",
+        category: "Material",
+        run: () => {
+          switchTo3dIfNeeded();
+          setBrickPreset("hebel");
+        },
+      },
+      {
+        id: "brick-merah",
+        label: "Ganti Dinding ke Bata Merah SNI",
+        category: "Material",
+        run: () => {
+          switchTo3dIfNeeded();
+          setBrickPreset("merah");
+        },
+      },
+      {
+        id: "brick-custom",
+        label: "Gunakan Ukuran Bata Custom",
+        category: "Material",
+        run: () => {
+          switchTo3dIfNeeded();
+          setBrickPreset("custom");
+        },
+      },
       {
         id: "toggle-terrain",
         label: "Sembunyikan / Tampilkan Tanah (Lihat Pondasi Bawah Tanah)",
         category: "Viewport",
-        run: () =>
+        run: () => {
+          setWorkspace("build");
           patchView({
             showTerrain: !useStudioStore.getState().view.showTerrain,
             showStructure: true,
-          }),
+          });
+        },
       },
       {
         id: "explode",
         label: "Toggle Exploded View (Bongkar Granular)",
         category: "Viewport",
-        run: () => patchView({ explode: useStudioStore.getState().view.explode > 0.1 ? 0 : 1 }),
+        run: () => {
+          setWorkspace("build");
+          patchView({ explode: useStudioStore.getState().view.explode > 0.1 ? 0 : 1 });
+        },
       },
       {
         id: "xray-rebar",
         label: "Toggle X-Ray Tulangan Besi Struktur",
         category: "Viewport",
-        run: () => patchView({ xrayRebar: !useStudioStore.getState().view.xrayRebar }),
+        run: () => {
+          setWorkspace("build");
+          patchView({ xrayRebar: !useStudioStore.getState().view.xrayRebar });
+        },
       },
       {
         id: "flood-60",
@@ -135,10 +177,26 @@ export function CommandPalette() {
           patchSimulation({ floodDepthCm: 60, rainIntensityMmH: 85 });
         },
       },
-      { id: "night-lights", label: "Pratinjau Suasana Malam Hari (19:30 WIB)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 19.5 }) },
-      { id: "noon-sun", label: "Pratinjau Matahari Siang Hari (12:00 WIB)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 12 }) },
+      {
+        id: "night-lights",
+        label: "Pratinjau Suasana Malam Hari (19:30 WIB)",
+        category: "Simulasi",
+        run: () => {
+          switchTo3dIfNeeded();
+          patchSimulation({ hourOfDay: 19.5 });
+        },
+      },
+      {
+        id: "noon-sun",
+        label: "Pratinjau Matahari Siang Hari (12:00 WIB)",
+        category: "Simulasi",
+        run: () => {
+          switchTo3dIfNeeded();
+          patchSimulation({ hourOfDay: 12 });
+        },
+      },
     ];
-  }, [openBuildPanel, patchSimulation, patchView, setBrickPreset, setWorkspace]);
+  }, [openBuildPanel, patchSimulation, patchView, setBrickPreset, setGuideOpen, setWorkspace]);
 
   const filtered = useMemo(
     () =>

@@ -241,6 +241,10 @@ export class BuildCameraController {
     return this.currYaw;
   }
 
+  public getCurrentTarget(): THREE.Vector3 {
+    return this.currTarget;
+  }
+
   private clampGoalTarget(): void {
     this.goalTarget.x = Math.max(this.bounds.minX, Math.min(this.bounds.maxX, this.goalTarget.x));
     this.goalTarget.z = Math.max(this.bounds.minZ, Math.min(this.bounds.maxZ, this.goalTarget.z));

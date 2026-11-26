@@ -6,7 +6,6 @@ import type { RabSummary } from "@/lib/quantities/rabEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
-import type { GamificationEvaluation } from "@/lib/gamification/simsEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
@@ -19,7 +18,6 @@ interface StatusBarProps {
   lighting: LightingSimulationResult;
   airflow: AirflowSimulationResult;
   flood: FloodSimulationResult;
-  gamification: GamificationEvaluation;
   saveStatus: "idle" | "saving" | "saved";
 }
 
@@ -30,7 +28,6 @@ export function StatusBar({
   lighting,
   airflow,
   flood,
-  gamification,
   saveStatus,
 }: StatusBarProps) {
   const selected = useStudioStore((s) => s.selected);
@@ -48,7 +45,7 @@ export function StatusBar({
 
   const floodDanger = flood.lt1FloorFloodCm > 0 || flood.electricalHazardMcb || flood.electricalHazardOutlets;
   const floodCaution = !floodDanger && (flood.carportFloodCm > 0 || flood.gutterOverflowRisk);
-  const unlockedBadges = gamification.badges.filter((b) => b.unlocked).length;
+  const hasCriticalOrStructIssue = criticalCount > 0 || !struct.overallSafe;
 
   return (
     <footer className="no-print flex h-7 shrink-0 items-center justify-between gap-2 overflow-x-auto border-t border-border bg-[#0f1216] px-2.5 text-[10.5px] text-muted-foreground sm:px-3">
@@ -112,17 +109,27 @@ export function StatusBar({
           onClick={() => openBuildPanel("structure")}
           className={cn(
             "flex items-center gap-1 rounded px-1.5 py-0.5 transition",
-            struct.overallSafe && criticalCount === 0
-              ? "text-emerald-300 hover:bg-emerald-500/10"
-              : "bg-rose-500/15 text-rose-200 hover:bg-rose-500/25",
+            hasCriticalOrStructIssue
+              ? "bg-rose-500/15 text-rose-200 hover:bg-rose-500/25"
+              : warnCount > 0
+                ? "bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+                : "text-emerald-300 hover:bg-emerald-500/10",
           )}
         >
-          {criticalCount > 0 || !struct.overallSafe ? (
+          {hasCriticalOrStructIssue ? (
             <ShieldAlert className="h-3 w-3" />
           ) : (
-            <AlertTriangle className="h-3 w-3 opacity-65" />
+            <AlertTriangle className="h-3 w-3 opacity-75" />
           )}
-          <span>{criticalCount > 0 ? `${criticalCount} Kritis` : warnCount > 0 ? `${warnCount} Catatan` : "SNI Aman"}</span>
+          <span>
+            {criticalCount > 0
+              ? `${criticalCount} Kritis`
+              : !struct.overallSafe
+                ? "Cek Struktur"
+                : warnCount > 0
+                  ? `${warnCount} Catatan`
+                  : "SNI Aman"}
+          </span>
         </button>
 
         <button
@@ -136,10 +143,6 @@ export function StatusBar({
           <span className="hidden sm:inline">{fmtRp(rab.grandTotal)}</span>
           <span className="sm:hidden">Rp {Math.round(rab.grandTotal / 1_000_000)}jt</span>
         </button>
-
-        <span className="hidden rounded-md border border-white/[0.08] bg-white/[0.04] px-1.5 py-0.5 font-medium text-foreground xl:inline">
-          Skor {gamification.overallComfortScore} · {unlockedBadges}/{gamification.badges.length}
-        </span>
 
         <span className="flex items-center gap-1.5 pl-1 text-[10px] text-muted-foreground">
           <span

@@ -1,11 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import { HVAC_CATALOG } from "@/lib/model/catalog";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
-import { KpiMetric, SectionHeader, StudioCard, StudioRange } from "@/components/ui/StudioPrimitives";
+import { KpiMetric, SectionHeader, StudioCard, StudioConfirmDialog, StudioRange } from "@/components/ui/StudioPrimitives";
 import { Eye, Fan, Move, Plus, Power, RotateCw, Trash2, Wind, Zap } from "lucide-react";
 
 export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProjectModel; airflow: AirflowSimulationResult }) {
@@ -17,7 +18,12 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
   const addHvac = useStudioStore((s) => s.addHvac);
   const deleteHvac = useStudioStore((s) => s.deleteHvac);
 
+  const [targetLevel, setTargetLevel] = useState<0 | 1>(0);
+  const [confirmDeleteHvac, setConfirmDeleteHvac] = useState<{ lvIndex: 0 | 1; id: string; name: string } | null>(null);
+
   const sim = project.simulation;
+  const maxLevelIdx = Math.max(0, Math.min(1, project.levels.length - 1)) as 0 | 1;
+  const effectiveLevel = Math.min(targetLevel, maxLevelIdx) as 0 | 1;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -128,7 +134,26 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
           <SectionHeader
             icon={<Fan className="h-4 w-4 text-teal-400" />}
             title="Unit AC & Kipas Terpasang"
-            subtitle="Klik unit untuk menggeser, memutar arah hembusan, atau menonaktifkan sementara."
+            subtitle="Pilih lantai target untuk menambah unit, atau geser & putar arah hembusan."
+            action={
+              project.levels.length > 1 ? (
+                <div className="flex items-center gap-0.5 rounded-lg border border-border bg-black/30 p-0.5 text-[11px]">
+                  {([0, 1] as const).map((idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setTargetLevel(idx)}
+                      className={cn(
+                        "rounded-md px-2 py-0.5 font-semibold transition",
+                        effectiveLevel === idx ? "bg-[#f2efe8] text-[#14171c]" : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      LT {idx + 1}
+                    </button>
+                  ))}
+                </div>
+              ) : undefined
+            }
           />
 
           <div className="flex flex-wrap gap-1.5">
@@ -136,12 +161,15 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
               <button
                 key={cat.name}
                 type="button"
-                onClick={() =>
-                  addHvac(0, {
+                onClick={() => {
+                  const existingCount = project.levels[effectiveLevel]?.hvac.length ?? 0;
+                  const staggerX = Math.min(4.4, Math.max(0.6, 1.3 + ((existingCount * 0.85) % 2.8)));
+                  const staggerZ = Math.min(15.5, Math.max(4.5, 6.0 + Math.floor(existingCount / 3) * 1.4));
+                  addHvac(effectiveLevel, {
                     id: `hv-${Date.now().toString(36)}`,
                     name: cat.name,
                     type: cat.type,
-                    position: { x: 2.5, y: cat.defaultElevationM, z: 9.5 },
+                    position: { x: Number(staggerX.toFixed(2)), y: cat.defaultElevationM, z: Number(staggerZ.toFixed(2)) },
                     rotationY: 0,
                     pkRating: cat.pkRating,
                     flowRateM3h: cat.flowRateM3h,
@@ -150,11 +178,11 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
                     setpointC: cat.setpointC,
                     speedLevel: 2,
                     on: true,
-                  })
-                }
+                  });
+                }}
                 className="flex items-center gap-1 rounded-lg border border-border bg-black/25 px-2.5 py-1 text-[11px] font-medium transition hover:border-teal-400/60 hover:text-foreground"
               >
-                <Plus className="h-3 w-3 text-teal-400" /> {cat.name.split("(")[0]!.trim()}
+                <Plus className="h-3 w-3 text-teal-400" /> {cat.name.split("(")[0]!.trim()} (LT{effectiveLevel + 1})
               </button>
             ))}
           </div>
@@ -168,6 +196,7 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
                       <div className="truncate font-semibold text-foreground">{hv.name}</div>
                       <div className="font-mono text-[10px] text-muted-foreground tabular-nums">
                         LT{lv.index + 1} · X:{hv.position.x.toFixed(1)}m Z:{hv.position.z.toFixed(1)}m · {hv.powerW}W
+                        {hv.coolingCapacityW > 0 ? ` · ${hv.coolingCapacityW}W ding` : ""}
                       </div>
                     </div>
                     <button
@@ -224,7 +253,7 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
                     </button>
                     <button
                       type="button"
-                      onClick={() => deleteHvac(lv.index as 0 | 1, hv.id)}
+                      onClick={() => setConfirmDeleteHvac({ lvIndex: lv.index as 0 | 1, id: hv.id, name: hv.name })}
                       className="rounded-md border border-rose-500/30 bg-rose-500/10 px-1.5 py-1 text-rose-300 hover:bg-rose-500/20"
                       title="Hapus unit"
                     >
@@ -287,6 +316,21 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
           </div>
         </div>
       </div>
+
+      <StudioConfirmDialog
+        open={confirmDeleteHvac !== null}
+        onCancel={() => setConfirmDeleteHvac(null)}
+        title="Hapus Unit HVAC?"
+        description={`Unit "${confirmDeleteHvac?.name ?? ""}" akan dihapus dari lantai ${confirmDeleteHvac ? confirmDeleteHvac.lvIndex + 1 : 1} (dapat dibatalkan lewat Ctrl+Z).`}
+        confirmLabel="Hapus Unit"
+        danger
+        onConfirm={() => {
+          if (confirmDeleteHvac) {
+            deleteHvac(confirmDeleteHvac.lvIndex, confirmDeleteHvac.id);
+            setConfirmDeleteHvac(null);
+          }
+        }}
+      />
     </div>
   );
 }

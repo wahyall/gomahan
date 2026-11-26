@@ -1,4 +1,4 @@
-import type { Opening, Room, Stair, Vec2, Wall } from "@/lib/model/types";
+import type { Opening, Project, Room, Stair, Vec2, Wall } from "@/lib/model/types";
 
 export interface GridPoint {
   gx: number;
@@ -150,6 +150,8 @@ export function snapOpeningToProjectWalls(
   worldZ: number,
   openingWidth: number,
   ignoreOpeningId?: string,
+  openingSill = 0,
+  openingHeight = 2.15,
 ): ProjectOpeningSnap | null {
   const maxSnap = 0.72;
   let best: { wall: Wall; dist: number; offsetM: number; len: number; yaw: number } | null = null;
@@ -188,13 +190,29 @@ export function snapOpeningToProjectWalls(
   const worldSnapX = best.wall.start.x + ux * clampedOff;
   const worldSnapZ = best.wall.start.z + uz * clampedOff;
 
+  if (openingSill + openingHeight > best.wall.height + 0.02) {
+    return {
+      valid: false,
+      reason: `Tinggi bukaan (${(openingSill + openingHeight).toFixed(2)} m) > tinggi dinding (${best.wall.height.toFixed(2)} m)`,
+      wall: best.wall,
+      offsetM: clampedOff,
+      worldX: worldSnapX,
+      worldZ: worldSnapZ,
+      yaw: best.yaw,
+    };
+  }
+
   const cStart = clampedOff - openingWidth * 0.5;
   const cEnd = clampedOff + openingWidth * 0.5;
+  const cBottom = openingSill;
+  const cTop = openingSill + openingHeight;
   for (const sib of best.wall.openings) {
     if (sib.id === ignoreOpeningId) continue;
     const sStart = sib.offset - sib.width * 0.5;
     const sEnd = sib.offset + sib.width * 0.5;
-    if (Math.min(cEnd, sEnd) - Math.max(cStart, sStart) > -0.05) {
+    const horizOverlap = Math.min(cEnd, sEnd) - Math.max(cStart, sStart) > -0.05;
+    const vertOverlap = Math.min(cTop, sib.sill + sib.height) - Math.max(cBottom, sib.sill) > -0.04;
+    if (horizOverlap && vertOverlap) {
       return {
         valid: false,
         reason: "Bertabrakan dengan pintu/jendela lain",
@@ -337,4 +355,136 @@ export function createOpeningForWall(
     glassMaterialId: kind === "window" ? "glass_clear" : undefined,
     label,
   };
+}
+
+/**
+ * Determine whether a wall should drop to cutaway stub when POV/camera faces it.
+ * Evaluates closest point on the wall segment relative to live orbit target along camera look ray.
+ */
+export function isWallCutawayCandidate(
+  startX: number,
+  startZ: number,
+  endX: number,
+  endZ: number,
+  camX: number,
+  camZ: number,
+  targetX: number,
+  targetZ: number,
+): boolean {
+  const vx = camX - targetX;
+  const vz = camZ - targetZ;
+  const vLen = Math.hypot(vx, vz);
+  if (vLen < 1e-4) return false;
+  const ux = vx / vLen;
+  const uz = vz / vLen;
+
+  const wx = endX - startX;
+  const wz = endZ - startZ;
+  const wLenSq = wx * wx + wz * wz;
+  if (wLenSq < 1e-6) return false;
+  const wLen = Math.sqrt(wLenSq);
+  // Wall normal in XZ: skip nearly edge-on walls so side framing stays intact
+  const nx = -wz / wLen;
+  const nz = wx / wLen;
+  if (Math.abs(nx * ux + nz * uz) <= 0.28) return false;
+
+  const t = Math.max(0, Math.min(1, ((targetX - startX) * wx + (targetZ - startZ) * wz) / wLenSq));
+  const cx = startX + wx * t;
+  const cz = startZ + wz * t;
+  const dot = (cx - targetX) * ux + (cz - targetZ) * uz;
+  return dot > 0.25;
+}
+
+function pointInPolyLocal(px: number, pz: number, poly: Vec2[]): boolean {
+  if (poly.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i]!.x;
+    const zi = poly[i]!.z;
+    const xj = poly[j]!.x;
+    const zj = poly[j]!.z;
+    if (zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi || 1e-9) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/**
+ * Validate 2D XZ footprint placement against lot boundaries, walls, LT2 void holes, and stairs.
+ */
+export function validateFootprintPlacement(
+  project: Project,
+  lvIdx: 0 | 1,
+  cx: number,
+  cz: number,
+  sizeX: number,
+  sizeZ: number,
+  rotationY: number,
+  mountKind: "wall" | "ceiling" | "surface",
+  elevY = 0,
+): { valid: boolean; reason?: string } {
+  const c = Math.abs(Math.cos(rotationY));
+  const s = Math.abs(Math.sin(rotationY));
+  const halfW = (sizeX * c + sizeZ * s) * 0.5;
+  const halfD = (sizeX * s + sizeZ * c) * 0.5;
+  const margin = mountKind === "surface" ? 0.02 : 0.08;
+
+  if (
+    cx - halfW < margin ||
+    cx + halfW > project.site.width - margin ||
+    cz - halfD < margin ||
+    cz + halfD > project.site.depth - margin
+  ) {
+    return { valid: false, reason: "Melewati batas kavling 5×17 m" };
+  }
+
+  const lv = project.levels[lvIdx];
+  if (!lv || mountKind !== "surface") return { valid: true };
+
+  // Block floor props placed over LT2 stairwell/courtyard void slabs
+  if (lvIdx === 1) {
+    const voids = lv.slabs.filter((sl) => sl.isVoid);
+    const probes: [number, number][] = [
+      [cx, cz],
+      [cx - halfW * 0.65, cz - halfD * 0.65],
+      [cx + halfW * 0.65, cz + halfD * 0.65],
+    ];
+    for (const v of voids) {
+      if (probes.some(([px, pz]) => pointInPolyLocal(px, pz, v.polygon))) {
+        return { valid: false, reason: `Menimpa ${v.name}` };
+      }
+    }
+  }
+
+  // Detect true wall penetration by floor items (wall mounts & tabletop items exempt)
+  if (elevY < 0.08 && sizeX >= 0.35 && sizeZ >= 0.35) {
+    for (const w of lv.walls) {
+      if (w.height < 0.6) continue;
+      const dx = w.end.x - w.start.x;
+      const dz = w.end.z - w.start.z;
+      const wLen = Math.hypot(dx, dz);
+      if (wLen < 0.1) continue;
+      const ux = dx / wLen;
+      const uz = dz / wLen;
+      const nx = -uz;
+      const nz = ux;
+      const rx = cx - w.start.x;
+      const rz = cz - w.start.z;
+      const along = rx * ux + rz * uz;
+      const perp = Math.abs(rx * nx + rz * nz);
+
+      // Item OBB half-extent along wall normal vs along wall axis
+      const locX = Math.cos(rotationY);
+      const locZ = Math.sin(rotationY);
+      const extN = Math.abs(locX * nx - locZ * nz) * (sizeX * 0.5) + Math.abs(locZ * nx + locX * nz) * (sizeZ * 0.5);
+      const extA = Math.abs(locX * ux - locZ * uz) * (sizeX * 0.5) + Math.abs(locZ * ux + locX * uz) * (sizeZ * 0.5);
+
+      if (along > -extA + 0.08 && along < wLen + extA - 0.08 && perp < extN + w.thickness * 0.5 - 0.08) {
+        return { valid: false, reason: `Menembus ${w.name}` };
+      }
+    }
+  }
+
+  return { valid: true };
 }

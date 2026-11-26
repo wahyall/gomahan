@@ -1,18 +1,25 @@
 "use client";
 
+import { useState } from "react";
+import { LIGHT_CATALOG } from "@/lib/model/catalog";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { KpiMetric, SectionHeader, StudioCard, StudioRange } from "@/components/ui/StudioPrimitives";
-import { Eye, Lightbulb, Sun } from "lucide-react";
+import { Eye, Lightbulb, Plus, Sun } from "lucide-react";
 
 export function LightingWorkspace({ lighting }: { lighting: LightingSimulationResult }) {
   const project = useStudioStore((s) => s.project);
   const view = useStudioStore((s) => s.view);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
   const patchSiteOrientation = useStudioStore((s) => s.patchSiteOrientation);
+  const addLight = useStudioStore((s) => s.addLight);
   const updateLight = useStudioStore((s) => s.updateLight);
   const patchView = useStudioStore((s) => s.patchView);
+
+  const [targetLevel, setTargetLevel] = useState<0 | 1>(0);
+  const maxLevelIdx = Math.max(0, Math.min(1, project.levels.length - 1)) as 0 | 1;
+  const effectiveLevel = Math.min(targetLevel, maxLevelIdx) as 0 | 1;
 
   const sim = project.simulation;
 
@@ -173,7 +180,56 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
 
         {/* Light Fixtures Control Board */}
         <StudioCard className="space-y-3">
-          <SectionHeader icon={<Lightbulb className="h-4 w-4 text-amber-300" />} title="Saklar Lampu Interior & Eksterior" />
+          <SectionHeader
+            icon={<Lightbulb className="h-4 w-4 text-amber-300" />}
+            title="Saklar & Tambah Lampu Interior / Eksterior"
+            action={
+              project.levels.length > 1 ? (
+                <div className="flex items-center gap-0.5 rounded-lg border border-border bg-black/30 p-0.5 text-[11px]">
+                  {([0, 1] as const).map((idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setTargetLevel(idx)}
+                      className={cn(
+                        "rounded-md px-2 py-0.5 font-semibold transition",
+                        effectiveLevel === idx ? "bg-[#f2efe8] text-[#14171c]" : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      LT {idx + 1}
+                    </button>
+                  ))}
+                </div>
+              ) : undefined
+            }
+          />
+          <div className="flex flex-wrap gap-1.5">
+            {LIGHT_CATALOG.map((cat) => (
+              <button
+                key={cat.name}
+                type="button"
+                onClick={() => {
+                  const existingCount = project.levels[effectiveLevel]?.lights.length ?? 0;
+                  const staggerX = Math.min(4.4, Math.max(0.6, 1.2 + ((existingCount * 0.9) % 2.8)));
+                  const staggerZ = Math.min(15.5, Math.max(4.5, 5.5 + Math.floor(existingCount / 3) * 1.5));
+                  addLight(effectiveLevel, {
+                    id: `lgt-${Date.now().toString(36)}`,
+                    name: cat.name,
+                    type: cat.type,
+                    position: { x: Number(staggerX.toFixed(2)), y: cat.defaultElevationM, z: Number(staggerZ.toFixed(2)) },
+                    lumens: cat.lumens,
+                    colorTempK: cat.colorTempK,
+                    beamAngleDeg: cat.beamAngleDeg,
+                    dimmer: 1,
+                    on: true,
+                  });
+                }}
+                className="flex items-center gap-1 rounded-lg border border-border bg-black/25 px-2.5 py-1 text-[11px] font-medium transition hover:border-amber-400/60 hover:text-foreground"
+              >
+                <Plus className="h-3 w-3 text-amber-300" /> {cat.name.split(" ")[0]} {cat.type} (LT{effectiveLevel + 1})
+              </button>
+            ))}
+          </div>
           <div className="grid grid-cols-1 gap-2 @md:grid-cols-2">
             {project.levels.flatMap((lv) =>
               lv.lights.map((l) => (

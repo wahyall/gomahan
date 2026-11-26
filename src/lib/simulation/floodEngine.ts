@@ -1,4 +1,5 @@
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import { SAFE_MCB_HEIGHT_M, SAFE_OUTLET_HEIGHT_M } from "@/lib/model/constants";
 
 export interface FloodZoneImpact {
   zoneName: string;
@@ -106,6 +107,10 @@ export function runFloodSimulation(derived: DerivedProjectModel): FloodSimulatio
   const electricalHazardOutlets = lt1FloorFloodCm > 0 && lt1FloorFloodCm >= outletHeightCm - 5;
   const electricalHazardMcb = lt1FloorFloodCm > 0 && lt1FloorFloodCm >= mcbHeightCm - 5;
 
+  const hasRooms = derived.floors.some((f) => f.rooms.length > 0);
+  const lt2EvacElevCm = floor1PeilCm + Math.round((project.levels[0]?.height ?? 3.6) * 100);
+  const hasLt2 = (project.levels[1]?.rooms.length ?? 0) > 0;
+
   const zoneImpacts: FloodZoneImpact[] = [
     {
       zoneName: "Jalan & Taman Depan",
@@ -128,27 +133,35 @@ export function runFloodSimulation(derived: DerivedProjectModel): FloodSimulatio
       status: terraceFloodCm > 15 ? "TERENDAM" : terraceFloodCm > 0 ? "TERGENANG" : "KERING",
       entryCause: terraceFloodCm > 0 ? `Air naik melewati peil teras (+${terracePeilCm} cm)` : "Aman",
     },
-    {
-      zoneName: "Interior Lantai 1 (Ruang Tamu, KT 1, Keluarga, Dapur)",
-      floorPeilCm: floor1PeilCm,
-      waterDepthInsideCm: lt1FloorFloodCm,
-      status: lt1FloorFloodCm > 15 ? "TERENDAM" : lt1FloorFloodCm > 0 ? "TERGENANG" : "KERING",
-      entryCause:
-        lt1FloorFloodCm === 0
-          ? fm.doorFloodBarrier && streetFloodCm > floor1PeilCm
-            ? `Tertahan Flood Barrier pintu (+${effectiveBarrierHeightCm} cm) & Backflow Valve`
-            : `Peil LT1 (+${floor1PeilCm} cm) lebih tinggi dari banjir`
-          : backflowActive && thresholdOvertoppedCm === 0
-            ? "Air banjir masuk lewat arus balik (backflow) floor drain & WC LT1!"
-            : `Air melampaui peil lantai (${floor1PeilCm} cm)${fm.doorFloodBarrier ? ` + sekat (${effectiveBarrierHeightCm} cm)` : ""}`,
-    },
-    {
-      zoneName: "Lantai 2 (Ruang Santai, KT Anak, KT Utama)",
-      floorPeilCm: floor1PeilCm + 360,
-      waterDepthInsideCm: 0,
-      status: "KERING",
-      entryCause: "Zona evakuasi vertikal aman (+4,1 m di atas jalan)",
-    },
+    ...(hasRooms
+      ? [
+          {
+            zoneName: "Interior Lantai 1",
+            floorPeilCm: floor1PeilCm,
+            waterDepthInsideCm: lt1FloorFloodCm,
+            status: (lt1FloorFloodCm > 15 ? "TERENDAM" : lt1FloorFloodCm > 0 ? "TERGENANG" : "KERING") as FloodZoneImpact["status"],
+            entryCause:
+              lt1FloorFloodCm === 0
+                ? fm.doorFloodBarrier && streetFloodCm > floor1PeilCm
+                  ? `Tertahan Flood Barrier pintu (+${effectiveBarrierHeightCm} cm) & Backflow Valve`
+                  : `Peil LT1 (+${floor1PeilCm} cm) lebih tinggi dari banjir`
+                : backflowActive && thresholdOvertoppedCm === 0
+                  ? "Air banjir masuk lewat arus balik (backflow) floor drain & WC LT1!"
+                  : `Air melampaui peil lantai (${floor1PeilCm} cm)${fm.doorFloodBarrier ? ` + sekat (${effectiveBarrierHeightCm} cm)` : ""}`,
+          },
+          ...(hasLt2
+            ? [
+                {
+                  zoneName: "Lantai 2",
+                  floorPeilCm: lt2EvacElevCm,
+                  waterDepthInsideCm: 0,
+                  status: "KERING" as const,
+                  entryCause: `Zona evakuasi vertikal aman (+${(lt2EvacElevCm / 100).toFixed(1)} m di atas jalan)`,
+                },
+              ]
+            : []),
+        ]
+      : []),
   ];
 
   const warnings: string[] = [];
@@ -156,7 +169,7 @@ export function runFloodSimulation(derived: DerivedProjectModel): FloodSimulatio
 
   if (gutterOverflowRisk) {
     warnings.push(
-      `Debit hujan atap shed depan (${roofRunoffLps.toFixed(1)} L/dt) melebihi kapasitas talang/downspout (${Math.min(gutterCapacityLps, downspoutCapacityLps).toFixed(1)} L/dt). Perbesar talang atau tambah jumlah pipa turun!`,
+      `Debit hujan atap (${roofRunoffLps.toFixed(1)} L/dt) melebihi kapasitas talang/downspout (${Math.min(gutterCapacityLps, downspoutCapacityLps).toFixed(1)} L/dt). Perbesar talang atau tambah jumlah pipa turun!`,
     );
   }
   if (backflowActive) {
@@ -167,10 +180,14 @@ export function runFloodSimulation(derived: DerivedProjectModel): FloodSimulatio
     warnings.push(
       `BAHAYA SENGATAN LISTRIK: Muka air LT1 (${lt1FloorFloodCm} cm) mencapai stop kontak (${outletHeightCm} cm)!`,
     );
-    mitigationTips.push("Naikkan ketinggian stop kontak LT1 menjadi ≥ 110–120 cm dari lantai (standar rumah rawan banjir).");
+    mitigationTips.push(
+      `Naikkan ketinggian stop kontak LT1 menjadi ≥ ${Math.round(SAFE_OUTLET_HEIGHT_M * 100)} cm dari lantai (standar rumah rawan banjir).`,
+    );
   }
   if (electricalHazardMcb) {
-    warnings.push(`BAHAYA KRITIS: Panel MCB (${mcbHeightCm} cm) terendam — wajib pindahkan panel MCB ke ≥ 160 cm atau LT2.`);
+    warnings.push(
+      `BAHAYA KRITIS: Panel MCB (${mcbHeightCm} cm) terendam — wajib pindahkan panel MCB ke ≥ ${Math.round(SAFE_MCB_HEIGHT_M * 100)} cm atau LT2.`,
+    );
   }
   if (lt1FloorFloodCm > 0 && !fm.wallWaterproofing) {
     mitigationTips.push("Aktifkan Waterproofing dinding bawah LT1 (0–1,2 m) untuk mencegah cat menggelembung & rembesan kapiler.");
@@ -179,17 +196,20 @@ export function runFloodSimulation(derived: DerivedProjectModel): FloodSimulatio
     mitigationTips.push("Tambahkan minimal 1 Sumur Resapan SNI 03-2453-2002 di taman depan/carport agar air atap tidak langsung membanjiri jalan.");
   }
 
-  // Resilience score across a standardized 60 cm Surabaya flood test
   let score = 45;
   if (floor1PeilCm >= 50) score += 15;
   else if (floor1PeilCm >= 35) score += 8;
   if (fm.backflowValve) score += 10;
   if (fm.doorFloodBarrier) score += 12;
   if (fm.infiltrationWells >= 1) score += 6;
-  if (fm.outletHeightM >= 1.0) score += 7;
+  if (fm.outletHeightM >= SAFE_OUTLET_HEIGHT_M) score += 7;
   if (fm.wallWaterproofing) score += 5;
   if (gutterOverflowRisk) score -= 12;
+  if (backflowActive) score -= 12;
+  if (lt1FloorFloodCm > 0) score -= Math.min(35, 12 + Math.round(lt1FloorFloodCm * 0.6));
+  if (lt1FloorFloodCm > 0 && !fm.wallWaterproofing) score -= 6;
   if (electricalHazardOutlets) score -= 20;
+  if (electricalHazardMcb) score -= 25;
   const floodResilienceScore = Math.max(0, Math.min(100, score));
 
   return {
@@ -209,7 +229,7 @@ export function runFloodSimulation(derived: DerivedProjectModel): FloodSimulatio
     backflowActive,
     electricalHazardOutlets,
     electricalHazardMcb,
-    lt2EvacuationSafe: true,
+    lt2EvacuationSafe: hasLt2,
     zoneImpacts,
     floodResilienceScore,
     warnings,

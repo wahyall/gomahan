@@ -12,8 +12,10 @@ import {
   createOpeningForWall,
   findRoomAtPoint,
   getStairSpan,
+  isWallCutawayCandidate,
   snapOpeningToProjectWalls,
   snapWallEndpoint,
+  validateFootprintPlacement,
   validateProjectStairPlacement,
   worldToGridVertex,
   type GridPoint,
@@ -35,7 +37,12 @@ import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { createChamferBox, createContactShadowTexture, mergeGeometryBatch } from "@/lib/scene/geometryHelpers";
 import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, makeSunSpriteTexture, type MaterialPalette } from "@/lib/scene/materials";
-import { buildProjectHouse, buildStaticNeighborhood, type WallCutawayRecord } from "@/lib/scene/projectHouseBuilder";
+import {
+  buildProjectHouse,
+  buildStaticNeighborhood,
+  type BrickWallBatch,
+  type WallCutawayRecord,
+} from "@/lib/scene/projectHouseBuilder";
 import type { SelectionTarget, ViewState } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 
@@ -68,6 +75,7 @@ export interface BuildSceneActions {
   onPaintRoomFloor: (lv: 0 | 1, roomId: string, matId: string) => void;
   onSetFloorTiles: (tiles: { levelIndex: number; gx: number; gz: number; materialId: string }[]) => void;
   onAddStair: (lv: 0 | 1, stair: Stair, voidPoly: { x: number; z: number }[]) => void;
+  onDeleteStair: (lv: 0 | 1, stairId: string) => void;
   onAddFurniture: (lv: 0 | 1, item: FurnitureItem) => void;
   onMoveFurniture: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }, rotationY?: number) => void;
   onDeleteFurniture: (lv: 0 | 1, id: string) => void;
@@ -78,6 +86,7 @@ export interface BuildSceneActions {
   onMoveLight: (lv: 0 | 1, id: string, pos: { x: number; y: number; z: number }, rotationY?: number) => void;
   onDeleteLight: (lv: 0 | 1, id: string) => void;
   onAddPool: (pool: { id: string; gx1: number; gz1: number; gx2: number; gz2: number; depth: number }) => void;
+  onDeletePool: (poolId: string) => void;
   onSetTerrainHeights: (heights: number[]) => void;
 }
 
@@ -140,6 +149,8 @@ export class BuildScene {
   private lt2StructuralGroup: THREE.Group | null = null;
   private roofGroup: THREE.Group | null = null;
   private wallCutawayRecords: WallCutawayRecord[] = [];
+  private brickBatches: BrickWallBatch[] = [];
+  private brickExplodeMap = new Map<THREE.InstancedMesh, { n: number; pos: Float32Array; quat: Float32Array; scl: Float32Array }>();
   private animatedFans: THREE.Object3D[] = [];
   private airParticlesMesh: THREE.InstancedMesh | null = null;
   private airParticleStates: { x: number; y: number; z: number; lv: 0 | 1; life: number }[] = [];
@@ -173,6 +184,7 @@ export class BuildScene {
   private buildSignature = "";
   private simSignature = "";
   private lastCutawayYaw = Number.NaN;
+  private lastCutawayKey = "";
 
   private readonly _m4 = new THREE.Matrix4();
   private readonly _q = new THREE.Quaternion();
@@ -188,8 +200,8 @@ export class BuildScene {
   private hoverHighlightMesh: THREE.Mesh;
 
   private viewOpts: BuildViewOptions = {
-    activeLevel: 2,
-    wallVisibility: "up",
+    activeLevel: 0,
+    wallVisibility: "cutaway",
     roofVisibility: "auto",
     gridVisible: true,
     snap90Enabled: false,
@@ -490,6 +502,7 @@ export class BuildScene {
     this.canvas.removeEventListener("pointermove", this.onPointerMoveBound);
     this.canvas.removeEventListener("pointerdown", this.onPointerDownBound);
     this.canvas.removeEventListener("pointerup", this.onPointerUpBound);
+    this.canvas.removeEventListener("pointerleave", this.onPointerLeaveBound);
     this.canvas.removeEventListener("webglcontextlost", this.onContextLostBound);
     this.canvas.removeEventListener("webglcontextrestored", this.onContextRestoredBound);
     this.cameraCtrl.dispose();
@@ -962,7 +975,7 @@ export class BuildScene {
       this.viewOpts.activeTool !== opts.activeTool || this.viewOpts.selectedCatalogId !== opts.selectedCatalogId;
 
     this.viewOpts = opts;
-    this.neighborsGroup.visible = opts.neighborsVisible;
+    this.neighborsGroup.visible = opts.neighborsVisible && (this.studioView?.showNeighbors ?? true);
     if (this.gridMesh) this.gridMesh.visible = opts.gridVisible;
     this.cameraCtrl.setSnap90Enabled(opts.snap90Enabled);
     this.cameraCtrl.setEdgeScrollEnabled(opts.edgeScrollEnabled);
@@ -1000,11 +1013,12 @@ export class BuildScene {
     this.animatedFans = [];
     this.explodePieces = [];
     this.explodeInstanced = [];
+    this.brickExplodeMap.clear();
+    this.brickBatches = [];
 
     const showBricksOverlay = this.viewOpts.showBricksOverlay;
     const sv = this.studioView;
     const showFinishing = showBricksOverlay ? false : (sv?.showFinishing ?? true);
-    // Keep brick InstancedMesh decoupled from showFinishing (like Struktur Mode) so Exploded View bursts individual bricks cleanly out!
     const showBricks = showBricksOverlay || (sv?.showBricks ?? true);
     const built = buildProjectHouse(derived, struct, this.palette, this.contactShadowMat, {
       stage: sv?.stage ?? 0,
@@ -1034,8 +1048,10 @@ export class BuildScene {
     this.lt2StructuralGroup = built.lt2StructuralGroup;
     this.roofGroup = built.roofGroup;
     this.wallCutawayRecords = built.wallCutawayRecords;
+    this.brickBatches = built.brickBatches;
     this.animatedFans = built.animatedFans;
     this.lastCutawayYaw = Number.NaN;
+    this.lastCutawayKey = "";
 
     const { project, roof } = derived;
     const lt1Y = project.site.peil.floor1PeilM;
@@ -1135,7 +1151,9 @@ export class BuildScene {
       scl[i * 3 + 1] = this._s1.y;
       scl[i * 3 + 2] = this._s1.z;
     }
-    this.explodeInstanced.push({ im, n, pos, off, quat, scl });
+    const entry = { im, n, pos, off, quat, scl };
+    this.explodeInstanced.push(entry);
+    this.brickExplodeMap.set(im, entry);
   }
 
   private applyExplode(k: number): void {
@@ -1229,21 +1247,30 @@ export class BuildScene {
 
   private updateWallCutawayVisibility(force = false): void {
     const camPos = this.cameraCtrl.activeCamera.position;
+    const tgt = this.cameraCtrl.getCurrentTarget();
     const lotCX = (this.derived?.project.site.width ?? 5) * 0.5;
     const lotCZ = (this.derived?.project.site.depth ?? 17) * 0.5;
-    const dx = camPos.x - lotCX;
-    const dz = camPos.z - lotCZ;
+    let dx = camPos.x - tgt.x;
+    let dz = camPos.z - tgt.z;
+    if (Math.hypot(dx, dz) < 0.2) {
+      dx = camPos.x - lotCX;
+      dz = camPos.z - lotCZ;
+    }
     const len = Math.hypot(dx, dz) || 1;
     const ux = dx / len;
     const uz = dz / len;
     const viewAngle = Math.atan2(ux, uz);
-    if (!force && Math.abs(viewAngle - this.lastCutawayYaw) < 0.04) return;
+    const exploded = this.explodeTarget > 0.05 || this.explodeCurrent > 0.005;
+    const showBricksOverlay = this.viewOpts.showBricksOverlay;
+    const showFinishing = showBricksOverlay ? false : (this.studioView?.showFinishing ?? true);
+    const showBrickMeshes = exploded || showBricksOverlay || !showFinishing;
+    const key = `${this.viewOpts.wallVisibility}:${this.viewOpts.activeLevel}:${exploded ? 1 : 0}:${showBrickMeshes ? 1 : 0}:${Math.round(tgt.x * 10)},${Math.round(tgt.z * 10)}`;
+    if (!force && key === this.lastCutawayKey && Math.abs(viewAngle - this.lastCutawayYaw) < 0.04) return;
     this.lastCutawayYaw = viewAngle;
-
-    const exploded = this.explodeTarget > 0.05;
+    this.lastCutawayKey = key;
 
     for (const ch of this.neighborsGroup.children) {
-      if (exploded || this.viewOpts.activeLevel >= 2 || this.viewOpts.wallVisibility === "up") {
+      if (exploded || this.viewOpts.wallVisibility === "up") {
         ch.visible = true;
       } else if (ch.name === "neighbor-left") {
         ch.visible = camPos.x >= 1.2;
@@ -1252,9 +1279,7 @@ export class BuildScene {
       }
     }
 
-    // Wall visibility must obey the user's Penuh/Cutaway/Rendah choice on EVERY level:
-    // the merged viewport defaults to "Atap" (activeLevel 2), and the old
-    // `activeLevel >= 2` / `levelIndex < active` gates made Cutaway & Rendah dead buttons there.
+    const hiddenWallIds = new Set<string>();
     for (const rec of this.wallCutawayRecords) {
       if (exploded || this.viewOpts.wallVisibility === "up") {
         rec.fullGroup.visible = true;
@@ -1264,14 +1289,50 @@ export class BuildScene {
         rec.fullGroup.visible = false;
         rec.cutawayGroup.visible = false;
         rec.downGroup.visible = true;
+        hiddenWallIds.add(rec.wallId);
       } else {
-        const dot = (rec.midX - lotCX) * ux + (rec.midZ - lotCZ) * uz;
-        const isFront = dot > 0.25;
+        const isFront = isWallCutawayCandidate(
+          rec.startX,
+          rec.startZ,
+          rec.endX,
+          rec.endZ,
+          camPos.x,
+          camPos.z,
+          tgt.x,
+          tgt.z,
+        );
         rec.fullGroup.visible = !isFront;
         rec.cutawayGroup.visible = isFront;
         rec.downGroup.visible = false;
+        if (isFront) hiddenWallIds.add(rec.wallId);
       }
     }
+
+    // Keep masonry brick instances strictly synchronized with Cutaway/Rendah state so full-height
+    // bricks never block open cutaway walls even when "Bata" or unfinished view is active.
+    for (const batch of this.brickBatches) {
+      batch.im.visible = showBrickMeshes;
+      if (showBrickMeshes && !exploded) {
+        const entry = this.brickExplodeMap.get(batch.im);
+        if (!entry) continue;
+        for (const [wallId, indices] of batch.wallIndices) {
+          const hideWall = hiddenWallIds.has(wallId);
+          for (const i of indices) {
+            this._q.set(entry.quat[i * 4]!, entry.quat[i * 4 + 1]!, entry.quat[i * 4 + 2]!, entry.quat[i * 4 + 3]!);
+            this._v1.set(entry.pos[i * 3]!, entry.pos[i * 3 + 1]!, entry.pos[i * 3 + 2]!);
+            if (hideWall) {
+              this._s1.set(0, 0, 0);
+            } else {
+              this._s1.set(entry.scl[i * 3]!, entry.scl[i * 3 + 1]!, entry.scl[i * 3 + 2]!);
+            }
+            this._m4.compose(this._v1, this._q, this._s1);
+            batch.im.setMatrixAt(i, this._m4);
+          }
+        }
+        batch.im.instanceMatrix.needsUpdate = true;
+      }
+    }
+    this._s1.set(1, 1, 1);
   }
 
   private updateSelectionRing(derived: DerivedProjectModel, sel: SelectionTarget): void {
@@ -1284,7 +1345,7 @@ export class BuildScene {
       this.selectedRing.visible = false;
       return;
     }
-    const baseY = sel.levelIndex === 0 ? derived.project.site.peil.floor1PeilM : derived.project.site.peil.floor1PeilM + derived.project.levels[0]!.height;
+    const baseY = sel.levelIndex === 0 ? derived.project.site.peil.floor1PeilM : derived.project.site.peil.floor1PeilM + (derived.project.levels[0]?.height ?? 3.6);
     let pt: { x: number; y: number; z: number } | null = null;
     if (sel.kind === "furniture") {
       const f = lv.furniture.find((x) => x.id === sel.id);
@@ -1298,6 +1359,18 @@ export class BuildScene {
     } else if (sel.kind === "wall") {
       const w = lv.walls.find((x) => x.id === sel.id);
       if (w) pt = { x: (w.start.x + w.end.x) * 0.5, y: baseY + 0.05, z: (w.start.z + w.end.z) * 0.5 };
+    } else if (sel.kind === "stair") {
+      const st = lv.stairs.find((x) => x.id === sel.id);
+      if (st) pt = { x: (st.start.x + st.end.x) * 0.5, y: baseY + 0.08, z: (st.start.z + st.end.z) * 0.5 };
+    } else if (sel.kind === "pool") {
+      const pl = (derived.project.buildExtras?.pools ?? []).find((p) => p.id === sel.id);
+      if (pl) {
+        const x1 = Math.min(pl.gx1, pl.gx2) * 0.5;
+        const x2 = (Math.max(pl.gx1, pl.gx2) + 1) * 0.5;
+        const z1 = Math.min(pl.gz1, pl.gz2) * 0.5;
+        const z2 = (Math.max(pl.gz1, pl.gz2) + 1) * 0.5;
+        pt = { x: (x1 + x2) * 0.5, y: 0.05, z: (z1 + z2) * 0.5 };
+      }
     }
     if (pt) {
       this.selectedRing.position.set(pt.x, pt.y, pt.z);
@@ -1480,8 +1553,12 @@ export class BuildScene {
   ): { x: number; y: number; z: number; rotationY?: number; valid: boolean; surfaceLabel: string } {
     if (!this.derived) return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Luar area" };
     const project = this.derived.project;
-    const baseY = this.getActiveFloorY();
-    const lv = project.levels[lvIdx]!;
+    const baseY =
+      lvIdx === 0
+        ? project.site.peil.floor1PeilM
+        : project.site.peil.floor1PeilM + (project.levels[0]?.height ?? 3.6);
+    const lv = project.levels[lvIdx];
+    if (!lv) return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Lantai tidak tersedia" };
 
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
@@ -1620,6 +1697,23 @@ export class BuildScene {
     const tool = this.viewOpts.activeTool;
     const item = this.getActiveCatalogItem();
 
+    const interiorEditTool =
+      tool === "wall_straight" ||
+      tool === "wall_room" ||
+      tool === "wall_diagonal" ||
+      tool === "fence" ||
+      tool === "floor_tile" ||
+      tool === "opening" ||
+      tool === "stair" ||
+      tool === "pool" ||
+      tool === "furniture" ||
+      tool === "hvac" ||
+      tool === "light";
+    if (this.viewOpts.activeLevel === 2 && interiorEditTool) {
+      this.actions.onPreviewHud({ label: "Pilih LT 1 / LT 2 untuk memasang elemen", valid: false });
+      return;
+    }
+
     if (tool === "select" || tool === "sledgehammer" || tool === "eyedropper" || tool === "wall_paint") {
       const hitRes = this.raycastHit(e, true);
       if (hitRes && (tool !== "wall_paint" || hitRes.sel.kind === "wall")) {
@@ -1692,8 +1786,8 @@ export class BuildScene {
       return;
     }
 
-    if (tool === "floor_tile" || tool === "floor_rect" || tool === "floor_fill") {
-      if (this.viewOpts.floorBrushMode === "fill" || tool === "floor_fill") {
+    if (tool === "floor_tile") {
+      if (this.viewOpts.floorBrushMode === "fill") {
         if (!this.lastWorldPos.inBounds) return;
         const cells = computeProjectRoomFloodCells(lv.walls, cols, rows, cs, gx, gz);
         const geos = cells.slice(0, 500).map((c) => {
@@ -1734,12 +1828,12 @@ export class BuildScene {
 
     if (tool === "opening") {
       const [ow, oh] = item.sizeM ?? [0.9, 2.15, 0.14];
-      const snap = snapOpeningToProjectWalls(lv.walls, wx, wz, ow);
+      const sill = item.openingKind === "window" ? 0.9 : item.openingKind === "vent" ? 2.45 : 0;
+      const snap = snapOpeningToProjectWalls(lv.walls, wx, wz, ow, undefined, sill, oh);
       if (!snap) {
         this.actions.onPreviewHud({ label: `Dekatkan ke dinding (${item.name})`, valid: false });
         return;
       }
-      const sill = item.openingKind === "window" ? 0.9 : item.openingKind === "vent" ? 2.45 : 0;
       const m = new THREE.Mesh(new THREE.BoxGeometry(ow, oh, 0.22), snap.valid ? this.validMat : this.invalidMat);
       m.position.set(snap.worldX, baseY + sill + oh * 0.5, snap.worldZ);
       m.rotation.y = snap.yaw;
@@ -1803,16 +1897,20 @@ export class BuildScene {
         tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
       const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
       const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
-      const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), placed.valid ? this.validMat : this.invalidMat);
+      const fpCheck = placed.valid
+        ? validateFootprintPlacement(project, lvIdx, placed.x, placed.z, sx, sz, rot, mountKind, placed.y)
+        : { valid: false, reason: placed.surfaceLabel };
+      const isValid = placed.valid && fpCheck.valid;
+      const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), isValid ? this.validMat : this.invalidMat);
       const centerY = mountKind === "surface" ? baseY + placed.y + sy * 0.5 : baseY + placed.y;
       m.position.set(placed.x, centerY, placed.z);
       m.rotation.y = rot;
       this.previewGroup.add(m);
       this.actions.onPreviewHud({
-        label: placed.valid
+        label: isValid
           ? `${item.name} · ${placed.surfaceLabel} (R putar · Shift snap)`
-          : placed.surfaceLabel,
-        valid: placed.valid,
+          : fpCheck.reason ?? placed.surfaceLabel,
+        valid: isValid,
       });
       return;
     }
@@ -1849,33 +1947,47 @@ export class BuildScene {
 
     // Drag moving an already-selected Furniture / HVAC / Light item directly along surfaces (walls/floors/tables)
     if (this.draggingEntity) {
-      const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
-      const lv = this.derived.project.levels[lvIdx];
       const lotW = this.derived.project.site.width;
       const lotD = this.derived.project.site.depth;
-      if (lv && this.dragPendingCommit) {
+      if (this.dragPendingCommit) {
         const pending = this.dragPendingCommit;
+        const lvIdx = pending.lvIdx;
+        const lv = this.derived.project.levels[lvIdx];
+        if (!lv) return;
         let nextPlaced: { x: number; y: number; z: number; rotationY?: number; valid: boolean; surfaceLabel: string } | null = null;
+        let sx = 0.45;
+        let sz = 0.45;
+        let mountK: "wall" | "ceiling" | "surface" = "surface";
         if (pending.kind === "furniture") {
+          const curF = lv.furniture.find((x) => x.id === pending.id);
+          if (curF) {
+            sx = curF.size.x;
+            sz = curF.size.z;
+          }
           nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, "surface", 0, pending.origPos.y, pending.id);
         } else if (pending.kind === "hvac") {
           const cur = lv.hvac.find((x) => x.id === pending.id);
           if (cur) {
-            const mk = this.getMountKind("hvac", cur.type, undefined);
+            mountK = this.getMountKind("hvac", cur.type, undefined);
             const wallOff = cur.type === "ac_split" ? 0.12 : cur.type === "wall_fan" ? 0.03 : 0.05;
-            nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mk, wallOff, pending.origPos.y, pending.id);
+            nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mountK, wallOff, pending.origPos.y, pending.id);
           }
         } else if (pending.kind === "light") {
           const cur = lv.lights.find((x) => x.id === pending.id);
           if (cur) {
-            const mk = this.getMountKind("light", undefined, cur.type);
-            nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mk, 0.05, pending.origPos.y, pending.id);
+            mountK = this.getMountKind("light", undefined, cur.type);
+            nextPlaced = this.raycastSurfaceForPlacement(e, lvIdx, mountK, 0.05, pending.origPos.y, pending.id);
           }
         }
 
-        if (nextPlaced && nextPlaced.valid) {
-          const cx = THREE.MathUtils.clamp(nextPlaced.x, 0.16, lotW - 0.16);
-          const cz = THREE.MathUtils.clamp(nextPlaced.z, 0.16, lotD - 0.16);
+        const dragRot = nextPlaced?.rotationY ?? pending.rotationY ?? 0;
+        const fpOk = nextPlaced?.valid
+          ? validateFootprintPlacement(this.derived.project, lvIdx, nextPlaced.x, nextPlaced.z, sx, sz, dragRot, mountK, nextPlaced.y)
+          : { valid: false, reason: nextPlaced?.surfaceLabel ?? "Area tidak valid" };
+
+        if (nextPlaced && nextPlaced.valid && fpOk.valid) {
+          const cx = THREE.MathUtils.clamp(nextPlaced.x, 0.05, lotW - 0.05);
+          const cz = THREE.MathUtils.clamp(nextPlaced.z, 0.05, lotD - 0.05);
           pending.pos = { x: cx, y: nextPlaced.y, z: cz };
           if (nextPlaced.rotationY !== undefined) pending.rotationY = nextPlaced.rotationY;
           if (this.draggingMesh) {
@@ -1899,7 +2011,7 @@ export class BuildScene {
           });
         } else {
           this.actions.onPreviewHud({
-            label: nextPlaced?.surfaceLabel ?? "Area tidak valid",
+            label: fpOk.reason ?? nextPlaced?.surfaceLabel ?? "Area tidak valid",
             valid: false,
           });
         }
@@ -1958,9 +2070,9 @@ export class BuildScene {
     if (tool === "select") {
       const hitRes = this.raycastHit(e, true);
       if (hitRes && (hitRes.sel.kind === "furniture" || hitRes.sel.kind === "hvac" || hitRes.sel.kind === "light")) {
-        const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
-        const lv = this.derived.project.levels[lvIdx];
         const sel = hitRes.sel;
+        const lvIdx = sel.levelIndex as 0 | 1;
+        const lv = this.derived.project.levels[lvIdx];
         const curItem =
           sel.kind === "furniture"
             ? lv?.furniture.find((x) => x.id === sel.id)
@@ -1999,9 +2111,17 @@ export class BuildScene {
     }
 
     if (tool === "wall_straight" || tool === "wall_room" || tool === "wall_diagonal" || tool === "fence") {
+      if (this.viewOpts.activeLevel === 2) {
+        simsAudio.play("warning");
+        return;
+      }
       this.dragStartVertex = curVert;
-    } else if (tool === "floor_tile" || tool === "floor_rect") {
-      if (this.viewOpts.floorBrushMode === "rect" || tool === "floor_rect") {
+    } else if (tool === "floor_tile") {
+      if (this.viewOpts.activeLevel === 2) {
+        simsAudio.play("warning");
+        return;
+      }
+      if (this.viewOpts.floorBrushMode === "rect") {
         this.dragStartCell = { gx, gz };
       } else if (this.viewOpts.floorBrushMode === "tile" && this.lastWorldPos.inBounds) {
         this.isBrushDown = true;
@@ -2014,6 +2134,10 @@ export class BuildScene {
         });
       }
     } else if (tool === "pool") {
+      if (this.viewOpts.activeLevel !== 0) {
+        simsAudio.play("warning");
+        return;
+      }
       this.dragStartCell = { gx, gz };
     } else if (tool === "terrain" && this.lastWorldPos.inBounds) {
       this.isBrushDown = true;
@@ -2066,6 +2190,25 @@ export class BuildScene {
     const tool = this.viewOpts.activeTool;
     const item = this.getActiveCatalogItem();
     const brickThick = project.systems.brick.outerThicknessMm / 1000;
+
+    if (
+      this.viewOpts.activeLevel === 2 &&
+      (tool === "wall_straight" ||
+        tool === "wall_room" ||
+        tool === "wall_diagonal" ||
+        tool === "fence" ||
+        tool === "floor_tile" ||
+        tool === "opening" ||
+        tool === "stair" ||
+        tool === "pool" ||
+        tool === "furniture" ||
+        tool === "hvac" ||
+        tool === "light")
+    ) {
+      simsAudio.play("warning");
+      this.cancelActivePreview();
+      return;
+    }
 
     // Dragged straight/diagonal/fence wall
     if ((tool === "wall_straight" || tool === "wall_diagonal" || tool === "fence") && this.dragStartVertex) {
@@ -2133,7 +2276,7 @@ export class BuildScene {
       this.cancelActivePreview();
       return;
     }
-    if ((tool === "floor_tile" || tool === "floor_rect") && this.dragStartCell) {
+    if (tool === "floor_tile" && this.dragStartCell) {
       const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.lastWorldPos.x / cs)));
       const gz = Math.max(0, Math.min(rows - 1, Math.floor(this.lastWorldPos.z / cs)));
       const tiles: { levelIndex: number; gx: number; gz: number; materialId: string }[] = [];
@@ -2150,8 +2293,12 @@ export class BuildScene {
     if (tool === "pool" && this.dragStartCell) {
       const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.lastWorldPos.x / cs)));
       const gz = Math.max(0, Math.min(rows - 1, Math.floor(this.lastWorldPos.z / cs)));
-      if (this.viewOpts.activeLevel === 0 && Math.abs(gx - this.dragStartCell.gx) >= 1 && Math.abs(gz - this.dragStartCell.gz) >= 1) {
-        this.actions.onAddPool({ id: uid("pool"), gx1: this.dragStartCell.gx, gz1: this.dragStartCell.gz, gx2: gx, gz2: gz, depth: 1.25 });
+      const gx1 = Math.min(this.dragStartCell.gx, gx);
+      const gx2 = Math.max(this.dragStartCell.gx, gx);
+      const gz1 = Math.min(this.dragStartCell.gz, gz);
+      const gz2 = Math.max(this.dragStartCell.gz, gz);
+      if (this.viewOpts.activeLevel === 0 && gx2 - gx1 >= 1 && gz2 - gz1 >= 1) {
+        this.actions.onAddPool({ id: uid("pool"), gx1, gz1, gx2, gz2, depth: 1.25 });
       } else {
         simsAudio.play("warning");
       }
@@ -2169,7 +2316,7 @@ export class BuildScene {
     if (dist > 6) return;
 
     // Room floor flood fill click
-    if ((tool === "floor_tile" || tool === "floor_fill") && (this.viewOpts.floorBrushMode === "fill" || tool === "floor_fill")) {
+    if (tool === "floor_tile" && this.viewOpts.floorBrushMode === "fill") {
       const roomHit = findRoomAtPoint(lv.rooms, this.lastWorldPos.x, this.lastWorldPos.z);
       if (roomHit) {
         this.actions.onPaintRoomFloor(lvIdx, roomHit.id, item.materialId ?? "granite_warm");
@@ -2183,13 +2330,13 @@ export class BuildScene {
     // Snap Opening to Project Wall
     if (tool === "opening") {
       const [ow, oh] = item.sizeM ?? [0.9, 2.15, 0.14];
-      const snap = snapOpeningToProjectWalls(lv.walls, this.lastWorldPos.x, this.lastWorldPos.z, ow);
+      const kind = item.openingKind ?? "door";
+      const sill = kind === "window" ? 0.9 : kind === "vent" ? 2.45 : 0;
+      const snap = snapOpeningToProjectWalls(lv.walls, this.lastWorldPos.x, this.lastWorldPos.z, ow, undefined, sill, oh);
       if (!snap || !snap.valid) {
         simsAudio.play("warning");
         return;
       }
-      const kind = item.openingKind ?? "door";
-      const sill = kind === "window" ? 0.9 : kind === "vent" ? 2.45 : 0;
       this.actions.onAddOpening(lvIdx, snap.wall.id, createOpeningForWall(uid("op"), kind, snap.offsetM, ow, oh, sill, item.name));
       return;
     }
@@ -2232,20 +2379,24 @@ export class BuildScene {
       const defaultElev =
         tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
       const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
-      if (!placed.valid) {
+      const [sx, , sz] = item.sizeM ?? [0.5, 0.5, 0.5];
+      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
+      const fpCheck = placed.valid
+        ? validateFootprintPlacement(project, lvIdx, placed.x, placed.z, sx, sz, rot, mountKind, placed.y)
+        : { valid: false };
+      if (!placed.valid || !fpCheck.valid) {
         simsAudio.play("warning");
         return;
       }
-      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationQuarter * (Math.PI / 2);
       if (tool === "furniture") {
-        const [sx, sy, sz] = item.sizeM ?? [1.0, 0.8, 0.8];
+        const [fx, fy, fz] = item.sizeM ?? [1.0, 0.8, 0.8];
         this.actions.onAddFurniture(lvIdx, {
           id: uid("furn"),
           catalogId: item.materialId ?? "sofa_l",
           name: item.name,
           category: item.furnitureCategory ?? "seating",
           position: { x: placed.x, y: placed.y, z: placed.z },
-          size: { x: sx, y: sy, z: sz },
+          size: { x: fx, y: fy, z: fz },
           rotationY: rot,
           colorHex: item.swatchHex,
           accentHex: item.accentHex,
@@ -2298,6 +2449,8 @@ export class BuildScene {
       else if (s.kind === "furniture") this.actions.onDeleteFurniture(s.levelIndex as 0 | 1, s.id);
       else if (s.kind === "hvac") this.actions.onDeleteHvac(s.levelIndex as 0 | 1, s.id);
       else if (s.kind === "light") this.actions.onDeleteLight(s.levelIndex as 0 | 1, s.id);
+      else if (s.kind === "stair") this.actions.onDeleteStair(s.levelIndex as 0 | 1, s.id);
+      else if (s.kind === "pool") this.actions.onDeletePool(s.id);
       return;
     }
     if (tool === "eyedropper" && hitRes) {
@@ -2383,7 +2536,13 @@ export class BuildScene {
 
       if (Math.abs(this.explodeCurrent - this.explodeTarget) > 0.001) {
         this.explodeCurrent += (this.explodeTarget - this.explodeCurrent) * (this.reducedMotion ? 1 : Math.min(1, dt * 10));
+        if (Math.abs(this.explodeCurrent - this.explodeTarget) <= 0.001) {
+          this.explodeCurrent = this.explodeTarget;
+        }
         this.applyExplode(this.explodeCurrent);
+        if (this.explodeCurrent <= 0.005 && this.explodeTarget <= 0.005) {
+          this.updateWallCutawayVisibility(true);
+        }
       }
 
       if (!this.reducedMotion) {

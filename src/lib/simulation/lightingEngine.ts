@@ -2,12 +2,13 @@ import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { pointInPolygon, type RoomGeometryMetrics } from "@/lib/geometry/rooms";
 import type { Wall } from "@/lib/model/types";
 
-function segmentBlockedByWalls(ax: number, az: number, bx: number, bz: number, walls: Wall[]): boolean {
+function segmentBlockedByWalls(ax: number, az: number, bx: number, bz: number, walls: Wall[], ignoreWallId?: string): boolean {
   const dx = bx - ax;
   const dz = bz - az;
   const segLen = Math.hypot(dx, dz);
   if (segLen < 0.12) return false;
   for (const w of walls) {
+    if (ignoreWallId && w.id === ignoreWallId) continue;
     if (w.height < 1.6) continue;
     const wx = w.end.x - w.start.x;
     const wz = w.end.z - w.start.z;
@@ -17,9 +18,9 @@ function segmentBlockedByWalls(ax: number, az: number, bx: number, bz: number, w
     if (Math.abs(denom) < 1e-6) continue;
     const t = ((w.start.x - ax) * wz - (w.start.z - az) * wx) / denom;
     const u = ((w.start.x - ax) * dz - (w.start.z - az) * dx) / denom;
-    if (t > 0.06 && t < 0.94 && u > 0.02 && u < 0.98) {
-      // Check if an open door / window / arch exists at u * wLen
-      const hitAlong = u * wLen;
+    const minT = ignoreWallId ? 0.04 : 0.02;
+    if (t > minT && t <= 1.001 && u >= -0.005 && u <= 1.005) {
+      const hitAlong = Math.max(0, Math.min(wLen, u * wLen));
       const passesOpening = w.openings.some(
         (op) => Math.abs(hitAlong - op.offset) <= op.width * 0.5 && (op.kind === "arch" || op.kind === "window" || op.openPct > 15),
       );
@@ -134,16 +135,20 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
 
   const gridW = 25; // 5m / 0.2m
   const gridD = 85; // 17m / 0.2m
+  const lt1NatGrid = new Float32Array(gridW * gridD);
+  const lt1ArtGrid = new Float32Array(gridW * gridD);
   const lt1Grid = new Float32Array(gridW * gridD);
+  const lt2NatGrid = new Float32Array(gridW * gridD);
+  const lt2ArtGrid = new Float32Array(gridW * gridD);
   const lt2Grid = new Float32Array(gridW * gridD);
 
   const rooms: RoomLightingResult[] = [];
   const recommendations: string[] = [];
 
-  // Collect window emitters per level
   const collectOpenings = (lvIdx: number) => {
-    const lv = project.levels[lvIdx]!;
-    const out: { x: number; z: number; area: number; dirZ: number; dirX: number }[] = [];
+    const lv = project.levels[lvIdx];
+    if (!lv) return [];
+    const out: { wallId: string; x: number; z: number; area: number; dirZ: number; dirX: number }[] = [];
     for (const w of lv.walls) {
       const dx = w.end.x - w.start.x;
       const dz = w.end.z - w.start.z;
@@ -152,6 +157,7 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
         if (op.kind === "window" || op.kind === "skylight" || (op.kind === "door" && op.width > 1.2)) {
           const t = op.offset / len;
           out.push({
+            wallId: w.id,
             x: w.start.x + dx * t,
             z: w.start.z + dz * t,
             area: op.width * op.height,
@@ -165,11 +171,17 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
   };
 
   const lt1Openings = collectOpenings(0);
-  const lt2Openings = collectOpenings(1);
+  const lt2Openings = project.levels[1] ? collectOpenings(1) : [];
 
-  // Fill 2D floor lux heatmaps
-  const fillGrid = (grid: Float32Array, lvIdx: number, openings: ReturnType<typeof collectOpenings>) => {
-    const lv = project.levels[lvIdx]!;
+  const fillGrid = (
+    natGrid: Float32Array,
+    artGrid: Float32Array,
+    totGrid: Float32Array,
+    lvIdx: number,
+    openings: ReturnType<typeof collectOpenings>,
+  ) => {
+    const lv = project.levels[lvIdx];
+    if (!lv) return;
     const rainAtten = sim.rainIntensityMmH > 10 ? 0.55 : 1.0;
 
     for (let gz = 0; gz < gridD; gz++) {
@@ -177,95 +189,89 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
         const px = (gx + 0.5) * 0.2;
         const pz = (gz + 0.5) * 0.2;
 
-        // Open courtyard / garden / balcony / void receive direct sky
         const isOutdoorLt1 = lvIdx === 0 && (pz < 4.0 || (pz > 15.35 && px > 1.7));
         const isVoidArea = pz > 15.35 && px > 1.7;
-        const isStairSkylight = px < 1.35 && pz >= 7.5 && pz <= 12.5;
+        const isStairSkylight = (project.levels[0]?.stairs.length ?? 0) > 0 && px < 1.35 && pz >= 7.5 && pz <= 12.5;
         const isBalconyLt2 = lvIdx === 1 && px < 2.5 && pz >= 3.0 && pz < 4.0;
 
-        let lux = 0;
+        let natLux = 0;
         if (solar.isDaylight) {
           if (isOutdoorLt1 || isVoidArea || isBalconyLt2) {
-            lux += solar.skyIrradianceLux * 0.38 * rainAtten;
+            natLux += solar.skyIrradianceLux * 0.38 * rainAtten;
           } else {
-            // Natural daylight contribution from openings + void + stair skylight
             for (const op of openings) {
               const dist = Math.hypot(px - op.x, pz - op.z);
+              if (dist > 7.0) continue;
+              if (segmentBlockedByWalls(op.x, op.z, px, pz, lv.walls, op.wallId)) continue;
+              const orientFactor = 0.45 + 0.55 * Math.abs(op.dirX * solar.sunDir[0] + op.dirZ * solar.sunDir[2]);
               const shading = pz < 5.0 ? Math.max(0.45, 1 - project.systems.overhangFrontM * 0.35) : 0.85;
               const falloff = 1 / (1 + dist * dist * 0.42);
-              lux += solar.skyIrradianceLux * 0.042 * op.area * falloff * shading * rainAtten;
+              natLux += solar.skyIrradianceLux * 0.052 * op.area * falloff * shading * rainAtten * orientFactor;
             }
             if (isStairSkylight) {
-              lux += solar.skyIrradianceLux * 0.14 * rainAtten;
-            } else if (lvIdx === 0 && pz >= 7.5 && pz <= 12.5) {
-              // Skylight spill down stair to Ruang Keluarga
+              natLux += solar.skyIrradianceLux * 0.14 * rainAtten;
+            } else if (lvIdx === 0 && (project.levels[0]?.stairs.length ?? 0) > 0 && pz >= 7.5 && pz <= 12.5) {
               const dSkylight = Math.hypot(px - 0.7, pz - 10.0);
-              lux += (solar.skyIrradianceLux * 0.05 * rainAtten) / (1 + dSkylight * dSkylight * 0.35);
+              natLux += (solar.skyIrradianceLux * 0.05 * rainAtten) / (1 + dSkylight * dSkylight * 0.35);
             }
-            // Rear void spill to Dining / Master Bedroom
-            if (pz >= 12.5 && pz <= 15.35) {
+            if (lv.rooms.length > 0 && pz >= 12.5 && pz <= 15.35) {
               const dVoid = Math.max(0.5, 15.35 - pz);
-              lux += (solar.skyIrradianceLux * 0.032 * rainAtten) / (1 + dVoid * dVoid * 0.3);
+              natLux += (solar.skyIrradianceLux * 0.032 * rainAtten) / (1 + dVoid * dVoid * 0.3);
             }
           }
         }
 
-        // Artificial fixtures on this level (wall-occluded so lamps illuminate their own room without bleeding through brick walls)
+        let artLux = 0;
         for (const l of lv.lights) {
           if (!l.on || l.dimmer <= 0) continue;
           const dHoriz = Math.hypot(px - l.position.x, pz - l.position.z);
           if (dHoriz > 6.5) continue;
           if (segmentBlockedByWalls(l.position.x, l.position.z, px, pz, lv.walls)) continue;
-          const dVert = Math.max(0.65, l.position.y - 0.75); // workplane 0.75 m
+          const dVert = Math.max(0.65, l.position.y - 0.75);
           const d3 = Math.hypot(dHoriz, dVert);
           const cosTheta = dVert / d3;
           const beamHalf = ((l.beamAngleDeg * 0.5) * Math.PI) / 180;
           const angle = Math.acos(Math.min(1, cosTheta));
           const beamAtten = angle <= beamHalf ? 1.0 : Math.max(0.18, Math.exp(-Math.pow((angle - beamHalf) * 2.2, 2)));
-          lux += ((l.lumens * l.dimmer * cosTheta) / (Math.PI * d3 * d3)) * beamAtten * 1.65;
+          artLux += ((l.lumens * l.dimmer * cosTheta) / (Math.PI * d3 * d3)) * beamAtten * 1.65;
         }
 
-        grid[gz * gridW + gx] = Math.min(25000, lux);
+        const idx = gz * gridW + gx;
+        natGrid[idx] = Math.min(25000, natLux);
+        artGrid[idx] = Math.min(25000, artLux);
+        totGrid[idx] = Math.min(25000, natLux + artLux);
       }
     }
   };
 
-  fillGrid(lt1Grid, 0, lt1Openings);
-  fillGrid(lt2Grid, 1, lt2Openings);
+  fillGrid(lt1NatGrid, lt1ArtGrid, lt1Grid, 0, lt1Openings);
+  fillGrid(lt2NatGrid, lt2ArtGrid, lt2Grid, 1, lt2Openings);
 
-  const sampleRoom = (rm: RoomGeometryMetrics, grid: Float32Array) => {
+  const sampleRoom = (rm: RoomGeometryMetrics, natGrid: Float32Array, artGrid: Float32Array, totGrid: Float32Array) => {
     const { minX, maxX, minZ, maxZ } = rm.bounds;
     const x0 = Math.max(0, Math.floor(minX / 0.2));
     const x1 = Math.min(gridW - 1, Math.floor(maxX / 0.2));
     const z0 = Math.max(0, Math.floor(minZ / 0.2));
     const z1 = Math.min(gridD - 1, Math.floor(maxZ / 0.2));
-    let sum = 0;
+    let sumTot = 0;
+    let sumNat = 0;
+    let sumArt = 0;
     let cnt = 0;
     for (let z = z0; z <= z1; z++) {
       for (let x = x0; x <= x1; x++) {
         const cx = (x + 0.5) * 0.2;
         const cz = (z + 0.5) * 0.2;
         if (!pointInPolygon({ x: cx, z: cz }, rm.room.polygon)) continue;
-        sum += grid[z * gridW + x] ?? 0;
+        const idx = z * gridW + x;
+        sumNat += natGrid[idx] ?? 0;
+        sumArt += artGrid[idx] ?? 0;
+        sumTot += totGrid[idx] ?? 0;
         cnt++;
       }
     }
-    const totalLux = cnt > 0 ? sum / cnt : 0;
-
-    // Split natural vs artificial estimate using true polygon containment (handles L-shaped rooms & wall-mounted lamps!)
-    const lv = project.levels[rm.levelIndex]!;
-    let artSum = 0;
-    for (const l of lv.lights) {
-      if (!l.on || l.dimmer <= 0) continue;
-      const inPoly = pointInPolygon({ x: l.position.x, z: l.position.z }, rm.room.polygon);
-      const nearBoundary = !inPoly && Math.hypot(l.position.x - rm.centroid.x, l.position.z - rm.centroid.z) <= 2.4 &&
-        !segmentBlockedByWalls(l.position.x, l.position.z, rm.centroid.x, rm.centroid.z, lv.walls);
-      if (inPoly || nearBoundary) {
-        artSum += (l.lumens * l.dimmer) / Math.max(2.5, rm.netAreaM2);
-      }
-    }
-    const artificialLux = Math.round(artSum * 0.78);
-    const naturalLux = Math.max(0, Math.round(totalLux - artificialLux));
+    const naturalLux = Math.round(cnt > 0 ? sumNat / cnt : 0);
+    const artificialLux = Math.round(cnt > 0 ? sumArt / cnt : 0);
+    const totalLux = Math.round(cnt > 0 ? sumTot / cnt : 0);
     const daylightFactorPct =
       solar.isDaylight && solar.skyIrradianceLux > 100
         ? Math.min(12, (naturalLux / solar.skyIrradianceLux) * 100)
@@ -285,7 +291,7 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
       daylightFactorPct,
       naturalLux,
       artificialLux,
-      totalLux: Math.round(totalLux),
+      totalLux,
       targetLux,
       glareRisk: naturalLux > 3500 && rm.room.program !== "garden" && rm.room.program !== "carport",
       status,
@@ -293,18 +299,21 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
   };
 
   for (const fl of floors) {
-    const grid = fl.levelIndex === 0 ? lt1Grid : lt2Grid;
+    const isLt2 = fl.levelIndex === 1;
+    const natG = isLt2 ? lt2NatGrid : lt1NatGrid;
+    const artG = isLt2 ? lt2ArtGrid : lt1ArtGrid;
+    const totG = isLt2 ? lt2Grid : lt1Grid;
     for (const rm of fl.rooms) {
       if (rm.room.program === "void") continue;
-      rooms.push(sampleRoom(rm, grid));
+      rooms.push(sampleRoom(rm, natG, artG, totG));
     }
   }
 
   const enclosed = rooms.filter(
     (r) => r.program !== "garden" && r.program !== "carport" && r.program !== "balcony",
   );
-  const passing = enclosed.filter((r) => r.status !== "GELAP").length;
-  const sniCompliancePct = enclosed.length > 0 ? Math.round((passing / enclosed.length) * 100) : 100;
+  const passing = enclosed.filter((r) => r.totalLux >= r.targetLux).length;
+  const sniCompliancePct = enclosed.length > 0 ? Math.round((passing / enclosed.length) * 100) : 0;
   const avgHouseLux =
     enclosed.length > 0 ? Math.round(enclosed.reduce((s, r) => s + r.totalLux, 0) / enclosed.length) : 0;
 
@@ -314,13 +323,18 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
       `${darkRooms.map((d) => d.roomName).join(", ")} masih kurang cahaya (${darkRooms[0]!.totalLux} lux < target ${darkRooms[0]!.targetLux} lux). Nyalakan lampu LED atau perbesar bukaan ke taman/void.`,
     );
   }
-  if (roof.slopeDeg >= 8 && project.systems.roofType === "shed_front") {
+  if (enclosed.length > 0 && roof.slopeDeg >= 8 && project.systems.roofType === "shed_front") {
     recommendations.push(
       "Atap shed roof 10° miring ke depan menciptakan bukaan tinggi di sisi belakang — ideal untuk jendela clerestory/void agar cahaya siang masuk jauh ke ruang keluarga.",
     );
   }
 
-  const daylightScore = Math.min(100, Math.round(sniCompliancePct * 0.7 + Math.min(30, derived.lightingRatioPct * 2.5)));
+  const daylightPassCount = enclosed.filter((r) => r.naturalLux >= r.targetLux).length;
+  const daylightPassPct = enclosed.length > 0 ? (daylightPassCount / enclosed.length) * 100 : 0;
+  const daylightScore =
+    enclosed.length === 0 || !solar.isDaylight
+      ? 0
+      : Math.min(100, Math.round(daylightPassPct * 0.7 + Math.min(30, derived.lightingRatioPct * 2.5)));
 
   return {
     solar,

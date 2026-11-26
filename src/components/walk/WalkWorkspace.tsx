@@ -60,7 +60,6 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
   }, [onSnapshotCapture]);
 
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
-  const updateOpening = useStudioStore((s) => s.updateOpening);
 
   const [telemetry, setTelemetry] = useState<WalkHudTelemetry | null>(null);
   const [webglError, setWebglError] = useState<string | null>(null);
@@ -84,7 +83,6 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
       }
       const ws = new WalkScene(canvas, derived, struct, {
         onHudUpdate: (next) => setTelemetry(next),
-        onToggleDoor: (lv, wallId, opId, openPct) => updateOpening(lv, wallId, opId, { openPct }),
         onExitWalkMode: () => setWorkspace("build"),
       });
       sceneRef.current = ws;
@@ -126,10 +124,6 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
 
   // Dynamic time-of-day (T cycles Pagi → Siang → Sore → Malam, same presets as Build mode)
   const hourOfDay = derived.project.simulation.hourOfDay;
-  const cycleTime = () => {
-    const next = TIMES_OF_DAY[(activeTimeIdx(hourOfDay) + 1) % TIMES_OF_DAY.length]!;
-    useStudioStore.getState().patchSimulation({ hourOfDay: next.hour });
-  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -140,12 +134,14 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
         !(e.target instanceof HTMLSelectElement)
       ) {
         e.preventDefault();
-        cycleTime();
+        const currHour = useStudioStore.getState().project.simulation.hourOfDay;
+        const next = TIMES_OF_DAY[(activeTimeIdx(currHour) + 1) % TIMES_OF_DAY.length]!;
+        useStudioStore.getState().patchSimulation({ hourOfDay: next.hour });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
   if (webglError) {
     return (

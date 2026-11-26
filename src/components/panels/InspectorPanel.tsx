@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type {
   BrickSpec,
@@ -12,6 +11,7 @@ import type {
   SlabSystem,
 } from "@/lib/model/types";
 import { PAINT_SWATCHES, ROOF_SWATCHES } from "@/lib/model/catalog";
+import { useBuildModeStore } from "@/features/buildMode/store";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
@@ -19,22 +19,21 @@ import { StudioNumberField, StudioRange, StudioSelect, StudioSwitch } from "@/co
 import { AlertTriangle, Layers, PaintBucket, SlidersHorizontal } from "lucide-react";
 
 export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
-  const [tab, setTab] = useState<"sistem" | "tampilan" | "validasi">("sistem");
+  const tab = useStudioStore((s) => s.inspectorTab);
+  const setTab = useStudioStore((s) => s.setInspectorTab);
+  const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
   const project = useStudioStore((s) => s.project);
   const view = useStudioStore((s) => s.view);
   const patchSystems = useStudioStore((s) => s.patchSystems);
   const setBrickPreset = useStudioStore((s) => s.setBrickPreset);
   const patchBrickSpec = useStudioStore((s) => s.patchBrickSpec);
-  const patchPeil = useStudioStore((s) => s.patchPeil);
-  const patchSoil = useStudioStore((s) => s.patchSoil);
-  const patchStructuralParams = useStudioStore((s) => s.patchStructuralParams);
   const patchView = useStudioStore((s) => s.patchView);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
+  const showBricksOverlay = useBuildModeStore((s) => s.showBricksOverlay);
+  const neighborsVisible = useBuildModeStore((s) => s.neighborsVisible);
 
   const sys = project.systems;
   const brick = sys.brick;
-  const sp = project.structuralParams;
-  const soil = project.site.soil;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -227,21 +226,7 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
               </div>
             </Section>
 
-            <Section title="Peil Banjir & Keramik Lantai">
-              <StudioRange
-                label="Peil Lantai LT1 (dari jalan)"
-                display={`+${Math.round(project.site.peil.floor1PeilM * 100)} cm`}
-                min={0.15}
-                max={1.5}
-                step={0.05}
-                value={project.site.peil.floor1PeilM}
-                onChange={(v) =>
-                  patchPeil({
-                    floor1PeilM: v,
-                    terracePeilM: Math.max(0.1, Number((v - 0.15).toFixed(2))),
-                  })
-                }
-              />
+            <Section title="Keramik Lantai & Parameter Lanjutan">
               <StudioSelect
                 label="Ukuran Keramik Lantai"
                 value={String(sys.tileSizeCm)}
@@ -252,61 +237,21 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
                   ["60", "60 × 60 cm (Granit Tile)"],
                 ]}
               />
-            </Section>
-
-            <Section title="Parameter SNI Struktur & Tanah">
-              <div className="grid grid-cols-2 gap-2">
-                <StudioNumberField
-                  label="Mutu Beton fc'"
-                  unit="MPa"
-                  value={sp.concreteFcMpa}
-                  min={15}
-                  max={45}
-                  onChange={(v) => patchStructuralParams({ concreteFcMpa: v })}
-                />
-                <StudioNumberField
-                  label="Tulangan fy"
-                  unit="MPa"
-                  value={sp.rebarFyMpa}
-                  min={240}
-                  max={550}
-                  onChange={(v) => patchStructuralParams({ rebarFyMpa: v })}
-                />
-                <StudioNumberField
-                  label="Daya Dukung"
-                  unit="kPa"
-                  value={soil.allowableBearingKpa}
-                  min={40}
-                  max={400}
-                  onChange={(v) => patchSoil({ allowableBearingKpa: v })}
-                />
-                <StudioSelect
-                  label="Kelas Situs Gempa"
-                  value={soil.siteClass}
-                  onChange={(v) => patchSoil({ siteClass: v as "SC" | "SD" | "SE" })}
-                  options={[
-                    ["SC", "SC (Keras)"],
-                    ["SD", "SD (Sedang)"],
-                    ["SE", "SE (Lunak Surabaya)"],
-                  ]}
-                />
-                <StudioNumberField
-                  label="Beban Hidup"
-                  unit="kPa"
-                  value={sp.liveLoadRoomKpa}
-                  min={1.5}
-                  max={5}
-                  step={0.25}
-                  onChange={(v) => patchStructuralParams({ liveLoadRoomKpa: v })}
-                />
-                <StudioNumberField
-                  label="Faktor Gempa R"
-                  value={sp.seismicR}
-                  min={3}
-                  max={8}
-                  step={0.5}
-                  onChange={(v) => patchStructuralParams({ seismicR: v })}
-                />
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => openBuildPanel("structure")}
+                  className="rounded-lg border border-border bg-black/25 px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:border-primary/60"
+                >
+                  Parameter SNI →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openBuildPanel("flood")}
+                  className="rounded-lg border border-border bg-black/25 px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:border-cyan-400/60"
+                >
+                  Peil &amp; Banjir →
+                </button>
               </div>
             </Section>
           </div>
@@ -341,18 +286,6 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
                   </button>
                 ))}
               </div>
-            </Section>
-
-            <Section title="Potongan Horizontal">
-              <StudioRange
-                label="Tinggi Bidang Potong"
-                display={view.cutH < 12 ? `${view.cutH.toFixed(2)} m` : "Nonaktif"}
-                min={0.8}
-                max={12}
-                step={0.1}
-                value={Math.min(12, view.cutH)}
-                onChange={(v) => patchView({ cutH: v >= 11.9 ? 100 : v })}
-              />
             </Section>
 
             <Section title="Warna Fasad & Atap">
@@ -404,11 +337,25 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
 
             <Section title="Layer Visibilitas">
               <div className="space-y-1.5">
-                <StudioSwitch label="Susunan Bata 3D" checked={view.showBricks} onChange={(v) => patchView({ showBricks: v })} />
+                <StudioSwitch
+                  label="Susunan Bata 3D"
+                  checked={showBricksOverlay || view.showBricks}
+                  onChange={(v) => {
+                    patchView({ showBricks: v });
+                    useBuildModeStore.setState({ showBricksOverlay: v });
+                  }}
+                />
                 <StudioSwitch label="Plester & Cat" checked={view.showFinishing} onChange={(v) => patchView({ showFinishing: v })} />
                 <StudioSwitch label="Struktur Beton / Baja" checked={view.showStructure} onChange={(v) => patchView({ showStructure: v })} />
                 <StudioSwitch label="X-Ray Besi Tulangan" checked={view.xrayRebar} onChange={(v) => patchView({ xrayRebar: v })} />
-                <StudioSwitch label="Rumah Tetangga (Kiri/Kanan)" checked={view.showNeighbors} onChange={(v) => patchView({ showNeighbors: v })} />
+                <StudioSwitch
+                  label="Rumah Tetangga (Kiri/Kanan)"
+                  checked={neighborsVisible && view.showNeighbors}
+                  onChange={(v) => {
+                    patchView({ showNeighbors: v });
+                    useBuildModeStore.setState({ neighborsVisible: v });
+                  }}
+                />
               </div>
             </Section>
           </div>

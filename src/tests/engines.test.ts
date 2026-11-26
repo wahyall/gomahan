@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultProject } from "@/lib/model/defaultProject";
-import { parseVersionedProjectSave, validateProjectImport } from "@/lib/model/schema";
+import { CURRENT_PROJECT_SCHEMA_VERSION, parseVersionedProjectSave, validateProjectImport } from "@/lib/model/schema";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
 import { computeStructuralReport } from "@/lib/structure/sniEngine";
 import { buildRabSummary } from "@/lib/quantities/rabEngine";
@@ -8,7 +8,7 @@ import { buildScheduleSummary } from "@/lib/timeline/scheduleEngine";
 import { runLightingSimulation } from "@/lib/simulation/lightingEngine";
 import { runAirflowSimulation } from "@/lib/simulation/airflowEngine";
 import { runFloodSimulation } from "@/lib/simulation/floodEngine";
-import { evaluateGamification } from "@/lib/gamification/simsEngine";
+import { buildExcelWorkbookBlob, buildPdfDrawingsAndReportBlob, generateTakeoffCsv } from "@/lib/export/exporters";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 
 describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
@@ -21,7 +21,7 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     expect(parsed.success).toBe(true);
     expect(proj.site.width).toBe(5);
     expect(proj.site.depth).toBe(17);
-    expect(proj.gamification.budgetCapIdr).toBe(450_000_000);
+    expect(proj.budgetCapIdr).toBe(450_000_000);
     expect(proj.systems.roofType).toBe("shed_front");
     expect(proj.systems.roofSlopeDeg).toBe(10);
 
@@ -153,29 +153,41 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     p.site.peil.floor1PeilM = 0.9;
     p.floodMitigation.doorFloodBarrier = true;
     p.floodMitigation.barrierHeightCm = 70;
-    p.floodMitigation.outletHeightM = 0.6;
+    p.floodMitigation.outletHeightM = 1.1;
     p.floodMitigation.mcbHeightM = 1.75;
     const floodSafe = runFloodSimulation(buildDerivedModel(p));
     expect(floodSafe.lt1FloorFloodCm).toBe(0);
     expect(floodSafe.electricalHazardMcb).toBe(false);
     expect(floodSafe.floodResilienceScore).toBeGreaterThan(floodBad.floodResilienceScore);
 
-    const gami = evaluateGamification(
-      d,
-      buildRabSummary(d, computeStructuralReport(d)),
-      computeStructuralReport(d),
-      light,
-      airWithHvac,
-      floodSafe,
-    );
-    expect(gami.overallComfortScore).toBeGreaterThan(0);
-    expect(gami.badges.length).toBeGreaterThanOrEqual(4);
+    // Night illumination with lights off must produce daylightScore === 0 & failing natural light (BL-05)
+    const pNight = createDefaultProject();
+    pNight.simulation.hourOfDay = 22;
+    pNight.levels.forEach((lv) => lv.lights.forEach((l) => { l.on = false; }));
+    const nightLight = runLightingSimulation(buildDerivedModel(pNight));
+    expect(nightLight.daylightScore).toBe(0);
+    expect(nightLight.sniCompliancePct).toBe(0);
+
+    // Hot weather with all ACs off & calm wind must penalize living room instead of bypassing as NYAMAN (BL-06)
+    const pHot = createDefaultProject();
+    pHot.simulation.ambientTempC = 36;
+    pHot.simulation.windSpeedMs = 0.2;
+    pHot.levels.forEach((lv) => lv.hvac.forEach((h) => { h.on = false; }));
+    const airHot = runAirflowSimulation(buildDerivedModel(pHot));
+    const tamuHot = airHot.zones.find((z) => z.roomId === "r1-tamu")!;
+    expect(tamuHot.comfortStatus === "PENGAP" || tamuHot.comfortStatus === "HANGAT").toBe(true);
   });
 
-  it("supports Zustand store mutations, movable HVAC addition, custom brick, and Zundo undo/redo", () => {
+  it("supports Zustand store mutations, temporal equality (0 UI undo noise), and batch updates", () => {
     const store = useStudioStore.getState();
     store.resetProject();
     useStudioStore.temporal.getState().clear();
+
+    // UI-only actions must NOT pollute Zundo undo stack (EC-03)
+    store.setWorkspace("rab");
+    store.patchView({ showDims: true, explode: 0.4 });
+    store.setSelected({ kind: "part", id: "kolom" });
+    expect(useStudioStore.temporal.getState().pastStates.length).toBe(0);
 
     const initialWallThickness = useStudioStore.getState().project.levels[0]!.walls[0]!.thickness;
     store.setBrickPreset("merah");
@@ -197,6 +209,16 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     });
     expect(useStudioStore.getState().project.levels[0]!.hvac.some((h) => h.id === "hvac-test-fan")).toBe(true);
 
+    // Batch furniture update must create exactly 1 undo entry
+    const undoDepthBeforeBatch = useStudioStore.temporal.getState().pastStates.length;
+    const furnUpdates = useStudioStore.getState().project.levels[0]!.furniture.slice(0, 2).map((f) => ({
+      id: f.id,
+      patch: { colorHex: "#b86b52" },
+    }));
+    store.updateFurnitureBatch(0, furnUpdates);
+    expect(useStudioStore.temporal.getState().pastStates.length).toBe(undoDepthBeforeBatch + 1);
+    useStudioStore.temporal.getState().undo();
+
     useStudioStore.temporal.getState().undo();
     expect(useStudioStore.getState().project.levels[0]!.hvac.some((h) => h.id === "hvac-test-fan")).toBe(false);
 
@@ -206,19 +228,130 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     store.resetProject();
   });
 
-  it("ignores legacy v1 save data safely with a clear message and accepts v2", () => {
+  it("migrates legacy v1/v2 saves forward safely to v3 and rejects corrupt saves", () => {
     const legacyV1 = { ...createDefaultProject(), schemaVersion: 1 };
     const resV1 = parseVersionedProjectSave(legacyV1);
-    expect(resV1.status).toBe("legacy_ignored");
-    if (resV1.status === "legacy_ignored") {
-      expect(resV1.legacyVersion).toBe(1);
-      expect(resV1.message).toContain("v1");
+    expect(resV1.status).toBe("ok");
+    if (resV1.status === "ok") {
+      expect(resV1.migratedFromVersion).toBe(1);
+      expect(resV1.data.schemaVersion).toBe(CURRENT_PROJECT_SCHEMA_VERSION);
+      expect(resV1.data.priceBook.items["bata_precast"]).toBeDefined();
     }
 
-    const v2 = createDefaultProject();
-    const resV2 = parseVersionedProjectSave(v2);
-    expect(resV2.status).toBe("ok");
+    const corrupt = { notAProject: true, schemaVersion: 3 };
+    const resBad = parseVersionedProjectSave(corrupt);
+    expect(resBad.status).toBe("invalid");
+
+    const v3 = createDefaultProject();
+    const resV3 = parseVersionedProjectSave(v3);
+    expect(resV3.status).toBe("ok");
   });
+
+  it("enforces RAB borongan_pct, schedule total reconciliation, pool/tile buildExtras, and SNI column failures", () => {
+    const p = createDefaultProject();
+    p.rabSettings.laborMode = "borongan_pct";
+    p.rabSettings.boronganPct = 30;
+    p.systems.brick.preset = "precast";
+    p.systems.slab = "bondek_wiremesh";
+    p.buildExtras = {
+      floorTiles: [{ gx: 4, gz: 12, levelIndex: 0, materialId: "floor_wood_oak" }],
+      pools: [{ id: "pool-1", gx1: 5, gz1: 28, gx2: 8, gz2: 31, depth: 1.2 }],
+      terrainHeights: [],
+    };
+    const d = buildDerivedModel(p);
+    const s = computeStructuralReport(d);
+    const rab = buildRabSummary(d, s);
+    const sched = buildScheduleSummary(p, rab, "baseline", 45);
+
+    const divSum = rab.divisions.reduce((sum, dv) => sum + dv.subtotal, 0);
+    expect(divSum).toBeCloseTo(rab.directSubtotal, 0);
+    expect(rab.rows.some((r) => r.priceKey === "bata_precast")).toBe(true);
+    expect(rab.rows.some((r) => r.id === "pool_beton")).toBe(true);
+    expect(s.wiremeshM2).toBeGreaterThan(0);
+
+    const stageSum = sched.stages.reduce((sum, st) => sum + st.budgetIdr, 0);
+    expect(stageSum).toBe(rab.grandTotal);
+    expect(sched.scenarios.baselineDays).toBe(sched.totalDurationDays);
+
+    // Overloaded columns / low-ductility seismic params trigger PERIKSA and set overallSafe === false (BL-03)
+    const pWeak = createDefaultProject();
+    pWeak.systems.brick.preset = "merah";
+    pWeak.structuralParams.concreteFcMpa = 15;
+    pWeak.structuralParams.rebarFyMpa = 240;
+    pWeak.structuralParams.seismicR = 3;
+    pWeak.structuralParams.seismicI = 1.5;
+    pWeak.structuralParams.liveLoadRoomKpa = 5;
+    const sWeak = computeStructuralReport(buildDerivedModel(pWeak));
+    expect(sWeak.overallSafe).toBe(false);
+    expect(sWeak.columns.some((c) => c.status === "PERIKSA")).toBe(true);
+  });
+
+  it("handles 1-storey houses & empty lot clean-reset without crashing or fake scores, and produces valid exports", async () => {
+    // 1-level project (EC-01)
+    const oneLevel = createDefaultProject();
+    oneLevel.levels = [oneLevel.levels[0]!];
+    const d1 = buildDerivedModel(oneLevel);
+    const s1 = computeStructuralReport(d1);
+    const r1 = buildRabSummary(d1, s1);
+    const sch1 = buildScheduleSummary(oneLevel, r1, "baseline");
+    const l1 = runLightingSimulation(d1);
+    const a1 = runAirflowSimulation(d1);
+    const f1 = runFloodSimulation(d1);
+    expect(s1.concreteVolumes.slabM3).toBe(0);
+    expect(r1.grandTotal).toBeGreaterThan(0);
+
+    // CSV formula-injection escaping, columns & markup rows (BL-10)
+    const maliciousRab = {
+      ...r1,
+      rows: r1.rows.map((row, idx) => (idx === 0 ? { ...row, uraian: "=CMD()" } : row)),
+    };
+    const csv = generateTakeoffCsv(maliciousRab, d1);
+    expect(csv).toContain('"\'=CMD()"');
+    expect(csv).toContain("Harga Alat");
+    expect(csv).toContain("Overhead");
+
+    const xlsxBlob = await buildExcelWorkbookBlob({
+      derived: d1,
+      struct: s1,
+      rab: r1,
+      schedule: sch1,
+      lighting: l1,
+      airflow: a1,
+      flood: f1,
+      isDraft: false,
+    });
+    expect(xlsxBlob.size).toBeGreaterThan(1000);
+
+    const pdfBlob = buildPdfDrawingsAndReportBlob({
+      derived: d1,
+      struct: s1,
+      rab: r1,
+      schedule: sch1,
+      lighting: l1,
+      airflow: a1,
+      flood: f1,
+      isDraft: false,
+    });
+    expect(pdfBlob.size).toBeGreaterThan(1000);
+
+    // Empty clean lot yields zero cost/scores and clean validation (EC-08)
+    const store = useStudioStore.getState();
+    store.resetLotClean();
+    const emptyProj = useStudioStore.getState().project;
+    expect(Object.keys(emptyProj.stageProgress)).toHaveLength(0);
+    expect(Object.keys(emptyProj.siteChecklistDone)).toHaveLength(0);
+    const dEmpty = buildDerivedModel(emptyProj);
+    const sEmpty = computeStructuralReport(dEmpty);
+    const rEmpty = buildRabSummary(dEmpty, sEmpty);
+    const lEmpty = runLightingSimulation(dEmpty);
+    const aEmpty = runAirflowSimulation(dEmpty);
+    expect(rEmpty.grandTotal).toBe(0);
+    expect(lEmpty.daylightScore).toBe(0);
+    expect(lEmpty.sniCompliancePct).toBe(0);
+    expect(aEmpty.airflowScore).toBe(0);
+    expect(aEmpty.crossVentPct).toBe(0);
+    store.resetProject();
+  }, 20_000);
 
   it("bounds structural columns to their own floor level and couples new lights/AC/wall_fan to simulations", () => {
     const p = createDefaultProject();

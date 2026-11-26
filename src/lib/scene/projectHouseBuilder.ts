@@ -22,12 +22,22 @@ export function attachBvh(geo: THREE.BufferGeometry): THREE.BufferGeometry {
 export interface WallCutawayRecord {
   wallId: string;
   levelIndex: 0 | 1;
+  startX: number;
+  startZ: number;
+  endX: number;
+  endZ: number;
   midX: number;
   midZ: number;
   exterior: boolean;
   fullGroup: THREE.Group;
   cutawayGroup: THREE.Group;
   downGroup: THREE.Group;
+}
+
+export interface BrickWallBatch {
+  levelIndex: 0 | 1;
+  im: THREE.InstancedMesh;
+  wallIndices: Map<string, number[]>;
 }
 
 export interface ProjectHouseBuildOptions {
@@ -57,6 +67,7 @@ export interface BuiltProjectHouseResult {
   lt2StructuralGroup: THREE.Group;
   roofGroup: THREE.Group;
   wallCutawayRecords: WallCutawayRecord[];
+  brickBatches: BrickWallBatch[];
   pickables: THREE.Object3D[];
   resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[];
   animatedFans: THREE.Object3D[];
@@ -555,6 +566,7 @@ export function buildProjectHouse(
   const lt2StructuralGroup = new THREE.Group();
   const roofGroup = new THREE.Group();
   const wallCutawayRecords: WallCutawayRecord[] = [];
+  const brickBatches: BrickWallBatch[] = [];
   const pickables: THREE.Object3D[] = [];
   const resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
   const animatedFans: THREE.Object3D[] = [];
@@ -1167,47 +1179,53 @@ export function buildProjectHouse(
       new THREE.MeshStandardMaterial({ color: "#3ab2e3", roughness: 0.08, transparent: true, opacity: 0.8 }),
     );
     pWater.position.set((x1 + x2) * 0.5, lt1Y + 0.03, (z1 + z2) * 0.5);
+    tagPickable(pBasin, { kind: "pool", id: pool.id, levelIndex: 0 }, "Kolam Renang");
+    tagPickable(pWater, { kind: "pool", id: pool.id, levelIndex: 0 }, "Kolam Renang");
     levelRoots[0].add(pBasin, pWater);
     resources.push(pBasin.geometry, pBasin.material as THREE.Material, pWater.geometry, pWater.material as THREE.Material);
   }
 
   // 5. Staircase & Railings
-  for (const st of project.levels[0]!.stairs) {
+  for (const st of project.levels[0]?.stairs ?? []) {
     const dx = st.end.x - st.start.x;
     const dz = st.end.z - st.start.z;
     const len = Math.hypot(dx, dz) || 1;
-    const stepRun = len / st.riserCount;
-    const stepRise = st.floorHeight / st.riserCount;
+    const stepRun = len / Math.max(1, st.riserCount);
+    const stepRise = st.floorHeight / Math.max(1, st.riserCount);
     const ang = -Math.atan2(dz, dx);
+    const treadGeos: THREE.BufferGeometry[] = [];
+    const carriageGeos: THREE.BufferGeometry[] = [];
     for (let i = 0; i < st.riserCount; i++) {
       const t = (i + 0.5) / st.riserCount;
       const sx = st.start.x + dx * t;
       const sz = st.start.z + dz * t;
       const sy = lt1Y + (i + 0.5) * stepRise;
-      batchBase.addGeo(
-        "stair:tread",
-        palette.woodTeak,
-        "tangga",
-        st.name,
-        createChamferBox(stepRun + 0.035, 0.042, st.width, 0.008, 2),
-        sx,
-        sy + stepRise * 0.36,
-        sz,
-        ang,
-      );
-      batchBase.addBox(
-        "stair:carriage",
-        palette.concrete,
-        "tangga",
-        st.name,
-        sx,
-        sy - stepRise * 0.08,
-        sz,
-        stepRun + 0.02,
-        stepRise * 0.72,
-        st.width * 0.92,
-        { rotY: ang },
-      );
+      const tg = createChamferBox(stepRun + 0.035, 0.042, st.width, 0.008, 2);
+      tg.rotateY(ang);
+      tg.translate(sx, sy + stepRise * 0.36, sz);
+      treadGeos.push(tg);
+      const cg = new THREE.BoxGeometry(stepRun + 0.02, stepRise * 0.72, st.width * 0.92);
+      cg.rotateY(ang);
+      cg.translate(sx, sy - stepRise * 0.08, sz);
+      carriageGeos.push(cg);
+    }
+    const treadMerged = mergeGeometryBatch(treadGeos);
+    if (treadMerged) {
+      const tm = new THREE.Mesh(attachBvh(treadMerged), palette.woodTeak);
+      tm.castShadow = true;
+      tm.receiveShadow = true;
+      levelRoots[0].add(tm);
+      resources.push(treadMerged);
+      tagPickable(tm, { kind: "stair", id: st.id, levelIndex: 0 }, st.name);
+    }
+    const carMerged = mergeGeometryBatch(carriageGeos);
+    if (carMerged) {
+      const cm = new THREE.Mesh(attachBvh(carMerged), palette.concrete);
+      cm.castShadow = true;
+      cm.receiveShadow = true;
+      levelRoots[0].add(cm);
+      resources.push(carMerged);
+      tagPickable(cm, { kind: "stair", id: st.id, levelIndex: 0 }, st.name);
     }
   }
   if (opts.activeLevelView !== "lt1") {
@@ -1275,8 +1293,15 @@ export function buildProjectHouse(
       im.castShadow = true;
       im.receiveShadow = true;
       const off = new Float32Array(list.length * 3);
+      const wallIndices = new Map<string, number[]>();
       for (let i = 0; i < list.length; i++) {
         const b = list[i]!;
+        let wIdx = wallIndices.get(b.wallId);
+        if (!wIdx) {
+          wIdx = [];
+          wallIndices.set(b.wallId, wIdx);
+        }
+        wIdx.push(i);
         const baseY = b.levelIndex === 0 ? lt1Y : lt2Y;
         v1.set(b.x, baseY + b.y + b.hgt * 0.5, b.z);
         q.setFromAxisAngle(up, b.rotY);
@@ -1288,9 +1313,11 @@ export function buildProjectHouse(
         off[i * 3 + 2] = (b.z - 8.5) * 0.25;
       }
       im.instanceMatrix.needsUpdate = true;
-      levelRoots[lvTarget === 1 ? 1 : 0].add(im);
+      const lvIdx: 0 | 1 = lvTarget === 1 ? 1 : 0;
+      levelRoots[lvIdx].add(im);
       tagPickable(im, { kind: "part", id: "dinding" }, label);
       opts.onExplodeInstanced?.(im, off);
+      brickBatches.push({ levelIndex: lvIdx, im, wallIndices });
     };
 
     for (const lvI of [0, 1] as const) {
@@ -1542,6 +1569,10 @@ export function buildProjectHouse(
         wallCutawayRecords.push({
           wallId: w.id,
           levelIndex: lvIdx,
+          startX: w.start.x,
+          startZ: w.start.z,
+          endX: w.end.x,
+          endZ: w.end.z,
           midX: (w.start.x + w.end.x) * 0.5,
           midZ: (w.start.z + w.end.z) * 0.5,
           exterior: w.exterior,
@@ -1935,6 +1966,7 @@ export function buildProjectHouse(
     lt2StructuralGroup,
     roofGroup,
     wallCutawayRecords,
+    brickBatches,
     pickables,
     resources,
     animatedFans,

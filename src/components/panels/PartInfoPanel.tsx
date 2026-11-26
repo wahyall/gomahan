@@ -23,72 +23,7 @@ export function PartInfoPanel({ derived, struct, rab, className }: Props) {
   const toggleHiddenPart = useStudioStore((s) => s.toggleHiddenPart);
   const updatePriceItem = useStudioStore((s) => s.updatePriceItem);
 
-  if (!selected) return null;
-
-  if (selected.kind !== "part") {
-    const lv = derived.project.levels[selected.levelIndex];
-    if (!lv) return null;
-
-    let title = "";
-    let subtitle = "";
-    let note = "";
-
-    if (selected.kind === "furniture") {
-      const f = lv.furniture.find((x) => x.id === selected.id);
-      if (!f) return null;
-      title = f.name;
-      subtitle = `${lv.name} · ${f.size.x.toFixed(2)}×${f.size.z.toFixed(2)} m`;
-      note = `Posisi: X ${f.position.x.toFixed(2)} m · Z ${f.position.z.toFixed(2)} m`;
-    } else if (selected.kind === "hvac") {
-      const hv = lv.hvac.find((x) => x.id === selected.id);
-      if (!hv) return null;
-      title = hv.name;
-      subtitle = `${lv.name} · ${hv.type.toUpperCase()} · ${hv.powerW} W · ${hv.flowRateM3h} m³/j`;
-      note = hv.on ? `Aktif (${hv.setpointC}°C, Speed ${hv.speedLevel})` : "Unit mati";
-    } else if (selected.kind === "light") {
-      const l = lv.lights.find((x) => x.id === selected.id);
-      if (!l) return null;
-      title = l.name;
-      subtitle = `${lv.name} · ${l.lumens} lm · ${l.colorTempK}K`;
-      note = l.on ? `Menyala (${Math.round(l.dimmer * 100)}%)` : "Mati";
-    } else if (selected.kind === "opening") {
-      const w = lv.walls.find((x) => x.id === selected.wallId);
-      const op = w?.openings.find((o) => o.id === selected.id);
-      if (!w || !op) return null;
-      title = op.label;
-      subtitle = `${w.name} · ${op.width.toFixed(2)}×${op.height.toFixed(2)} m`;
-      note = `Bukaan angin ${op.openPct}%`;
-    } else if (selected.kind === "wall") {
-      const w = lv.walls.find((x) => x.id === selected.id);
-      if (!w) return null;
-      const len = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
-      title = w.name;
-      subtitle = `${lv.name} · Panjang ${len.toFixed(2)} m · Tebal ${Math.round(w.thickness * 1000)} mm`;
-      note = w.partyWallSide
-        ? `Dinding batas tetangga sisi ${w.partyWallSide === "left" ? "kiri" : "kanan"}`
-        : "Elemen dinding arsitektur";
-    }
-
-    return (
-      <div className={cn("studio-glass pointer-events-auto absolute z-20 w-[300px] max-w-[calc(100%-1.5rem)] overflow-hidden rounded-2xl", className ?? "bottom-3 right-3")}>
-        <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
-          <div className="min-w-0">
-            <div className="truncate text-xs font-bold text-foreground">{title}</div>
-            <div className="truncate text-[10.5px] text-muted-foreground">{subtitle}</div>
-          </div>
-          <button
-            type="button"
-            aria-label="Tutup ringkasan elemen"
-            onClick={() => setSelected(null)}
-            className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/10 hover:text-foreground"
-          >
-            <X className="h-3.5 w-3.5" aria-hidden />
-          </button>
-        </div>
-        <div className="px-3.5 py-2.5 text-[11px] text-muted-foreground">{note}</div>
-      </div>
-    );
-  }
+  if (!selected || selected.kind !== "part") return null;
 
   const info = getPartInfo(selected.id, derived, struct);
   if (!info) return null;

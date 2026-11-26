@@ -73,8 +73,8 @@ interface BuildModeViewState {
 }
 
 export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
-  activeLevel: 2,
-  wallVisibility: "up",
+  activeLevel: 0,
+  wallVisibility: "cutaway",
   roofVisibility: "auto",
   gridVisible: true,
   snap90Enabled: false,
@@ -116,12 +116,12 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
 
   setCategory: (activeCategory) => {
     const first = UNIFIED_BUILD_CATALOG.find((c) => c.category === activeCategory);
-    set({
+    set((s) => ({
       activeCategory,
-      selectedCatalogId: first ? first.id : get().selectedCatalogId,
-      activeTool: first ? first.toolId : get().activeTool,
+      selectedCatalogId: first ? first.id : s.selectedCatalogId,
+      activeTool: s.activeTool === "select" ? "select" : first ? first.toolId : s.activeTool,
       previewHud: null,
-    });
+    }));
   },
 
   selectCatalogItem: (item) =>

@@ -40,6 +40,8 @@ export interface MasonryTakeoff {
   totalBuyBricks: number;
   netWallAreaM2: number;
   plasterAreaTwoSidesM2: number;
+  exteriorPaintAreaM2: number;
+  interiorPaintAreaM2: number;
   brickVolumeM3: number;
   mortarVolumeM3: number;
   mortarWithWasteM3: number;
@@ -54,6 +56,47 @@ export interface MasonryTakeoff {
 interface Interval {
   lo: number;
   hi: number;
+}
+
+function unionHorizontalArea(cuts: { lo: number; hi: number; sill: number; top: number }[], maxH: number): number {
+  const clamped = cuts
+    .map((c) => ({
+      lo: Math.max(0, c.lo),
+      hi: Math.max(0, c.hi),
+      sill: Math.max(0, c.sill),
+      top: Math.min(maxH, c.top),
+    }))
+    .filter((c) => c.hi > c.lo && c.top > c.sill);
+  if (clamped.length === 0) return 0;
+
+  const yBreaks = Array.from(new Set(clamped.flatMap((c) => [c.sill, c.top]))).sort((a, b) => a - b);
+  let area = 0;
+  for (let i = 0; i < yBreaks.length - 1; i++) {
+    const y0 = yBreaks[i]!;
+    const y1 = yBreaks[i + 1]!;
+    const dy = y1 - y0;
+    if (dy <= 1e-6) continue;
+    const xInts = clamped
+      .filter((c) => c.sill <= y0 + 1e-6 && c.top >= y1 - 1e-6)
+      .map((c) => ({ lo: c.lo, hi: c.hi }))
+      .sort((a, b) => a.lo - b.lo);
+    if (xInts.length === 0) continue;
+    let curLo = xInts[0]!.lo;
+    let curHi = xInts[0]!.hi;
+    let xUnion = 0;
+    for (let k = 1; k < xInts.length; k++) {
+      const iv = xInts[k]!;
+      if (iv.lo <= curHi) curHi = Math.max(curHi, iv.hi);
+      else {
+        xUnion += curHi - curLo;
+        curLo = iv.lo;
+        curHi = iv.hi;
+      }
+    }
+    xUnion += curHi - curLo;
+    area += xUnion * dy;
+  }
+  return area;
 }
 
 function subtractIntervals(base: Interval, cuts: Interval[]): Interval[] {
@@ -83,9 +126,9 @@ export function computeMasonryTakeoff(
   brickSpec: BrickSpec,
   extraTopHeightAt?: (levelIndex: number, x: number, z: number) => number,
 ): MasonryTakeoff {
-  const bL = brickSpec.lengthMm / 1000;
-  const bH = brickSpec.heightMm / 1000;
-  const j = brickSpec.mortarMm / 1000;
+  const bL = Math.max(0.05, brickSpec.lengthMm / 1000);
+  const bH = Math.max(0.02, brickSpec.heightMm / 1000);
+  const j = Math.max(0.001, brickSpec.mortarMm / 1000);
   const cellL = bL + j;
   const cellH = bH + j;
   const beamDeductH = 0.2; // ring balk / beam band deducted from brick courses where wall meets beam
@@ -97,6 +140,9 @@ export function computeMasonryTakeoff(
   let innerPiecesEquivalent = 0;
   let cutPiecesCount = 0;
   let totalNetWallArea = 0;
+  let plasterAreaTotal = 0;
+  let exteriorPaintAreaM2 = 0;
+  let interiorPaintAreaM2 = 0;
   let totalWallBandVol = 0;
   let totalBrickVol = 0;
 
@@ -111,14 +157,11 @@ export function computeMasonryTakeoff(
       const rotY = -Math.atan2(dz, dx);
 
       // Wall thickness follows brick spec (allows user custom brick thickness to alter floor area & volume!)
-      const wallThick = (w.exterior ? brickSpec.outerThicknessMm : brickSpec.innerThicknessMm) / 1000;
+      const wallThick = Math.max(0.05, (w.exterior ? brickSpec.outerThicknessMm : brickSpec.innerThicknessMm) / 1000);
       const effBrickH = Math.max(0.3, w.height - (w.height >= 2.8 ? beamDeductH : 0));
 
       const openingCuts = w.openings.map((o) => openingBoundsAlongWall(w, o));
-      const openingArea = openingCuts.reduce(
-        (acc, c) => acc + Math.max(0, c.hi - c.lo) * Math.max(0, Math.min(effBrickH, c.top) - c.sill),
-        0,
-      );
+      const openingArea = unionHorizontalArea(openingCuts, effBrickH);
 
       let extraSlopeArea = 0;
       let maxExtra = 0;
@@ -132,6 +175,17 @@ export function computeMasonryTakeoff(
       const netWallArea = Math.max(0, effBrickH * len + extraSlopeArea - openingArea);
       const wallBandVol = netWallArea * wallThick;
       totalNetWallArea += netWallArea;
+
+      // Accessible wall faces: party walls bordering neighbors have 1 internal face only
+      const accessibleSides = w.partyWallSide ? 1 : 2;
+      plasterAreaTotal += netWallArea * accessibleSides;
+      if (w.exterior) {
+        if (!w.partyWallSide) exteriorPaintAreaM2 += netWallArea;
+        interiorPaintAreaM2 += netWallArea;
+      } else {
+        interiorPaintAreaM2 += netWallArea * 2;
+      }
+
       totalWallBandVol += wallBandVol;
 
       const maxH = effBrickH + maxExtra;
@@ -274,7 +328,9 @@ export function computeMasonryTakeoff(
     buyInnerBricks,
     totalBuyBricks,
     netWallAreaM2: totalNetWallArea,
-    plasterAreaTwoSidesM2: totalNetWallArea * 2,
+    plasterAreaTwoSidesM2: plasterAreaTotal,
+    exteriorPaintAreaM2,
+    interiorPaintAreaM2,
     brickVolumeM3: totalBrickVol,
     mortarVolumeM3,
     mortarWithWasteM3,

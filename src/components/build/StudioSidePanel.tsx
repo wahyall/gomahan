@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import {
   CloudRain,
   Eye,
@@ -21,6 +20,7 @@ import { FloodWorkspace } from "@/components/workspaces/FloodWorkspace";
 import { LightingWorkspace } from "@/components/workspaces/LightingWorkspace";
 import { StructureWorkspace } from "@/components/workspaces/StructureWorkspace";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import { CUT_PLANE_MAX_M, CUT_PLANE_MIN_M, CUT_PLANE_OFF } from "@/lib/model/constants";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
@@ -55,9 +55,10 @@ export function StudioSidePanel({
 }: StudioSidePanelProps) {
   const studioPanel = useStudioStore((s) => s.studioPanel);
   const setStudioPanel = useStudioStore((s) => s.setStudioPanel);
+  const inspectSubTab = useStudioStore((s) => s.inspectSubTab);
+  const setInspectSubTab = useStudioStore((s) => s.setInspectSubTab);
   const view = useStudioStore((s) => s.view);
   const patchView = useStudioStore((s) => s.patchView);
-  const [inspectSubTab, setInspectSubTab] = useState<"inspector" | "outliner">("inspector");
 
   if (studioPanel === "none") return null;
 
@@ -98,11 +99,14 @@ export function StudioSidePanel({
                 >
                   <Icon className={cn("h-3.5 w-3.5 shrink-0", active ? "text-[#b9662a]" : "opacity-80")} aria-hidden />
                   <span className="truncate">{tab.label}</span>
-                  {tab.id === "structure" && criticalCount > 0 && (
+                  {tab.id === "structure" && !struct.overallSafe && (
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" aria-hidden />
                   )}
                   {tab.id === "flood" && floodDanger && (
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" aria-hidden />
+                  )}
+                  {tab.id === "inspection" && criticalCount > 0 && (
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" aria-hidden />
                   )}
                 </button>
               );
@@ -177,12 +181,12 @@ export function StudioSidePanel({
                 />
                 <StudioRange
                   label="Potong Horizontal"
-                  display={view.cutH >= 9.15 ? "Penuh" : `${view.cutH.toFixed(1)} m`}
-                  min={-1.5}
-                  max={9.2}
+                  display={view.cutH >= CUT_PLANE_MAX_M - 0.05 ? "Penuh" : `${view.cutH.toFixed(1)} m`}
+                  min={CUT_PLANE_MIN_M}
+                  max={CUT_PLANE_MAX_M}
                   step={0.1}
-                  value={view.cutH}
-                  onChange={(v) => patchView({ cutH: v })}
+                  value={Math.min(CUT_PLANE_MAX_M, view.cutH)}
+                  onChange={(v) => patchView({ cutH: v >= CUT_PLANE_MAX_M - 0.05 ? CUT_PLANE_OFF : v })}
                 />
               </div>
             </div>

@@ -22,6 +22,8 @@ import {
   type MaterialPalette,
 } from "@/lib/scene/materials";
 import { buildProjectHouse, buildStaticNeighborhood } from "@/lib/scene/projectHouseBuilder";
+import { computeSolarPosition } from "@/lib/simulation/lightingEngine";
+import type { Project } from "@/lib/model/types";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 
 export interface WalkHudTelemetry extends WalkSnapshotState {
@@ -36,7 +38,6 @@ export interface WalkHudTelemetry extends WalkSnapshotState {
 
 export interface WalkSceneActions {
   onHudUpdate: (telemetry: WalkHudTelemetry) => void;
-  onToggleDoor: (levelIndex: 0 | 1, wallId: string, opId: string, nextOpenPct: number) => void;
   onExitWalkMode: () => void;
 }
 
@@ -126,6 +127,7 @@ export class WalkScene {
   private struct: StructuralReport;
   private buildSignature = "";
   private envKey = "";
+  private sessionDoorOverrides = new Map<string, number>();
 
   // Camera & Input State
   private cameraMode: WalkCameraMode = "first_person";
@@ -480,7 +482,7 @@ export class WalkScene {
     this.palette.roofCover.color.set(sim.roofColorHex);
     this.palette.setTileSize(project.systems.tileSizeCm);
 
-    const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}`;
+    const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}|${project.site.orientationDeg}`;
     if (nextEnvKey !== this.envKey) {
       this.envKey = nextEnvKey;
       const newSky = createSkyGradientTexture(sim.hourOfDay, sim.season, sim.rainIntensityMmH);
@@ -492,16 +494,13 @@ export class WalkScene {
       this.envTex?.dispose();
       this.envTex = env;
       this.scene.environment = env;
-      const isNight = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
+      const solar = computeSolarPosition(sim.hourOfDay, project.site.latitude, sim.season, project.site.orientationDeg);
+      const isNight = !solar.isDaylight;
       const isStorm = sim.rainIntensityMmH > 20;
       this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.82 : 0.62;
       this.palette.bindEnvMap(env);
 
-      const sunElev = Math.max(0.15, Math.sin(((sim.hourOfDay - 5.5) / 13) * Math.PI));
-      const sunAz = ((sim.hourOfDay - 12) / 6) * 0.9;
-      const sx = Math.sin(sunAz);
-      const sy = sunElev;
-      const sz = -Math.cos(sunAz) * 0.6;
+      const [sx, sy, sz] = solar.sunDir;
       this.sunLight.position.set(2.5 + sx * 24, Math.max(3, sy * 24), 8.5 + sz * 24);
       this.fillLight.position.set(2.5 - sx * 18, 12, 8.5 - sz * 18);
       this.fillLight.intensity = isNight ? 0.14 : isStorm ? 0.35 : 0.4;
@@ -509,21 +508,19 @@ export class WalkScene {
       this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff5e0);
       this.hemiLight.intensity = isNight ? 0.26 : isStorm ? 0.7 : 0.5;
 
-      // HDR sun billboards ride the true solar direction; halo warms up at golden hour
-      this.sunDir.set(sx, sy, sz).normalize();
+      this.sunDir.set(sx, Math.max(0.05, sy), sz).normalize();
       const isGolden =
         !isNight && ((sim.hourOfDay >= 5.2 && sim.hourOfDay <= 7.5) || (sim.hourOfDay >= 16.5 && sim.hourOfDay <= 18.8));
-      const sunUp = sy > 0.03;
+      const sunUp = solar.isDaylight && sy > 0.03;
       if (this.sunCore) {
-        this.sunCore.visible = !isNight && sunUp;
+        this.sunCore.visible = sunUp;
         this.sunCore.material.color.setRGB(isGolden ? 6.0 : 5.6, isGolden ? 3.6 : 5.0, isGolden ? 2.0 : 4.3);
       }
       if (this.sunHalo) {
-        this.sunHalo.visible = !isNight && sunUp && !isStorm;
+        this.sunHalo.visible = sunUp && !isStorm;
         this.sunHalo.material.color.setRGB(isGolden ? 1.2 : 0.9, isGolden ? 0.75 : 0.86, isGolden ? 0.46 : 0.78);
       }
 
-      // Screen-space sun shaft strength (`3d-sky-rays`): strongest at a low golden sun, subtle at noon
       this.godRayStrength = isNight ? 0 : isStorm ? 0.12 : isGolden ? 0.95 : 0.5;
       this.godRayStrength *= THREE.MathUtils.lerp(1.3, 0.75, THREE.MathUtils.clamp(this.sunDir.y, 0, 1));
 
@@ -543,10 +540,32 @@ export class WalkScene {
 
     if (sig !== this.buildSignature) {
       this.buildSignature = sig;
-      this.ctrl.rebuildColliders(project);
-      this.debugOverlay.rebuildWorld(this.ctrl.world);
-      this.rebuildHouseAndLights(derived, struct);
+      this.refreshWalkWorldAndHouse();
     }
+  }
+
+  private getEffectiveDerived(): DerivedProjectModel {
+    if (this.sessionDoorOverrides.size === 0) return this.derived;
+    const baseProj = this.derived.project;
+    const nextLevels = baseProj.levels.map((lv, lvIdx) => ({
+      ...lv,
+      walls: lv.walls.map((w) => ({
+        ...w,
+        openings: w.openings.map((op) => {
+          const ov = this.sessionDoorOverrides.get(`${lvIdx}:${w.id}:${op.id}`);
+          return ov === undefined ? op : { ...op, openPct: ov };
+        }),
+      })),
+    }));
+    const nextProj: Project = { ...baseProj, levels: nextLevels };
+    return { ...this.derived, project: nextProj };
+  }
+
+  private refreshWalkWorldAndHouse(): void {
+    const eff = this.getEffectiveDerived();
+    this.ctrl.rebuildColliders(eff.project);
+    this.debugOverlay.rebuildWorld(this.ctrl.world);
+    this.rebuildHouseAndLights(eff, this.struct);
   }
 
   private rebuildHouseAndLights(derived: DerivedProjectModel, struct: StructuralReport): void {
@@ -568,7 +587,7 @@ export class WalkScene {
       activeLevelView: "all",
       supportWallCutaway: false,
       hideUpperPropsInLt1: false,
-      walkOpenDoorsFull: true,
+      walkOpenDoorsFull: false,
       enableDynamicLights: false,
     });
     this.houseContainer.add(built.houseRoot);
@@ -675,9 +694,11 @@ export class WalkScene {
     const door = this.ctrl.nearestDoor;
     if (!door) return false;
     const isOpen = door.openPct > WALK_CONFIG.doorOpenPassPct;
-    const nextPct = isOpen ? 0 : 75;
+    const nextPct = isOpen ? 0 : 85;
     simsAudio.playDoorToggle(!isOpen);
-    this.actions.onToggleDoor(door.levelIndex, door.wallId, door.opId, nextPct);
+    this.sessionDoorOverrides.set(`${door.levelIndex}:${door.wallId}:${door.opId}`, nextPct);
+    this.refreshWalkWorldAndHouse();
+    this.emitTelemetry(true);
     return true;
   }
 
@@ -940,11 +961,9 @@ export class WalkScene {
       const fpsInst = 1 / Math.max(0.001, dt);
       this.fpsSamples.push(fpsInst);
       if (this.fpsSamples.length > 24) this.fpsSamples.shift();
-      if (this.fpsSamples.length >= 20 && now - this.lastDprCheckMs > 2000) {
+      if (this.qualityOverride === "auto" && this.fpsSamples.length >= 20 && now - this.lastDprCheckMs > 2000) {
         this.lastDprCheckMs = now;
         const avg = this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length;
-        // Hysteresis governor: consecutive windows + cooldowns, so a GPU hovering
-        // between thresholds settles instead of thrashing DPR (and black-flashing).
         const decision = this.dprGovernor.sample(avg, now);
         if (decision === "downgrade" && this.currentDpr > 1) {
           this.currentDpr = 1;

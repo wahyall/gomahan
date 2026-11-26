@@ -1,6 +1,20 @@
 "use client";
 
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import {
+  MCB_HEIGHT_MAX_M,
+  MCB_HEIGHT_MIN_M,
+  OUTLET_HEIGHT_MAX_M,
+  OUTLET_HEIGHT_MIN_M,
+  PEIL_CARPORT_MAX_M,
+  PEIL_CARPORT_MIN_M,
+  PEIL_FLOOR1_MAX_M,
+  PEIL_FLOOR1_MIN_M,
+  PEIL_TERRACE_MAX_M,
+  PEIL_TERRACE_MIN_M,
+  RAIN_MAX_MM_H,
+  RAIN_MIN_MM_H,
+} from "@/lib/model/constants";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
@@ -39,19 +53,31 @@ export function FloodWorkspace({ derived, flood }: { derived: DerivedProjectMode
             title="Simulasi Hujan & Proyeksi Banjir (0–150 cm)"
             subtitle="Menghitung limpasan atap shed ke talang depan, sumur resapan SNI 03-2453, batas genangan teras/LT1, serta keamanan instalasi PUIL."
             action={
-              <button
-                type="button"
-                onClick={() => patchView({ showFloodWater: !waterVisible, showRain: !waterVisible })}
-                className={cn(
-                  "flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition",
-                  waterVisible
-                    ? "border-cyan-400/60 bg-cyan-500/20 text-cyan-100"
-                    : "border-border bg-secondary text-foreground hover:border-white/25",
-                )}
-              >
-                <Eye className="h-3.5 w-3.5" />
-                {waterVisible ? "Animasi Hujan/Air Aktif" : "Aktifkan Air &amp; Hujan 3D"}
-              </button>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    patchSimulation({ rainIntensityMmH: 85, floodDepthCm: 65 });
+                    patchView({ showFloodWater: true, showRain: true });
+                  }}
+                  className="flex h-8 items-center gap-1.5 rounded-lg border border-sky-400/45 bg-sky-500/15 px-2.5 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-500/25"
+                >
+                  Uji Badai 65 cm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => patchView({ showFloodWater: !waterVisible, showRain: !waterVisible })}
+                  className={cn(
+                    "flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition",
+                    waterVisible
+                      ? "border-cyan-400/60 bg-cyan-500/20 text-cyan-100"
+                      : "border-border bg-secondary text-foreground hover:border-white/25",
+                  )}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                  {waterVisible ? "Animasi Hujan/Air Aktif" : "Aktifkan Air & Hujan 3D"}
+                </button>
+              </div>
             }
           />
         </StudioCard>
@@ -113,8 +139,8 @@ export function FloodWorkspace({ derived, flood }: { derived: DerivedProjectMode
             <StudioRange
               label="Intensitas Hujan (BMKG)"
               display={`${sim.rainIntensityMmH} mm/jam`}
-              min={0}
-              max={150}
+              min={RAIN_MIN_MM_H}
+              max={RAIN_MAX_MM_H}
               step={5}
               value={sim.rainIntensityMmH}
               accentHex="#38bdf8"
@@ -145,21 +171,41 @@ export function FloodWorkspace({ derived, flood }: { derived: DerivedProjectMode
           </StudioCard>
         </div>
 
-        <StudioCard>
+        <StudioCard className="space-y-3">
           <StudioRange
             label="Peil Elevasi Lantai LT1 (terhadap permukaan jalan)"
             display={`+${Math.round(peil.floor1PeilM * 100)} cm`}
-            min={0.15}
-            max={1.4}
+            min={PEIL_FLOOR1_MIN_M}
+            max={PEIL_FLOOR1_MAX_M}
             step={0.05}
             value={peil.floor1PeilM}
             onChange={(v) =>
               patchPeil({
                 floor1PeilM: v,
-                terracePeilM: Math.max(0.1, Number((v - 0.15).toFixed(2))),
+                terracePeilM: Math.max(PEIL_TERRACE_MIN_M, Number((v - 0.15).toFixed(2))),
               })
             }
           />
+          <div className="grid grid-cols-2 gap-2.5">
+            <StudioNumberField
+              label="Peil Teras Depan"
+              unit="m"
+              min={PEIL_TERRACE_MIN_M}
+              max={Math.min(PEIL_TERRACE_MAX_M, peil.floor1PeilM)}
+              step={0.05}
+              value={peil.terracePeilM}
+              onChange={(v) => patchPeil({ terracePeilM: v })}
+            />
+            <StudioNumberField
+              label="Peil Carport"
+              unit="m"
+              min={PEIL_CARPORT_MIN_M}
+              max={Math.min(PEIL_CARPORT_MAX_M, peil.terracePeilM)}
+              step={0.05}
+              value={peil.carportPeilM}
+              onChange={(v) => patchPeil({ carportPeilM: v })}
+            />
+          </div>
         </StudioCard>
 
         {flood.warnings.length > 0 && (
@@ -225,7 +271,7 @@ export function FloodWorkspace({ derived, flood }: { derived: DerivedProjectMode
                 onChange={(v) => patchFloodMitigation({ wallWaterproofing: v })}
               />
             </div>
-            <div className="grid grid-cols-2 gap-2.5 pt-1">
+            <div className="grid grid-cols-3 gap-2.5 pt-1">
               <StudioNumberField
                 label="Sumur Resapan SNI"
                 unit="titik"
@@ -235,13 +281,22 @@ export function FloodWorkspace({ derived, flood }: { derived: DerivedProjectMode
                 onChange={(v) => patchFloodMitigation({ infiltrationWells: Math.max(0, v) })}
               />
               <StudioNumberField
-                label="Tinggi Stop Kontak LT1"
+                label="Stop Kontak LT1"
                 unit="m"
-                min={0.3}
-                max={1.5}
+                min={OUTLET_HEIGHT_MIN_M}
+                max={OUTLET_HEIGHT_MAX_M}
                 step={0.1}
                 value={fm.outletHeightM}
-                onChange={(v) => patchFloodMitigation({ outletHeightM: Math.max(0.3, v) })}
+                onChange={(v) => patchFloodMitigation({ outletHeightM: v })}
+              />
+              <StudioNumberField
+                label="Panel MCB Utama"
+                unit="m"
+                min={MCB_HEIGHT_MIN_M}
+                max={MCB_HEIGHT_MAX_M}
+                step={0.1}
+                value={fm.mcbHeightM}
+                onChange={(v) => patchFloodMitigation({ mcbHeightM: v })}
               />
             </div>
           </StudioCard>

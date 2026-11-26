@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   BookOpen,
@@ -13,7 +14,7 @@ import {
   FolderOpen,
   Footprints,
   Hammer,
-  HardHat,
+  History,
   MoreHorizontal,
   Redo2,
   RotateCcw,
@@ -29,6 +30,7 @@ import { useStore } from "zustand";
 import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
+import { StudioConfirmDialog } from "@/components/ui/StudioPrimitives";
 
 interface WorkspaceNavItem {
   id: WorkspaceId;
@@ -43,10 +45,8 @@ const WORKSPACES: WorkspaceNavItem[] = [
   { id: "walk", label: "Walk Mode", short: "Walk", group: "desain", icon: Footprints },
   { id: "drawings", label: "Denah 2D", short: "Denah", group: "dokumen", icon: DraftingCompass },
   { id: "rab", label: "RAB", short: "RAB", group: "dokumen", icon: FileSpreadsheet },
-  { id: "timeline", label: "Jadwal", short: "Jadwal", group: "dokumen", icon: CalendarRange },
-  { id: "site", label: "Lapangan", short: "Site", group: "dokumen", icon: HardHat },
+  { id: "timeline", label: "Jadwal & Lapangan", short: "Jadwal", group: "dokumen", icon: CalendarRange },
   { id: "deliver", label: "Ekspor", short: "Ekspor", group: "dokumen", icon: Download },
-  { id: "guide", label: "Panduan", short: "Panduan", group: "dokumen", icon: BookOpen },
 ];
 
 interface TopBarProps {
@@ -55,12 +55,23 @@ interface TopBarProps {
   onExportJson: () => void;
   onImportJson: () => void;
   onSaveSnapshot: () => void;
+  onOpenSnapshots: () => void;
 }
 
-export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapshot }: TopBarProps) {
+export function TopBar({
+  derived,
+  rab,
+  onExportJson,
+  onImportJson,
+  onSaveSnapshot,
+  onOpenSnapshots,
+}: TopBarProps) {
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+
   const workspace = useStudioStore((s) => s.workspace);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
-  const soundEnabled = useStudioStore((s) => s.project.gamification.soundEnabled);
+  const setGuideOpen = useStudioStore((s) => s.setGuideOpen);
+  const soundEnabled = useStudioStore((s) => s.soundEnabled);
   const setSoundEnabled = useStudioStore((s) => s.setSoundEnabled);
   const setCommandPaletteOpen = useStudioStore((s) => s.setCommandPaletteOpen);
   const resetProject = useStudioStore((s) => s.resetProject);
@@ -70,9 +81,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
 
   return (
     <header className="no-print flex shrink-0 flex-col border-b border-border bg-[#0f1216]">
-      {/* Primary Row: Brand + Grouped Segmented Dock + Global Actions */}
       <div className="flex h-11 items-center justify-between gap-2.5 px-3 sm:h-12 [@media(max-height:480px)]:h-9">
-        {/* Brand Identity */}
         <div className="flex shrink-0 items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-[#e28a48] to-[#b9662a] text-[#170f07] shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_2px_6px_rgba(0,0,0,0.4)]">
             <Box className="h-4 w-4 stroke-[2.2]" aria-hidden />
@@ -83,11 +92,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
           </div>
         </div>
 
-        {/* Desktop Segmented Field Navigation Dock */}
-        <nav
-          className="mx-1 hidden min-w-0 flex-1 items-center justify-center lg:flex"
-          aria-label="Ruang kerja utama"
-        >
+        <nav className="mx-1 hidden min-w-0 flex-1 items-center justify-center lg:flex" aria-label="Ruang kerja utama">
           <div className="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-xl border border-white/[0.08] bg-[#161a21] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
             {WORKSPACES.map((w, idx) => {
               const Icon = w.icon;
@@ -103,7 +108,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
                     aria-current={active ? "page" : undefined}
                     onClick={() => setWorkspace(w.id)}
                     className={cn(
-                      "flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-[11px] font-medium transition-all duration-150 active:scale-[0.98] 2xl:gap-1.5 2xl:px-2.5",
+                      "flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[11px] font-medium transition-all duration-150 active:scale-[0.98] 2xl:gap-1.5 2xl:px-3",
                       active
                         ? "bg-[#f2efe8] font-semibold text-[#14171c] shadow-[0_1px_3px_rgba(0,0,0,0.3)]"
                         : "text-[#98a1ae] hover:bg-white/[0.06] hover:text-foreground",
@@ -119,9 +124,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
           </div>
         </nav>
 
-        {/* Right Utility Cluster */}
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* Undo / Redo Pair */}
           <div className="flex items-center rounded-lg border border-border bg-[#161a21] p-0.5">
             <button
               type="button"
@@ -145,7 +148,17 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
             </button>
           </div>
 
-          {/* Command Palette Trigger */}
+          <button
+            type="button"
+            onClick={() => setGuideOpen(true)}
+            title="Panduan Teknis SNI & Konstruksi"
+            aria-label="Buka Panduan Teknis SNI"
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-[#161a21] px-2 text-[11px] font-medium text-muted-foreground transition hover:border-white/20 hover:text-foreground"
+          >
+            <BookOpen className="h-3.5 w-3.5 text-primary" />
+            <span className="hidden xl:inline">Panduan</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setCommandPaletteOpen(true)}
@@ -157,7 +170,6 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
             <span className="hidden font-mono text-[10px] 2xl:inline">Ctrl+K</span>
           </button>
 
-          {/* Unified Project Actions Menu */}
           <DropdownMenu.Root>
             <DropdownMenu.Trigger asChild>
               <button
@@ -174,7 +186,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
               <DropdownMenu.Content
                 align="end"
                 sideOffset={6}
-                className="studio-glass z-50 min-w-[215px] rounded-xl p-1.5 text-xs text-foreground"
+                className="studio-glass z-50 min-w-[225px] rounded-xl p-1.5 text-xs text-foreground"
               >
                 <DropdownMenu.Item
                   onSelect={onSaveSnapshot}
@@ -182,6 +194,13 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
                 >
                   <Save className="h-3.5 w-3.5 text-primary" />
                   <span>Simpan Snapshot Lokal</span>
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  onSelect={onOpenSnapshots}
+                  className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-xs outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                >
+                  <History className="h-3.5 w-3.5 text-amber-300" />
+                  <span>Riwayat Snapshot Lokal...</span>
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   onSelect={onImportJson}
@@ -210,7 +229,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
                 </DropdownMenu.Item>
                 <DropdownMenu.Separator className="my-1 h-px bg-white/[0.08]" />
                 <DropdownMenu.Item
-                  onSelect={resetProject}
+                  onSelect={() => setConfirmResetOpen(true)}
                   className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-xs text-rose-300 outline-none transition hover:bg-rose-500/15 focus:bg-rose-500/15"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
@@ -220,7 +239,6 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
 
-          {/* Live RAB Budget Chip (2xl shows full amount cleanly; xl shows compact status) */}
           <button
             type="button"
             onClick={() => setWorkspace("rab")}
@@ -242,7 +260,6 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
         </div>
       </div>
 
-      {/* Mobile / Tablet Scrollable Workspace Strip (< lg, comfortable tap targets) */}
       <nav
         className="no-scrollbar flex h-10 items-center gap-1 overflow-x-auto border-t border-white/[0.06] bg-[#13171d] px-2.5 lg:hidden [@media(max-height:480px)]:h-8"
         aria-label="Navigasi ruang kerja mobile"
@@ -274,6 +291,18 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
           );
         })}
       </nav>
+
+      <StudioConfirmDialog
+        open={confirmResetOpen}
+        title="Reset ke Desain Awal 5×17 m?"
+        description="Seluruh perubahan dinding, furnitur, harga satuan, dan progres akan diganti dengan template awal rumah 5×17 m 2 lantai. Riwayat Undo saat ini juga akan dihapus."
+        confirmLabel="Ya, Reset Proyek"
+        onConfirm={() => {
+          resetProject();
+          setConfirmResetOpen(false);
+        }}
+        onCancel={() => setConfirmResetOpen(false)}
+      />
     </header>
   );
 }

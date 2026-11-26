@@ -1,4 +1,19 @@
-import type { Level, MepPoint, MepRoute, Project, Vec3 } from "@/lib/model/types";
+import type { Level, MepPoint, Project, Vec3 } from "@/lib/model/types";
+
+export type CanonicalMepRouteKind =
+  | "air_bersih"
+  | "air_kotor"
+  | "air_hujan"
+  | "listrik_lampu"
+  | "listrik_kontak"
+  | "listrik_ac";
+
+export interface CanonicalMepRoute {
+  id: string;
+  kind: CanonicalMepRouteKind;
+  label: string;
+  pts: Vec3[];
+}
 
 export interface CanonicalMepSymbol {
   id: string;
@@ -21,7 +36,7 @@ export interface CanonicalMepSymbol {
 }
 
 export interface CanonicalMepNetwork {
-  routesByLevel: [MepRoute[], MepRoute[]];
+  routesByLevel: [CanonicalMepRoute[], CanonicalMepRoute[]];
   symbolsByLevel: [CanonicalMepSymbol[], CanonicalMepSymbol[]];
 }
 
@@ -99,8 +114,8 @@ export function buildCanonicalMepNetwork(project: Project): CanonicalMepNetwork 
   const lv0HasBuilding = Boolean(lv0 && (lv0.walls.length > 0 || lv0.lights.length > 0 || lv0.hvac.length > 0 || lv0.furniture.length > 0));
   const lv1HasBuilding = Boolean(lv1 && (lv1.walls.length > 0 || lv1.lights.length > 0 || lv1.hvac.length > 0 || lv1.furniture.length > 0));
 
-  const routes0: MepRoute[] = [];
-  const routes1: MepRoute[] = [];
+  const routes0: CanonicalMepRoute[] = [];
+  const routes1: CanonicalMepRoute[] = [];
   const symbols0: CanonicalMepSymbol[] = [];
   const symbols1: CanonicalMepSymbol[] = [];
 
@@ -344,7 +359,7 @@ export function buildCanonicalMepNetwork(project: Project): CanonicalMepNetwork 
         });
       }
       outlets0.forEach((o, idx) => {
-        const oy = Math.max(o.y, fm.outletHeightM);
+        const oy = fm.outletHeightM;
         symbols0.push({ id: o.id, levelIndex: 0, kind: "stopkontak", label: o.label, x: o.x, y: oy, z: o.z });
         const busX = o.x <= lotW * 0.5 ? 0.2 : roundCm(lotW - 0.2);
         const dropPts = buildOrthoPath3D({ x: busX, y: busY, z: o.z }, { x: o.x, y: oy, z: o.z }, true);

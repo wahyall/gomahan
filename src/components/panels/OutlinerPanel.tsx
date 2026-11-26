@@ -21,6 +21,12 @@ export function OutlinerPanel({ derived, struct, onCloseDrawer }: Props) {
   const setSelected = useStudioStore((s) => s.setSelected);
 
   const locked = view.stage > 0;
+  const primaryStair = derived.project.levels[0]?.stairs[0];
+  const stairsLabel = primaryStair
+    ? `Tangga (${primaryStair.riserCount} Anak Tangga)`
+    : "Tangga Beton";
+  const stairsNote = primaryStair ? `${primaryStair.floorHeight.toFixed(2)} m` : "Belum ada";
+
   const rows: {
     id: string;
     label: string;
@@ -34,7 +40,7 @@ export function OutlinerPanel({ derived, struct, onCloseDrawer }: Props) {
     { id: "tanah", label: "Tanah, Urugan & Tapak (Terrain)", note: "Tapak 5×17", indent: 1, icon: Layers, flagKey: "showTerrain" },
     { id: "pondasi", label: `Pondasi (${derived.project.systems.foundation})`, note: `${struct.foundations.length} titik`, indent: 1, icon: Landmark, partId: "pondasi" },
     { id: "sloof", label: "Sloof, Kolom, Balok & Pelat LT2", note: `${struct.columns.length} kolom`, indent: 1, icon: Layers, partId: "kolom", flagKey: "showStructure" },
-    { id: "tangga", label: "Tangga Beton (20 Anak Tangga)", note: "3,60 m", indent: 2, partId: "tangga" },
+    { id: "tangga", label: stairsLabel, note: stairsNote, indent: 2, partId: "tangga" },
     { id: "dinding", label: `Bata (${derived.project.systems.brick.name.split("(")[0]!.trim()})`, note: `${fmtNum(derived.masonry.totalPiecesPlaced)} bh`, indent: 1, icon: BrickWall, partId: "dinding", flagKey: "showBricks" },
     { id: "pintu", label: "Pintu & Kusen", note: `${derived.totalDoors} unit`, indent: 2, partId: "pintu" },
     { id: "jendela", label: "Jendela Kaca", note: `${derived.totalWindows} unit`, indent: 2, partId: "jendela" },

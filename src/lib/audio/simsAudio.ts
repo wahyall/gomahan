@@ -7,15 +7,37 @@
 type SoundCue = "select" | "place" | "rotate" | "paint" | "demolish" | "quest" | "warning";
 export type WalkSurfaceMaterial = "tile" | "wood" | "grass" | "stone";
 
+const SOUND_PREF_KEY = "rumah_studio_sound_enabled";
+
+function readInitialSoundPref(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    return window.localStorage.getItem(SOUND_PREF_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
 class SimsAudioEngine {
   private ctx: AudioContext | null = null;
-  private enabled = true;
+  private enabled = readInitialSoundPref();
   private lastPlayedAt = 0;
   private lastFootstepAt = 0;
   private noiseBuffer: AudioBuffer | null = null;
 
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
   setEnabled(enabled: boolean) {
     this.enabled = enabled;
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(SOUND_PREF_KEY, enabled ? "true" : "false");
+      } catch {
+        // Ignore storage errors in private mode
+      }
+    }
   }
 
   private ensureContext(): AudioContext | null {

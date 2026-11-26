@@ -129,6 +129,7 @@ export function createSurabayaPriceBook(): PriceBook {
     item("bata_hebel", "AHSP-A.4.4.1.25", "Bata ringan / Hebel AAC (per buah setara 600×200×100)", "bh", 8600, 1950, 0, { p: 0.01, t: 0.017, m: 0.005 }, "Permen PUPR 8/2023 koefisien thinbed"),
     item("bata_merah", "AHSP-A.4.4.1.9", "Bata merah lokal Surabaya (per buah)", "bh", 850, 480, 0, { p: 0.0043, t: 0.0014, m: 0.0002 }),
     item("bata_batako", "AHSP-A.4.4.1.19", "Batako semen press (per buah)", "bh", 4200, 1450, 0, { p: 0.012, t: 0.006, m: 0.001 }),
+    item("bata_precast", "SBY-BRK-PRC", "Panel dinding precast modular (600×300×80)", "bh", 14500, 2600, 0, { p: 0.012, t: 0.014, m: 0.002 }),
     item("bata_custom", "SBY-BRK-CST", "Bata / blok pasangan custom (per buah sesuai dimensi)", "bh", 5500, 1500, 0, { p: 0.01, t: 0.01, m: 0.002 }),
     item("perekat_hebel", "AHSP-A.4.4.1.25m", "Mortar instan perekat bata ringan (zak 40 kg)", "zak", 76000, 0, 0, undefined, "Konsumsi sesuai tebal nat 2-4 mm"),
     item("semen_pc", "SBY-PC-50", "Semen Portland Gresik/Tiga Roda (zak 50 kg)", "zak", 67000, 0, 0),

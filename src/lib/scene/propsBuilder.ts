@@ -617,6 +617,48 @@ export function buildFurnitureMesh(
       break;
     }
 
+    case "coffee_table": {
+      const b = new PropBatcher();
+      b.add(palette.woodTeak, createChamferBox(w, 0.045, d, 0.012, 2), 0, h - 0.025, 0);
+      b.add(accentMat, createChamferBox(w * 0.86, 0.025, d * 0.82, 0.008, 1), 0, h * 0.32, 0);
+      for (const lx of [-w * 0.42, w * 0.42]) {
+        for (const lz of [-d * 0.38, d * 0.38]) {
+          b.add(palette.aluDark, new THREE.CylinderGeometry(0.018, 0.014, h - 0.04, 8), lx, (h - 0.04) * 0.5, lz);
+        }
+      }
+      const g = b.flush(disposables);
+      addContactDisc(g, w, d, disposables, contactShadowMat);
+      rootObj = g;
+      break;
+    }
+
+    case "fridge": {
+      const b = new PropBatcher();
+      b.add(bodyMat, createChamferBox(w, h, d, 0.02, 2), 0, h * 0.5, 0);
+      b.add(palette.aluDark, new THREE.BoxGeometry(w * 0.96, 0.014, 0.018), 0, h * 0.62, d * 0.5 + 0.004);
+      b.add(palette.steelLight, createChamferBox(0.022, 0.34, 0.024, 0.005, 1), w * 0.36, h * 0.78, d * 0.5 + 0.02);
+      b.add(palette.steelLight, createChamferBox(0.022, 0.42, 0.024, 0.005, 1), w * 0.36, h * 0.36, d * 0.5 + 0.02);
+      const g = b.flush(disposables);
+      addContactDisc(g, w, d, disposables, contactShadowMat);
+      rootObj = g;
+      break;
+    }
+
+    case "desk": {
+      const b = new PropBatcher();
+      b.add(bodyMat, createChamferBox(w, 0.042, d, 0.01, 2), 0, h - 0.021, 0);
+      b.add(accentMat, createChamferBox(0.38, h * 0.62, d * 0.86, 0.01, 1), w * 0.5 - 0.21, h * 0.31 + 0.08, 0);
+      for (const lx of [-w * 0.45, w * 0.45]) {
+        for (const lz of [-d * 0.42, d * 0.42]) {
+          b.add(palette.aluDark, new THREE.BoxGeometry(0.036, h - 0.04, 0.036), lx, (h - 0.04) * 0.5, lz);
+        }
+      }
+      const g = b.flush(disposables);
+      addContactDisc(g, w, d, disposables, contactShadowMat);
+      rootObj = g;
+      break;
+    }
+
     default: {
       const b = new PropBatcher();
       b.add(bodyMat, createChamferBox(w, h, d, 0.015, 1), 0, h * 0.5, 0);

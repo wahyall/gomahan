@@ -6,7 +6,7 @@ import type { RabSummary } from "@/lib/quantities/rabEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
-import { KpiMetric, SectionHeader, StudioCard, StudioNumberField, StudioRange } from "@/components/ui/StudioPrimitives";
+import { KpiMetric, SectionHeader, StudioCard, StudioConfirmDialog, StudioNumberField, StudioRange } from "@/components/ui/StudioPrimitives";
 import { BrickWall, ChevronDown, ChevronRight, Layers, RotateCcw, Ruler, Search, Wallet, X } from "lucide-react";
 
 export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; rab: RabSummary }) {
@@ -19,6 +19,7 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
 
   const [query, setQuery] = useState("");
   const [collapsedDivs, setCollapsedDivs] = useState<Record<string, boolean>>({});
+  const [confirmResetPricesOpen, setConfirmResetPricesOpen] = useState(false);
 
   const settings = project.rabSettings;
   const masonry = derived.masonry;
@@ -135,7 +136,7 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
               action={
                 <button
                   type="button"
-                  onClick={resetPriceBook}
+                  onClick={() => setConfirmResetPricesOpen(true)}
                   className="flex items-center gap-1 rounded-lg border border-border bg-black/25 px-2 py-1 text-[10.5px] font-medium hover:border-primary"
                 >
                   <RotateCcw className="h-3 w-3" /> Reset Harga
@@ -313,6 +314,19 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
           </div>
         </div>
       </div>
+
+      <StudioConfirmDialog
+        open={confirmResetPricesOpen}
+        onCancel={() => setConfirmResetPricesOpen(false)}
+        title="Reset Harga Satuan?"
+        description="Seluruh harga material dan upah yang Anda ubah akan dikembalikan ke standar AHSP Surabaya 2026 (dapat dibatalkan via Ctrl+Z)."
+        confirmLabel="Reset Harga"
+        danger
+        onConfirm={() => {
+          resetPriceBook();
+          setConfirmResetPricesOpen(false);
+        }}
+      />
     </div>
   );
 }

@@ -14,7 +14,6 @@ import {
   Droplets,
   Eye,
   Footprints,
-  GitCompare,
   Grid3x3,
   Hammer,
   HelpCircle,
@@ -52,6 +51,7 @@ import {
 } from "@/features/buildMode";
 import { simsAudio } from "@/lib/audio/simsAudio";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import { CUT_PLANE_MAX_M, CUT_PLANE_OFF, PEIL_FLOOR1_MAX_M, PEIL_FLOOR1_MIN_M } from "@/lib/model/constants";
 import { PAINT_SWATCHES, ROOF_SWATCHES } from "@/lib/model/catalog";
 import type { RoofType } from "@/lib/model/types";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
@@ -255,8 +255,6 @@ export function BuildWorkspace({
   const setHover = useBuildModeStore((s) => s.setHover);
   const setPreviewHud = useBuildModeStore((s) => s.setPreviewHud);
   const saveCameraSnapshot = useBuildModeStore((s) => s.saveCameraSnapshot);
-  const baselineProject = useStudioStore((s) => s.baselineProject);
-  const lockBaseline = useStudioStore((s) => s.lockBaseline);
 
   const [query, setQuery] = useState("");
   const [stats, setStats] = useState<BuildSceneStats | null>(null);
@@ -312,6 +310,7 @@ export function BuildWorkspace({
         onPaintRoomFloor: (lv, rid, matId) => st.paintRoomFloor(lv, rid, matId),
         onSetFloorTiles: (tiles) => st.setFloorTileOverrides(tiles),
         onAddStair: (lv, s, v) => st.addStairWithCutout(lv, s, v),
+        onDeleteStair: (lv, id) => st.deleteStair(lv, id),
         onAddFurniture: (lv, f) => st.addFurniture(lv, f),
         onMoveFurniture: (lv, id, pos, rotationY) =>
           st.updateFurniture(lv, id, rotationY !== undefined ? { position: pos, rotationY } : { position: pos }),
@@ -325,6 +324,7 @@ export function BuildWorkspace({
           st.updateLight(lv, id, rotationY !== undefined ? { position: pos, rotationY } : { position: pos }),
         onDeleteLight: (lv, id) => st.deleteLight(lv, id),
         onAddPool: (p) => st.addPool(p),
+        onDeletePool: (id) => st.deletePool(id),
         onSetTerrainHeights: (h) => st.setTerrainHeights(h),
       });
       if (savedCameraSnapshot) bs.cameraCtrl.applySnapshot(savedCameraSnapshot);
@@ -397,8 +397,22 @@ export function BuildWorkspace({
     placementRotationQuarter,
   ]);
 
+  useEffect(() => {
+    const nextView = activeLevel === 0 ? "lt1" : activeLevel === 1 ? "lt2_cut" : "all";
+    if (useStudioStore.getState().view.activeLevelView !== nextView) {
+      patchView({ activeLevelView: nextView });
+    }
+  }, [activeLevel, patchView]);
+
   const selectedDetails = useMemo(() => {
     if (!selected || selected.kind === "part") return null;
+    if (selected.kind === "pool") {
+      const pObj = (project.buildExtras?.pools ?? []).find((x) => x.id === selected.id);
+      if (!pObj) return null;
+      const pw = (Math.abs(pObj.gx2 - pObj.gx1) + 1) * 0.5;
+      const pd = (Math.abs(pObj.gz2 - pObj.gz1) + 1) * 0.5;
+      return { title: "Kolam Renang / Taman", sub: `${pw.toFixed(1)}×${pd.toFixed(1)} m · Dalam ${pObj.depth.toFixed(2)} m` };
+    }
     const lv = project.levels[selected.levelIndex];
     if (!lv) return null;
     if (selected.kind === "wall") {
@@ -412,6 +426,11 @@ export function BuildWorkspace({
       const o = w?.openings.find((x) => x.id === selected.id);
       if (!o) return null;
       return { title: o.label, sub: `${o.width.toFixed(2)}×${o.height.toFixed(2)} m · Sill ${o.sill.toFixed(2)} m` };
+    }
+    if (selected.kind === "stair") {
+      const stObj = lv.stairs.find((x) => x.id === selected.id);
+      if (!stObj) return null;
+      return { title: stObj.name, sub: `${stObj.riserCount} anak tangga · Lebar ${stObj.width.toFixed(2)} m · LT${lv.index + 1}` };
     }
     if (selected.kind === "furniture") {
       const f = lv.furniture.find((x) => x.id === selected.id);
@@ -429,13 +448,15 @@ export function BuildWorkspace({
       return { title: l.name, sub: `${l.lumens} lm · ${l.colorTempK}K · ${l.on ? "ON" : "OFF"}` };
     }
     return null;
-  }, [project.levels, selected]);
+  }, [project.buildExtras?.pools, project.levels, selected]);
 
   const handleDeleteSelected = useCallback(() => {
     if (!selected || selected.kind === "part") return;
     const st = useStudioStore.getState();
     const lv = selected.levelIndex as 0 | 1;
-    if (selected.kind === "wall") st.deleteWall(lv, selected.id);
+    if (selected.kind === "pool") st.deletePool(selected.id);
+    else if (selected.kind === "stair") st.deleteStair(lv, selected.id);
+    else if (selected.kind === "wall") st.deleteWall(lv, selected.id);
     else if (selected.kind === "opening") st.deleteOpening(lv, selected.wallId, selected.id);
     else if (selected.kind === "furniture") st.deleteFurniture(lv, selected.id);
     else if (selected.kind === "hvac") st.deleteHvac(lv, selected.id);
@@ -829,7 +850,7 @@ export function BuildWorkspace({
                 <DropdownMenu.Trigger asChild>
                   <button
                     type="button"
-                    title="Lapisan MEP, Dimensi, 10 Tahap Konstruksi & Opsi Kamera"
+                    title="Lapisan MEP, Dimensi, 12 Tahap Konstruksi & Opsi Kamera"
                     className="flex h-8 shrink-0 items-center gap-1 rounded-xl px-2 text-xs font-medium text-muted-foreground transition hover:bg-white/[0.08] hover:text-foreground"
                   >
                     <Layers className="h-3.5 w-3.5" />
@@ -868,19 +889,8 @@ export function BuildWorkspace({
                       }}
                       className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
                     >
-                      <span>Timeline 10 Tahap Konstruksi</span>
+                      <span>Timeline 12 Tahap Konstruksi</span>
                       {(stageTimelineOpen || view.stage > 0) && <Check className="h-3.5 w-3.5 text-primary" />}
-                    </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="my-1 h-px bg-white/[0.08]" />
-                    <DropdownMenu.Item
-                      onSelect={(e) => {
-                        e.preventDefault();
-                        patchView({ beforeAfterEnabled: !view.beforeAfterEnabled });
-                      }}
-                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
-                    >
-                      <span className="flex items-center gap-1.5"><GitCompare className="h-3.5 w-3.5 opacity-75" /> Bandingkan Baseline vs Revisi</span>
-                      {view.beforeAfterEnabled && <Check className="h-3.5 w-3.5 text-primary" />}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator className="my-1 h-px bg-white/[0.08]" />
                     <DropdownMenu.Item
@@ -896,7 +906,9 @@ export function BuildWorkspace({
                     <DropdownMenu.Item
                       onSelect={(e) => {
                         e.preventDefault();
+                        const nextNeighbors = !neighborsVisible;
                         toggleNeighbors();
+                        patchView({ showNeighbors: nextNeighbors });
                       }}
                       className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
                     >
@@ -1051,7 +1063,10 @@ export function BuildWorkspace({
                       <button
                         key={rm}
                         type="button"
-                        onClick={() => setRoofVisibility(rm)}
+                        onClick={() => {
+                          setRoofVisibility(rm);
+                          patchView({ showRoof: rm !== "hide" });
+                        }}
                         className={cn(
                           "rounded-md px-1.5 py-0.5 text-[10px] font-medium transition",
                           roofVisibility === rm
@@ -1127,9 +1142,14 @@ export function BuildWorkspace({
                 </div>
               </div>
 
-              {/* Active Terrain / Section / Explode Pill when non-default */}
-              {(!view.showTerrain || view.explode > 0.05 || view.cutH < 9.15) && (
-                <div className="flex flex-wrap items-center justify-end gap-1 rounded-xl border border-amber-400/35 bg-[#1b1812]/90 px-2.5 py-1 text-[10.5px] text-amber-200 backdrop-blur-md">
+              {/* Active Terrain / Section / Explode / Sim Overlays Pill when active */}
+              {(!view.showTerrain ||
+                view.explode > 0.05 ||
+                view.cutH < CUT_PLANE_MAX_M - 0.05 ||
+                view.showLuxHeatmap ||
+                view.showAirParticles ||
+                floodActive) && (
+                <div className="flex flex-wrap items-center justify-end gap-1.5 rounded-xl border border-amber-400/35 bg-[#1b1812]/90 px-2.5 py-1 text-[10.5px] text-amber-200 backdrop-blur-md">
                   {!view.showTerrain && (
                     <button
                       type="button"
@@ -1145,16 +1165,43 @@ export function BuildWorkspace({
                       onClick={() => patchView({ explode: 0 })}
                       className="font-mono hover:text-white"
                     >
-                      · Bongkar {Math.round(view.explode * 100)}% (Reset)
+                      Bongkar {Math.round(view.explode * 100)}% (Reset)
                     </button>
                   )}
-                  {view.cutH < 9.15 && (
+                  {view.cutH < CUT_PLANE_MAX_M - 0.05 && (
                     <button
                       type="button"
-                      onClick={() => patchView({ cutH: 9.2 })}
+                      onClick={() => patchView({ cutH: CUT_PLANE_OFF })}
                       className="font-mono hover:text-white"
                     >
-                      · Potong {view.cutH.toFixed(1)}m (Reset)
+                      Potong {view.cutH.toFixed(1)}m (Reset)
+                    </button>
+                  )}
+                  {view.showLuxHeatmap && (
+                    <button
+                      type="button"
+                      onClick={() => patchView({ showLuxHeatmap: false })}
+                      className="font-medium text-amber-300 underline-offset-2 hover:text-white hover:underline"
+                    >
+                      Lux 3D (Matikan)
+                    </button>
+                  )}
+                  {view.showAirParticles && (
+                    <button
+                      type="button"
+                      onClick={() => patchView({ showAirParticles: false })}
+                      className="font-medium text-teal-300 underline-offset-2 hover:text-white hover:underline"
+                    >
+                      Angin 3D (Matikan)
+                    </button>
+                  )}
+                  {floodActive && (
+                    <button
+                      type="button"
+                      onClick={() => patchView({ showFloodWater: false, showRain: false })}
+                      className="font-medium text-cyan-300 underline-offset-2 hover:text-white hover:underline"
+                    >
+                      Hujan/Banjir 3D (Matikan)
                     </button>
                   )}
                 </div>
@@ -1209,11 +1256,11 @@ export function BuildWorkspace({
                           type="button"
                           title="Terapkan warna ke semua item sejenis di lantai ini"
                           onClick={() => {
-                            const st = useStudioStore.getState();
-                            for (const sib of lv?.furniture ?? []) {
-                              if (sib.catalogId === f.catalogId) {
-                                st.updateFurniture(selected.levelIndex as 0 | 1, sib.id, { colorHex: f.colorHex });
-                              }
+                            const updates = (lv?.furniture ?? [])
+                              .filter((sib) => sib.catalogId === f.catalogId && sib.id !== f.id)
+                              .map((sib) => ({ id: sib.id, patch: { colorHex: f.colorHex } }));
+                            if (updates.length > 0) {
+                              useStudioStore.getState().updateFurnitureBatch(selected.levelIndex as 0 | 1, updates);
                             }
                             toast.success(`Warna diterapkan ke seluruh ${f.name}.`);
                           }}
@@ -1438,26 +1485,6 @@ export function BuildWorkspace({
           </div>
         </div>
 
-        {/* Before/After compare info bar (restored from Struktur Mode) */}
-        {view.beforeAfterEnabled && (
-          <div className="studio-glass pointer-events-auto absolute bottom-2.5 left-1/2 z-20 flex max-w-[94%] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-xl border-primary/40 px-3 py-1.5 text-[11px] lg:bottom-auto lg:top-16">
-            <span>
-              Baseline: <b className="font-mono">{baselineProject.systems.brick.name.split("(")[0]}</b>
-            </span>
-            <span className="text-muted-foreground">→</span>
-            <span>
-              Sekarang: <b className="font-mono text-primary">Rp {Math.round(rab.grandTotal).toLocaleString("id-ID")}</b> ({derived.masonry.totalBuyBricks.toLocaleString("id-ID")} bata)
-            </span>
-            <button
-              type="button"
-              onClick={lockBaseline}
-              className="min-h-7 rounded-lg bg-primary/20 px-2.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/30"
-            >
-              Kunci Baseline
-            </button>
-          </div>
-        )}
-
         {/* Bottom-Right Interactive Build Catalog Dock */}
         <div className="studio-glass pointer-events-auto flex min-w-0 flex-1 flex-col rounded-2xl">
           <div className="flex items-center justify-between gap-2 border-b border-white/[0.08] px-2.5 py-1.5">
@@ -1544,8 +1571,6 @@ export function BuildWorkspace({
           {/* Contextual Options Bar */}
           {!catalogCollapsed &&
             (activeTool === "floor_tile" ||
-              activeTool === "floor_rect" ||
-              activeTool === "floor_fill" ||
               activeTool === "terrain" ||
               activeTool === "stair" ||
               activeTool === "furniture" ||
@@ -1554,7 +1579,7 @@ export function BuildWorkspace({
               activeCategory === "stairs_roof" ||
               activeCategory === "build") && (
               <div className="flex flex-wrap items-center gap-2.5 border-b border-white/[0.06] bg-black/20 px-3 py-1.5 text-[10.5px]">
-                {(activeTool === "floor_tile" || activeTool === "floor_rect" || activeTool === "floor_fill") && (
+                {activeTool === "floor_tile" && (
                   <div className="flex items-center gap-1">
                     <span className="text-muted-foreground">Kuas:</span>
                     {(
@@ -1616,12 +1641,12 @@ export function BuildWorkspace({
 
                 {activeCategory === "walls" && (
                   <div className="flex items-center gap-1.5">
-                    <span className="text-muted-foreground">Fasad:</span>
+                    <span className="text-muted-foreground">Cat Seluruh Fasad:</span>
                     {PAINT_SWATCHES.map((sw) => (
                       <button
                         key={sw.hex}
                         type="button"
-                        title={`Cat Eksterior: ${sw.name}`}
+                        title={`Cat Global Fasad: ${sw.name}`}
                         onClick={() => useStudioStore.getState().patchSimulation({ paintExtHex: sw.hex })}
                         className={cn(
                           "h-4 w-4 rounded-full border transition",
@@ -1630,6 +1655,7 @@ export function BuildWorkspace({
                         style={{ backgroundColor: sw.hex }}
                       />
                     ))}
+                    <span className="hidden text-[10px] text-muted-foreground/80 sm:inline">(atau pilih kuas dinding di bawah)</span>
                   </div>
                 )}
 
@@ -1659,7 +1685,7 @@ export function BuildWorkspace({
                       type="button"
                       onClick={() =>
                         useStudioStore.getState().patchPeil({
-                          floor1PeilM: Math.max(0.15, Number((project.site.peil.floor1PeilM - 0.1).toFixed(2))),
+                          floor1PeilM: Math.max(PEIL_FLOOR1_MIN_M, Number((project.site.peil.floor1PeilM - 0.1).toFixed(2))),
                         })
                       }
                       className="flex h-7 w-7 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20 sm:h-6 sm:w-6"
@@ -1671,7 +1697,7 @@ export function BuildWorkspace({
                       type="button"
                       onClick={() =>
                         useStudioStore.getState().patchPeil({
-                          floor1PeilM: Math.min(1.5, Number((project.site.peil.floor1PeilM + 0.1).toFixed(2))),
+                          floor1PeilM: Math.min(PEIL_FLOOR1_MAX_M, Number((project.site.peil.floor1PeilM + 0.1).toFixed(2))),
                         })
                       }
                       className="flex h-7 w-7 items-center justify-center rounded bg-white/10 font-bold text-foreground hover:bg-white/20 sm:h-6 sm:w-6"

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CONSTRUCTION_STAGES_GUIDE } from "@/lib/house/knowledge";
+import { CONSTRUCTION_STAGES } from "@/lib/house/knowledge";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { ClipboardCheck, ListOrdered, Pause, Play, SkipBack, SkipForward } from "lucide-react";
@@ -10,17 +10,18 @@ export function StageTimelineBar() {
   const [playing, setPlaying] = useState(false);
   const stage = useStudioStore((s) => s.view.stage);
   const patchView = useStudioStore((s) => s.patchView);
-  const stageInfo = stage > 0 ? CONSTRUCTION_STAGES_GUIDE.find((s) => s.no === stage) ?? null : null;
+  const totalStages = CONSTRUCTION_STAGES.length;
+  const stageInfo = stage > 0 ? CONSTRUCTION_STAGES.find((s) => s.no === stage) ?? null : null;
 
   useEffect(() => {
     if (!playing) return;
     const t = setTimeout(() => {
-      const next = stage < 10 ? stage + 1 : 0;
+      const next = stage < totalStages ? stage + 1 : 0;
       patchView({ stage: next });
       if (next === 0) setPlaying(false);
     }, 2400);
     return () => clearTimeout(t);
-  }, [playing, stage, patchView]);
+  }, [playing, stage, totalStages, patchView]);
 
   return (
     <div className="no-print safe-pb shrink-0 border-t border-border bg-[#13171d] px-3 py-2 [@media(max-height:480px)]:hidden">
@@ -33,7 +34,7 @@ export function StageTimelineBar() {
               setPlaying(!playing);
             }}
             className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground transition hover:brightness-110"
-            title={playing ? "Jeda Simulasi Tahapan" : "Putar Urutan Pembangunan 10 Tahap"}
+            title={playing ? "Jeda Simulasi Tahapan" : `Putar Urutan Pembangunan ${totalStages} Tahap`}
           >
             {playing ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
           </button>
@@ -47,7 +48,7 @@ export function StageTimelineBar() {
           </button>
           <button
             type="button"
-            onClick={() => patchView({ stage: stage >= 10 ? 0 : stage + 1 })}
+            onClick={() => patchView({ stage: stage >= totalStages ? 0 : stage + 1 })}
             className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
             title="Tahap Berikutnya"
           >
@@ -59,7 +60,7 @@ export function StageTimelineBar() {
           <ListOrdered className="h-3.5 w-3.5 shrink-0 text-primary" />
           <span className="font-semibold text-foreground">Urutan Konstruksi</span>
           <span className="truncate text-muted-foreground">
-            {stageInfo ? `Tahap ${stageInfo.no}/10 — ${stageInfo.nama} (${stageInfo.durasi})` : "Model Lengkap Selesai"}
+            {stageInfo ? `Tahap ${stageInfo.no}/${totalStages} — ${stageInfo.nama} (${stageInfo.durasi})` : "Model Lengkap Selesai"}
           </span>
         </div>
 
@@ -89,7 +90,7 @@ export function StageTimelineBar() {
           <span className="text-[10.5px] font-bold">Selesai</span>
           <span className="mt-0.5 text-[9px] opacity-75">Semua</span>
         </button>
-        {CONSTRUCTION_STAGES_GUIDE.map((st) => (
+        {CONSTRUCTION_STAGES.map((st) => (
           <button
             key={st.no}
             type="button"

@@ -51,8 +51,39 @@ export function polygonBounds(poly: Vec2[]) {
 }
 
 export function polygonCentroid(poly: Vec2[]): Vec2 {
-  const b = polygonBounds(poly);
-  return { x: (b.minX + b.maxX) * 0.5, z: (b.minZ + b.maxZ) * 0.5 };
+  if (poly.length === 0) return { x: 0, z: 0 };
+  let signedArea2 = 0;
+  let cx = 0;
+  let cz = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i]!;
+    const b = poly[(i + 1) % poly.length]!;
+    const cross = a.x * b.z - b.x * a.z;
+    signedArea2 += cross;
+    cx += (a.x + b.x) * cross;
+    cz += (a.z + b.z) * cross;
+  }
+  if (Math.abs(signedArea2) < 1e-6) {
+    const b = polygonBounds(poly);
+    return { x: (b.minX + b.maxX) * 0.5, z: (b.minZ + b.maxZ) * 0.5 };
+  }
+  return { x: cx / (3 * signedArea2), z: cz / (3 * signedArea2) };
+}
+
+export function isIndoorRoomProgram(program: Room["program"]): boolean {
+  return (
+    program === "living" ||
+    program === "dining" ||
+    program === "kitchen" ||
+    program === "bedroom" ||
+    program === "bathroom" ||
+    program === "service" ||
+    program === "circulation"
+  );
+}
+
+export function isTiledFloorProgram(program: Room["program"]): boolean {
+  return program !== "garden" && program !== "void" && program !== "carport";
 }
 
 export function pointInPolygon(pt: Vec2, poly: Vec2[]): boolean {
@@ -159,18 +190,11 @@ export function computeLevelRoomsMetrics(
       }
     }
 
-    const netArea = room.program === "void" ? 0 : Math.max(0.2, grossArea - wallDeduction);
+    const cappedDeduction = grossArea > 0 ? Math.min(Math.max(0, grossArea - 0.1), wallDeduction) : 0;
+    const netArea = room.program === "void" || grossArea <= 0 ? 0 : Math.max(0.1, grossArea - cappedDeduction);
     const isWetRoom = room.program === "bathroom";
-    const isTiled =
-      room.program !== "garden" &&
-      room.program !== "void" &&
-      room.program !== "carport";
-
-    const effW = Math.max(0.2, bounds.width - 0.12);
-    const effD = Math.max(0.2, bounds.depth - 0.12);
-    const nx = Math.max(1, Math.ceil(effW / tileM - 1e-6));
-    const nz = Math.max(1, Math.ceil(effD / tileM - 1e-6));
-    const tileCount = isTiled ? nx * nz : 0;
+    const isTiled = isTiledFloorProgram(room.program);
+    const tileCount = isTiled && netArea > 0 ? Math.max(1, Math.ceil((netArea * 1.05) / (tileM * tileM))) : 0;
 
     if (room.program !== "void") {
       grossSum += grossArea;
@@ -183,7 +207,7 @@ export function computeLevelRoomsMetrics(
       levelIndex: level.index,
       grossAreaM2: grossArea,
       netAreaM2: netArea,
-      wallDeductionM2: Math.min(grossArea, wallDeduction),
+      wallDeductionM2: cappedDeduction,
       centroid,
       bounds,
       tileCount,

@@ -532,7 +532,7 @@ export function createDefaultProject(): Project {
 
   return {
     id: "rumah-5x17-surabaya",
-    schemaVersion: 2,
+    schemaVersion: 3,
     name: "Rumah Tropis Modern 5×17 m (2 Lantai, 3 KT) — Surabaya",
     createdAt: now,
     updatedAt: now,
@@ -1172,64 +1172,6 @@ export function createDefaultProject(): Project {
             z: 13.8,
           },
         ],
-        mepRoutes: [
-          {
-            id: "mr1-air-bersih",
-            kind: "air_bersih",
-            label: "PDAM → Dapur, Powder Room & WC LT1",
-            pts: [
-              { x: 0.35, y: -0.25, z: 0.25 },
-              { x: 0.35, y: -0.25, z: 8.2 },
-              { x: 0.35, y: -0.25, z: 14.6 },
-              { x: 0.35, y: -0.25, z: 16.45 },
-            ],
-          },
-          {
-            id: "mr1-air-kotor",
-            kind: "air_kotor",
-            label: "WC & Dapur → Bio Septic Tank (Carport)",
-            pts: [
-              { x: 0.65, y: -0.45, z: 16.45 },
-              { x: 0.65, y: -0.45, z: 8.2 },
-              { x: 0.65, y: -0.48, z: 4.0 },
-              { x: 2.8, y: -0.52, z: 4.0 },
-              { x: 2.8, y: -0.55, z: 1.6 },
-            ],
-          },
-          {
-            id: "mr1-listrik-lampu",
-            kind: "listrik_lampu",
-            label: "MCB → Sirkuit Lampu LT1",
-            pts: [
-              { x: 0.35, y: 1.55, z: 4.15 },
-              { x: 0.35, y: 3.22, z: 4.15 },
-              { x: 2.25, y: 3.22, z: 4.15 },
-              { x: 2.25, y: 3.22, z: 13.85 },
-            ],
-          },
-          {
-            id: "mr1-listrik-kontak",
-            kind: "listrik_kontak",
-            label: "MCB → Sirkuit Stop Kontak LT1",
-            pts: [
-              { x: 0.35, y: 1.55, z: 4.15 },
-              { x: 0.35, y: 3.18, z: 4.15 },
-              { x: 0.2, y: 3.18, z: 4.15 },
-              { x: 0.2, y: 3.18, z: 13.8 },
-            ],
-          },
-          {
-            id: "mr1-hujan",
-            kind: "air_hujan",
-            label: "Downspout Atap Depan → Sumur Resapan",
-            pts: [
-              { x: 0.14, y: 3.6, z: 3.04 },
-              { x: 0.14, y: -0.32, z: 3.04 },
-              { x: 0.75, y: -0.32, z: 3.04 },
-              { x: 0.75, y: -0.35, z: 1.2 },
-            ],
-          },
-        ],
       },
       {
         id: "lt2",
@@ -1691,45 +1633,6 @@ export function createDefaultProject(): Project {
             z: 13.2,
           },
         ],
-        mepRoutes: [
-          {
-            id: "mr2-air-bersih",
-            kind: "air_bersih",
-            label: "Riser Air Bersih → Toilet LT2",
-            pts: [
-              { x: 0.35, y: -0.25, z: 16.45 },
-              { x: 0.35, y: 0.25, z: 16.45 },
-              { x: 0.35, y: 0.25, z: 12.5 },
-              { x: 3.5, y: 0.25, z: 12.5 },
-              { x: 3.5, y: 0.25, z: 8.85 },
-              { x: 4.35, y: 0.25, z: 8.85 },
-            ],
-          },
-          {
-            id: "mr2-air-kotor",
-            kind: "air_kotor",
-            label: "Shaft Limbah Toilet LT2 → LT1",
-            pts: [
-              { x: 4.35, y: -0.15, z: 8.85 },
-              { x: 3.5, y: -0.15, z: 8.85 },
-              { x: 3.5, y: -0.15, z: 12.5 },
-              { x: 0.65, y: -0.15, z: 12.5 },
-              { x: 0.65, y: -0.15, z: 16.45 },
-              { x: 0.65, y: -3.6, z: 16.45 },
-            ],
-          },
-          {
-            id: "mr2-listrik-ac",
-            kind: "listrik_ac",
-            label: "Feeder Khusus AC LT2",
-            pts: [
-              { x: 0.35, y: -2.05, z: 4.15 },
-              { x: 0.35, y: 3.1, z: 4.15 },
-              { x: 4.82, y: 3.1, z: 4.15 },
-              { x: 4.82, y: 3.1, z: 13.9 },
-            ],
-          },
-        ],
       },
     ],
     priceBook: createSurabayaPriceBook(),
@@ -1773,12 +1676,7 @@ export function createDefaultProject(): Project {
       roofColorHex: "#363b40",
     },
     stageProgress: {},
-    gamification: {
-      mode: "pro",
-      budgetCapIdr: 450_000_000,
-      soundEnabled: true,
-      completedQuests: [],
-      siteChecklistDone: {},
-    },
+    budgetCapIdr: 450_000_000,
+    siteChecklistDone: {},
   };
 }

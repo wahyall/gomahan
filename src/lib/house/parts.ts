@@ -67,7 +67,7 @@ export function getPartInfo(
         ringkas: `${struct.foundations.length} titik pondasi 2 lantai + peninggian peil +${Math.round(peil.floor1PeilM * 100)} cm.`,
         specs: [
           `Jenis: ${struct.foundations[0]?.sizeLabel ?? sys.foundation}`,
-          `Volume beton pondasi: ${fmtNum(struct.concreteVolumes.foundationM3, 2)} m³ (K-250 / fc' ${project.structuralParams.concreteFcMpa} MPa)`,
+          `Volume beton pondasi: ${fmtNum(struct.concreteVolumes.foundationM3, 2)} m³ (fc' ${project.structuralParams.concreteFcMpa} MPa)`,
           `Batu kali: ${fmtNum(struct.concreteVolumes.batukaliM3, 1)} m³ · Strauss pile: ${fmtNum(struct.concreteVolumes.straussMeters, 1)} m'`,
           `Daya dukung izin asumsi: ${project.site.soil.allowableBearingKpa} kPa (${project.site.soil.city})`,
         ],
@@ -128,19 +128,23 @@ export function getPartInfo(
         rowIds: ["beton_k250", "bondek", "wiremesh_m8", "panel_lantai_aac"],
         priceKeys: ["beton_k250", "bondek", "wiremesh_m8", "panel_lantai_aac"],
       };
-    case "tangga":
+    case "tangga": {
+      const stair = derived.project.levels[0]?.stairs[0];
       return {
         id: "tangga",
-        label: "Tangga Beton Utama (20 Anak Tangga)",
+        label: stair ? `Tangga Beton (${stair.riserCount} Anak Tangga)` : "Tangga Beton Utama",
         group: "Struktur Beton",
-        ringkas: "Tangga lurus sepanjang 4,8 m di sisi kiri dengan Powder Room tepat di bawahnya.",
+        ringkas: "Akses vertikal lantai 1 ke lantai 2 sesuai model bangunan saat ini.",
         specs: [
-          `20 optrade @ 18 cm, antrede 25 cm (total naik 3,60 m)`,
+          stair
+            ? `${stair.riserCount} optrade (${((stair.floorHeight / Math.max(1, stair.riserCount)) * 100).toFixed(1)} cm), antrede ${(stair.treadDepth * 100).toFixed(0)} cm (total naik ${stair.floorHeight.toFixed(2)} m)`
+            : "Belum ada tangga terpasang di LT1",
           `Volume beton tangga: ${fmtNum(struct.concreteVolumes.stairsM3, 2)} m³`,
         ],
         rowIds: ["beton_k250", "railing_tangga"],
         priceKeys: ["beton_k250", "railing_tangga"],
       };
+    }
     case "ringbalk":
       return {
         id: "ringbalk",

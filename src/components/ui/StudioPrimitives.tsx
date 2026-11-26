@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /** Elevated architectural studio card container with delicate top rim highlight */
@@ -223,7 +223,7 @@ export function StudioSelect({
   );
 }
 
-/** Styled numeric input with unit suffix */
+/** Styled numeric input with local draft editing buffer; clamps cleanly on blur/Enter. */
 export function StudioNumberField({
   label,
   value,
@@ -243,6 +243,23 @@ export function StudioNumberField({
   onChange: (val: number) => void;
   className?: string;
 }) {
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState(String(value));
+
+  const commitValue = (raw: string) => {
+    const trimmed = raw.trim();
+    const parsed = Number(trimmed);
+    if (!trimmed || !Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    let bounded = parsed;
+    if (min !== undefined) bounded = Math.max(min, bounded);
+    if (max !== undefined) bounded = Math.min(max, bounded);
+    onChange(bounded);
+    setDraft(String(bounded));
+  };
+
   return (
     <label className={cn("block space-y-1", className)}>
       <span className="block text-[11px] font-medium text-muted-foreground">{label}</span>
@@ -252,23 +269,114 @@ export function StudioNumberField({
           min={min}
           max={max}
           step={step}
-          value={value}
+          value={focused ? draft : String(value)}
+          onFocus={() => {
+            setDraft(String(value));
+            setFocused(true);
+          }}
           onChange={(e) => {
-            const parsed = Number(e.target.value);
-            const fallback = min ?? 0;
-            const safe = Number.isFinite(parsed) ? parsed : fallback;
-            const bounded =
-              min !== undefined && max !== undefined
-                ? Math.max(min, Math.min(max, safe))
-                : min !== undefined
-                  ? Math.max(min, safe)
-                  : safe;
-            onChange(bounded);
+            const next = e.target.value;
+            setDraft(next);
+            const parsed = Number(next);
+            if (next.trim() !== "" && Number.isFinite(parsed)) {
+              const withinMin = min === undefined || parsed >= min;
+              const withinMax = max === undefined || parsed <= max;
+              if (withinMin && withinMax) onChange(parsed);
+            }
+          }}
+          onBlur={(e) => {
+            setFocused(false);
+            commitValue(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              setDraft(String(value));
+              setFocused(false);
+              e.currentTarget.blur();
+            }
           }}
           className="w-full min-w-0 bg-transparent font-mono text-xs font-semibold text-foreground tabular-nums outline-none"
         />
         {unit && <span className="ml-1.5 shrink-0 font-mono text-[10.5px] text-muted-foreground">{unit}</span>}
       </div>
     </label>
+  );
+}
+
+/** Shared confirmation dialog for destructive or project-overwriting actions. */
+export function StudioConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel = "Ya, Lanjutkan",
+  cancelLabel = "Batal",
+  danger = true,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, onCancel]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(e) => e.stopPropagation()}
+        className="studio-glass w-full max-w-md space-y-4 rounded-2xl border border-white/[0.12] p-5 shadow-2xl"
+      >
+        <div className="space-y-1.5">
+          <h3 className="text-sm font-bold text-foreground">{title}</h3>
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="min-h-9 rounded-lg border border-border bg-secondary px-3.5 text-xs font-medium text-foreground transition hover:bg-secondary/80"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className={cn(
+              "min-h-9 rounded-lg px-4 text-xs font-semibold transition",
+              danger
+                ? "bg-rose-600 text-white hover:bg-rose-500"
+                : "bg-primary text-primary-foreground hover:brightness-110",
+            )}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

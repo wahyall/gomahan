@@ -372,12 +372,10 @@ export class WalkController {
       } else if (deltaY > 0.04 && horizDist > 1e-4 && !candSurface.onStairId) {
         // Non-stair steep slope rejection unless clean low discrete architectural step (<= stepHeight)
         const maxTan = Math.tan((WALK_CONFIG.maxSlopeDeg * Math.PI) / 180);
-        if (deltaY > WALK_CONFIG.stepHeight || (deltaY > 0.28 && deltaY / horizDist > maxTan * 2.5)) {
-          // Architectural discrete curb/teras step <= stepHeight stays passable cleanly; steeper non-stair slopes reject
-          if (deltaY > WALK_CONFIG.stepHeight) {
-            candX = startX;
-            candZ = startZ;
-          }
+        if (deltaY > WALK_CONFIG.stepHeight || (deltaY > 0.25 && deltaY / horizDist > maxTan * 2.5)) {
+          this.collidedLastTick = true;
+          candX = startX;
+          candZ = startZ;
         }
       }
     }
@@ -419,15 +417,24 @@ export class WalkController {
     this.roomName = s.roomName;
     this.surface = s.surface;
 
-    // Nearest door on the same active level within interaction distance
+    // Prioritize door the avatar is facing within interaction distance
     let bestDoor: WalkDoorInteractable | null = null;
-    let bestDist: number = WALK_CONFIG.doorInteractDistanceM;
+    let bestScore = Infinity;
+    const lookX = Math.sin(this.yaw);
+    const lookZ = Math.cos(this.yaw);
     for (const d of this.world.doors) {
       if (d.levelIndex !== this.currentLevel) continue;
-      const dist = Math.hypot(d.cx - this.x, d.cz - this.z);
-      if (dist <= bestDist) {
-        bestDist = dist;
-        bestDoor = d;
+      const dx = d.cx - this.x;
+      const dz = d.cz - this.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= WALK_CONFIG.doorInteractDistanceM) {
+        const dot = dist > 0.05 ? (dx / dist) * lookX + (dz / dist) * lookZ : 1;
+        const penalty = dot > 0.25 ? 0 : 0.65;
+        const score = dist + penalty;
+        if (score < bestScore) {
+          bestScore = score;
+          bestDoor = d;
+        }
       }
     }
     this.nearestDoor = bestDoor;

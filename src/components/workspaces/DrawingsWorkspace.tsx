@@ -71,10 +71,16 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
 
           <button
             type="button"
+            disabled={sheet === "potongan" || sheet === "struktur"}
             onClick={() => setShowMep((v) => !v)}
+            title={
+              sheet === "potongan" || sheet === "struktur"
+                ? "Overlay MEP hanya tersedia pada lembar denah (A-01 & A-02)"
+                : "Tampilkan atau sembunyikan jalur pipa air & kabel listrik"
+            }
             className={cn(
-              "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition",
-              showMep
+              "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40",
+              showMep && sheet !== "potongan" && sheet !== "struktur"
                 ? "border-primary/45 bg-primary/15 text-[#f6ba86]"
                 : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground",
             )}
@@ -235,10 +241,17 @@ function DenahFloorSvg({
   const px = (z: number) => ML + z * S;
   const py = (x: number) => MT + x * S;
 
-  const lv = derived.project.levels[levelIndex]!;
-  const rooms = derived.floors[levelIndex]!.rooms;
-  const mepRoutes = derived.mepNetwork.routesByLevel[levelIndex];
-  const mepSymbols = derived.mepNetwork.symbolsByLevel[levelIndex];
+  const lv = derived.project.levels[levelIndex];
+  const rooms = derived.floors[levelIndex]?.rooms ?? [];
+  const mepRoutes = derived.mepNetwork.routesByLevel[levelIndex] ?? [];
+  const mepSymbols = derived.mepNetwork.symbolsByLevel[levelIndex] ?? [];
+  if (!lv) {
+    return (
+      <div className="flex h-64 items-center justify-center rounded-xl bg-[#f8f7f2] text-xs font-medium text-[#6f6a60]">
+        Lantai {levelIndex + 1} belum ditambahkan ke model bangunan.
+      </div>
+    );
+  }
 
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full">
@@ -547,7 +560,7 @@ function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectMode
       <line x1={px(-0.8)} y1={py(0)} x2={px(17.5)} y2={py(0)} stroke={INK} strokeWidth={1.6} />
       <text x={px(-0.6)} y={py(0) - 5} fontSize={7.5} fontWeight={700} fill={DIM}>JALAN ±0,00</text>
 
-      {struct.foundations.slice(0, 7).map((f) => (
+      {struct.foundations.map((f) => (
         <rect key={f.id} x={px(f.z) - 16} y={py(-0.5)} width={32} height={14} fill="#b8b4aa" stroke={INK} strokeWidth={1} />
       ))}
 

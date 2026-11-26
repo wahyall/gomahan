@@ -1,3 +1,4 @@
+import { CONSTRUCTION_STAGES } from "@/lib/house/knowledge";
 import type { Project } from "@/lib/model/types";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
 
@@ -66,206 +67,39 @@ export interface ScheduleSummary {
   };
 }
 
-const STAGE_DEFS: {
-  id: string;
-  order: number;
-  name: string;
-  dependsOn: string[];
-  crew: number;
-  days: number;
-  leadDays: number;
-  qc: string[];
-}[] = [
-  {
-    id: "st-01",
-    order: 1,
-    name: "Persiapan & Bouwplank",
-    dependsOn: [],
-    crew: 3,
-    days: 4,
-    leadDays: 3,
-    qc: [
-      "Diagonal tapak 5×17 m = 17,72 m tepat",
-      "As batas tetangga kiri/kanan diverifikasi",
-      "Referensi peil jalan & banjir ditandai",
-    ],
-  },
-  {
-    id: "st-02",
-    order: 2,
-    name: "Galian, Urugan Peil & Pondasi",
-    dependsOn: ["st-01"],
-    crew: 5,
-    days: 14,
-    leadDays: 5,
-    qc: [
-      "Kedalaman tanah keras tercapai",
-      "Lantai kerja 5 cm rata",
-      "Tulangan footplate/strauss bebas karat & bersepatu beton 40 mm",
-    ],
-  },
-  {
-    id: "st-03",
-    order: 3,
-    name: "Sloof, Kolom Utama & Balok Induk",
-    dependsOn: ["st-02"],
-    crew: 6,
-    days: 16,
-    leadDays: 7,
-    qc: [
-      "Sengkang seismic 135° rapat di zona tumpuan",
-      "Bekisting tegak & kencang (cek lot/waterpass)",
-      "Slump beton sesuai mutu K-250",
-    ],
-  },
-  {
-    id: "st-04",
-    order: 4,
-    name: "Pelat Lantai 2 & Tangga",
-    dependsOn: ["st-03"],
-    crew: 6,
-    days: 12,
-    leadDays: 7,
-    qc: [
-      "Perancah/steger kuat menahan beban cor",
-      "Selimut beton pelat 20 mm terjaga",
-      "Curing beton minimal 7 hari sebelum bongkar total",
-    ],
-  },
-  {
-    id: "st-05",
-    order: 5,
-    name: "Pasangan Bata & Kolom Praktis",
-    dependsOn: ["st-04"],
-    crew: 5,
-    days: 18,
-    leadDays: 5,
-    qc: [
-      "Kelurusan vertikal dicek tiap 1 m",
-      "Ikatan berselang min. 10 cm + angkur besi ke kolom tiap 5 lapis",
-      "Tebal nat sesuai spek (hebel 3 mm / merah 12 mm)",
-    ],
-  },
-  {
-    id: "st-06",
-    order: 6,
-    name: "Pemasangan Kusen Pintu & Jendela",
-    dependsOn: ["st-05"],
-    crew: 3,
-    days: 6,
-    leadDays: 14,
-    qc: [
-      "Kusen siku 90° & waterpass",
-      "Ambang bawah jendela miring keluar 5° cegah tampias",
-    ],
-  },
-  {
-    id: "st-07",
-    order: 7,
-    name: "Ring Balk, Rangka Atap Shed & Talang",
-    dependsOn: ["st-05"],
-    crew: 4,
-    days: 10,
-    leadDays: 10,
-    qc: [
-      "Kemiringan atap 10° tepat ke depan",
-      "Talang jurai dalam parapet tetangga diuji genang (tes bocor)",
-      "Sekrup atap & insulasi terpasang rapi",
-    ],
-  },
-  {
-    id: "st-08",
-    order: 8,
-    name: "Instalasi Rough-in MEP & Backflow",
-    dependsOn: ["st-05", "st-07"],
-    crew: 3,
-    days: 8,
-    leadDays: 5,
-    qc: [
-      "Tes tekan pipa air bersih 4 bar min. 2 jam",
-      "Kemiringan pipa limbah 1–2% ke bio septic + backflow valve terpasang",
-      "Conduit listrik & grounding arde sesuai PUIL",
-    ],
-  },
-  {
-    id: "st-09",
-    order: 9,
-    name: "Plesteran, Acian & Plafon",
-    dependsOn: ["st-07", "st-08"],
-    crew: 5,
-    days: 14,
-    leadDays: 4,
-    qc: [
-      "Kerataan plester pakai jidar 2 m toleransi < 3 mm",
-      "Plafon area KM pakai gypsum tahan lembap",
-    ],
-  },
-  {
-    id: "st-10",
-    order: 10,
-    name: "Lantai Keramik, Carport & Railing",
-    dependsOn: ["st-09"],
-    crew: 4,
-    days: 12,
-    leadDays: 7,
-    qc: [
-      "Keramik tidak kopong saat diketuk",
-      "Lantai KM miring 1,5% ke floor drain",
-      "Railing balkon & void kokoh (tinggi min. 95 cm)",
-    ],
-  },
-  {
-    id: "st-11",
-    order: 11,
-    name: "Sanitair, Saklar/Lampu, AC & Mitigasi Banjir",
-    dependsOn: ["st-10"],
-    crew: 3,
-    days: 6,
-    leadDays: 7,
-    qc: [
-      "Stop kontak LT1 di elevasi aman banjir",
-      "Uji vakum & arus AC/kipas",
-      "Tes sekat banjir pintu & pompa kuras",
-    ],
-  },
-  {
-    id: "st-12",
-    order: 12,
-    name: "Cat, Waterproofing & Serah Terima",
-    dependsOn: ["st-11"],
-    crew: 4,
-    days: 8,
-    leadDays: 4,
-    qc: [
-      "Tes genang waterproofing KM & balkon 24 jam",
-      "Seluruh checklist SNI & RAB disetujui bersama kontraktor",
-    ],
-  },
-];
+function computeCpmDurationDays(project: Project, factorTime: number): number {
+  const endByStage = new Map<string, number>();
+  let maxEnd = 0;
+  for (const def of CONSTRUCTION_STAGES) {
+    const prog = project.stageProgress[def.id];
+    const depEnd = def.dependsOn.reduce((m, dep) => Math.max(m, endByStage.get(dep) ?? 0), 0);
+    const startDay = Math.max(0, depEnd + (prog?.startOffsetDays ?? 0));
+    const dur = Math.max(2, Math.ceil((prog?.durationOverrideDays ?? def.days) * factorTime));
+    const endDay = startDay + dur;
+    endByStage.set(def.id, endDay);
+    if (endDay > maxEnd) maxEnd = endDay;
+  }
+  return maxEnd;
+}
 
 export function buildScheduleSummary(
   project: Project,
   rab: RabSummary,
   mode: "baseline" | "accelerated" | "delayed" = "baseline",
+  currentWorkDay?: number,
 ): ScheduleSummary {
-  const factorTime =
-    mode === "accelerated" ? 0.78 : mode === "delayed" ? 1.25 : 1.0;
+  const factorTime = mode === "accelerated" ? 0.78 : mode === "delayed" ? 1.25 : 1.0;
   const endByStage = new Map<string, number>();
   const stages: ScheduleStage[] = [];
 
-  for (const def of STAGE_DEFS) {
+  for (const def of CONSTRUCTION_STAGES) {
     const prog = project.stageProgress[def.id];
     const stageRows = rab.rows.filter((r) => r.stageId === def.id);
     const directStageCost = stageRows.reduce((s, r) => s + r.subtotal, 0);
-    // Allocate indirect markups proportionally
-    const ratio =
-      rab.directSubtotal > 0 ? directStageCost / rab.directSubtotal : 0;
+    const ratio = rab.directSubtotal > 0 ? directStageCost / rab.directSubtotal : 0;
     const budgetIdr = Math.round(rab.grandTotal * ratio);
 
-    const depEnd = def.dependsOn.reduce(
-      (m, dep) => Math.max(m, endByStage.get(dep) ?? 0),
-      0,
-    );
+    const depEnd = def.dependsOn.reduce((m, dep) => Math.max(m, endByStage.get(dep) ?? 0), 0);
     const startOffset = prog?.startOffsetDays ?? 0;
     const startDay = Math.max(0, depEnd + startOffset);
     const rawDuration = prog?.durationOverrideDays ?? def.days;
@@ -273,16 +107,13 @@ export function buildScheduleSummary(
     const endDay = startDay + durationDays;
     endByStage.set(def.id, endDay);
 
-    const crew =
-      prog?.crewOverride ?? (mode === "accelerated" ? def.crew + 2 : def.crew);
-    const procurementItems = stageRows
-      .slice(0, 5)
-      .map((r) => `${r.uraian} (${Math.ceil(r.qty)} ${r.unit})`);
+    const crew = prog?.crewOverride ?? (mode === "accelerated" ? def.crew + 2 : def.crew);
+    const procurementItems = stageRows.map((r) => `${r.uraian} (${Math.ceil(r.qty)} ${r.unit})`);
 
     stages.push({
       id: def.id,
       order: def.order,
-      name: def.name,
+      name: def.nama,
       dependsOn: def.dependsOn,
       baseCrew: crew,
       baseDurationDays: def.days,
@@ -294,14 +125,20 @@ export function buildScheduleSummary(
       actualCostIdr: prog?.actualCost ?? 0,
       leadTimeDays: def.leadDays,
       procurementItems,
-      qcChecklist: def.qc,
+      qcChecklist: def.cekMutu,
     });
   }
 
-  const totalDurationDays = stages.reduce((m, s) => Math.max(m, s.endDay), 0);
-  const totalWeeks = Math.max(1, Math.ceil(totalDurationDays / 6)); // 6 workdays/week
+  // Normalize final stage rounding delta so sum(stages.budgetIdr) === rab.grandTotal
+  if (stages.length > 0 && rab.grandTotal > 0) {
+    const budgetSum = stages.reduce((s, st) => s + st.budgetIdr, 0);
+    const largest = stages.reduce((best, st) => (st.budgetIdr > best.budgetIdr ? st : best), stages[0]!);
+    largest.budgetIdr += rab.grandTotal - budgetSum;
+  }
 
-  // Build weekly cash flow S-curve
+  const totalDurationDays = stages.reduce((m, s) => Math.max(m, s.endDay), 0);
+  const totalWeeks = Math.max(1, Math.ceil(totalDurationDays / 6));
+
   const weeklyCashFlow: WeeklyCashFlow[] = [];
   let cumPlanned = 0;
   let cumActual = 0;
@@ -312,10 +149,7 @@ export function buildScheduleSummary(
     let weeklyActual = 0;
     let peakCrew = 0;
     for (const st of stages) {
-      const overlap = Math.max(
-        0,
-        Math.min(wEnd, st.endDay) - Math.max(wStart, st.startDay),
-      );
+      const overlap = Math.max(0, Math.min(wEnd, st.endDay) - Math.max(wStart, st.startDay));
       if (overlap > 0) {
         const frac = overlap / st.durationDays;
         weeklyCost += st.budgetIdr * frac;
@@ -346,26 +180,25 @@ export function buildScheduleSummary(
       estimatedCostIdr: s.budgetIdr,
     }));
 
-  const nextStage =
-    stages.find((s) => s.progressPct < 100) ?? stages[0] ?? null;
+  const nextStage = stages.find((s) => s.progressPct < 100) ?? null;
 
-  // Earned Value (EVM)
-  const pv = stages.reduce(
-    (s, st) =>
-      s + st.budgetIdr * (st.endDay <= totalDurationDays * 0.35 ? 1 : 0),
-    0,
-  );
-  const ev = stages.reduce(
-    (s, st) => s + st.budgetIdr * (st.progressPct / 100),
-    0,
-  );
+  const evalDay = currentWorkDay ?? Math.round(totalDurationDays * 0.35);
+  const pv = stages.reduce((s, st) => {
+    if (evalDay <= st.startDay) return s;
+    const frac = Math.min(1, (evalDay - st.startDay) / Math.max(1, st.durationDays));
+    return s + st.budgetIdr * frac;
+  }, 0);
+  const ev = stages.reduce((s, st) => s + st.budgetIdr * (st.progressPct / 100), 0);
   const ac = stages.reduce((s, st) => s + st.actualCostIdr, 0);
   const cpi = ac > 0 ? ev / ac : 1.0;
   const spi = pv > 0 ? ev / pv : 1.0;
-  const eac = cpi > 0 ? rab.grandTotal / cpi : rab.grandTotal;
+  const eac = ev > 0 ? rab.grandTotal / cpi : ac > 0 ? rab.grandTotal + ac : rab.grandTotal;
   const vac = rab.grandTotal - eac;
 
-  const baseDays = STAGE_DEFS.reduce((s, d) => s + d.days, 0) * 0.72;
+  const baselineDays = computeCpmDurationDays(project, 1.0);
+  const acceleratedDays = computeCpmDurationDays(project, 0.78);
+  const delayedDays = computeCpmDurationDays(project, 1.25);
+
   return {
     stages,
     totalDurationDays,
@@ -379,12 +212,12 @@ export function buildScheduleSummary(
           startDay: nextStage.startDay,
         }
       : null,
-    earnedValue: { pv, ev, ac, cpi, spi, eac, vac },
+    earnedValue: { pv: Math.round(pv), ev: Math.round(ev), ac: Math.round(ac), cpi, spi, eac: Math.round(eac), vac: Math.round(vac) },
     scenarios: {
-      baselineDays: Math.round(baseDays),
-      acceleratedDays: Math.round(baseDays * 0.78),
+      baselineDays,
+      acceleratedDays,
       acceleratedCostIdr: Math.round(rab.grandTotal * 1.045),
-      delayedDays: Math.round(baseDays * 1.25),
+      delayedDays,
       delayedCostIdr: Math.round(rab.grandTotal * 1.03),
     },
   };

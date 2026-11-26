@@ -13,135 +13,237 @@
  */
 
 export interface ConstructionStageGuide {
+  id: string;
   no: number;
+  order: number;
   nama: string;
+  dependsOn: string[];
+  crew: number;
+  days: number;
+  leadDays: number;
   durasi: string;
   deskripsi: string;
   cekMutu: string[];
 }
 
-export const CONSTRUCTION_STAGES_GUIDE: ConstructionStageGuide[] = [
+/** Canonical 12 construction stages shared by scheduleEngine, 3D Timeline Bar, & Panduan. */
+export const CONSTRUCTION_STAGES: ConstructionStageGuide[] = [
   {
+    id: "st-01",
     no: 1,
-    nama: "Persiapan, Bouwplank & Peil Banjir",
+    order: 1,
+    nama: "Persiapan & Bouwplank",
+    dependsOn: [],
+    crew: 3,
+    days: 4,
+    leadDays: 3,
     durasi: "4 hari",
     deskripsi:
-      "Pembersihan lahan 5×17 m, pemasangan bouwplank, pengecekan batas tembok tetangga kiri-kanan, serta penetapan peil elevasi lantai utama (+50 cm di atas jalan).",
+      "Pembersihan lahan 5×17 m, pemasangan bouwplank, pengecekan batas tembok tetangga kiri-kanan, serta penetapan peil elevasi lantai utama di atas jalan.",
     cekMutu: [
-      "Diagonal tapak 5×17 m = 17,72 m akurat",
-      "Elevasi peil +0,50 m bebas genangan jalan",
-      "Jarak batas tetangga kiri/kanan tidak melanggar KDB",
+      "Diagonal tapak 5×17 m = 17,72 m tepat",
+      "As batas tetangga kiri/kanan diverifikasi",
+      "Referensi peil jalan & banjir ditandai",
     ],
   },
   {
+    id: "st-02",
     no: 2,
-    nama: "Pondasi 2 Lantai & Sumur Resapan",
-    durasi: "2 minggu",
+    order: 2,
+    nama: "Galian, Urugan Peil & Pondasi",
+    dependsOn: ["st-01"],
+    crew: 5,
+    days: 14,
+    leadDays: 5,
+    durasi: "14 hari",
     deskripsi:
-      "Galian tapak footplate / pengeboran strauss pile / cakar ayam, lantai kerja 5 cm, pembesian tapak D13, cor beton K-250, dan pembuatan sumur resapan SNI 03-2453.",
+      "Galian tapak footplate / strauss pile / cakar ayam, lantai kerja 5 cm, pembesian tapak, cor beton K-250, urugan peninggian peil, dan sumur resapan SNI 03-2453.",
     cekMutu: [
-      "Tanah dasar padat & bebas genangan saat cor",
-      "Selimut beton pondasi minimal 40 mm",
-      "Sumur resapan berjarak aman ≥ 5 m dari bio septic",
+      "Kedalaman tanah keras tercapai",
+      "Lantai kerja 5 cm rata",
+      "Tulangan footplate/strauss bebas karat & bersepatu beton 40 mm",
     ],
   },
   {
+    id: "st-03",
     no: 3,
-    nama: "Sloof & Kolom Utama LT1",
-    durasi: "2 minggu",
+    order: 3,
+    nama: "Sloof, Kolom Utama & Balok Induk",
+    dependsOn: ["st-02"],
+    crew: 6,
+    days: 16,
+    leadDays: 7,
+    durasi: "16 hari",
     deskripsi:
-      "Sloof struktural 20/30 (6D12 + begel Ø8) dan kolom utama 20/25 (6D13 + begel Ø8-100 tumpuan) dicor dengan pengikatan seismic hook 135°.",
+      "Pengecoran sloof struktural 20/30, kolom utama 20/25, serta balok induk pemikul pelat lantai 2 dengan pengikatan kait begel gempa 135°.",
     cekMutu: [
-      "Kait begel ditekuk 135° tahan gempa (SNI 2847)",
-      "Kolom tegak lot dengan toleransi < 5 mm",
-      "Overlap stek besi ke lantai 2 minimal 40× diameter",
+      "Sengkang seismic 135° rapat di zona tumpuan",
+      "Bekisting tegak & kencang (cek lot/waterpass)",
+      "Slump beton sesuai mutu rencana",
     ],
   },
   {
+    id: "st-04",
     no: 4,
-    nama: "Balok Induk, Pelat LT2 & Tangga",
-    durasi: "2 minggu",
+    order: 4,
+    nama: "Pelat Lantai 2 & Tangga",
+    dependsOn: ["st-03"],
+    crew: 6,
+    days: 12,
+    leadDays: 7,
+    durasi: "12 hari",
     deskripsi:
-      "Pengecoran balok induk 20/35, pelat lantai 2 (tebal 12 cm / Bondek / Panel AAC), dan tangga beton 20 anak tangga menuju lantai 2, menyisakan void belakang 1,65×3,3 m.",
+      "Pengecoran / pemasangan pelat lantai 2 (cor konvensional / Bondek Wiremesh / Panel AAC) dan konstruksi tangga beton menuju lantai 2 lengkap dengan lubang void.",
     cekMutu: [
-      "Tinggi bebas (headroom) tangga minimal 2,05 m",
-      "Tulangan rangkap pelat & balok terikat kawat bendrat",
-      "Curing beton disiram minimal 7 hari",
+      "Perancah/steger kuat menahan beban cor",
+      "Selimut beton pelat 20 mm terjaga",
+      "Curing beton minimal 7 hari sebelum bongkar total",
     ],
   },
   {
+    id: "st-05",
     no: 5,
-    nama: "Pasangan Bata LT1 & LT2 + Kolom Praktis",
-    durasi: "3 minggu",
+    order: 5,
+    nama: "Pasangan Bata & Kolom Praktis",
+    dependsOn: ["st-04"],
+    crew: 5,
+    days: 18,
+    leadDays: 5,
+    durasi: "18 hari",
     deskripsi:
-      "Pemasangan bata putih hebel (nat 3 mm), bata merah (spesi 1:5), atau ukuran bata custom batu demi batu, beserta kusen, roster, dan kolom praktis tiap jarak ≤ 3,5 m.",
+      "Pemasangan dinding bata hebel / merah / batako / precast batu demi batu, penyusunan roster angin, dan pengecoran kolom praktis tiap jarak <= 3,5 m.",
     cekMutu: [
-      "Ikatan berselang min. 10 cm, tidak segaris antar lajur",
-      "Angkur besi ke kolom tiap 4–5 lapis bata",
-      "Dinding batas kiri/kanan rapat tanpa jendela ke tetangga",
+      "Kelurusan vertikal dicek tiap 1 m",
+      "Ikatan berselang min. 10 cm + angkur besi ke kolom tiap 5 lapis",
+      "Tebal nat sesuai spek (hebel 3 mm / merah 12 mm)",
     ],
   },
   {
+    id: "st-06",
     no: 6,
-    nama: "Ring Balk & Atap Shed 10° ke Depan",
-    durasi: "1,5 minggu",
+    order: 6,
+    nama: "Pemasangan Kusen Pintu & Jendela",
+    dependsOn: ["st-05"],
+    crew: 3,
+    days: 6,
+    leadDays: 14,
+    durasi: "6 hari",
     deskripsi:
-      "Ring balk pengikat di puncak LT2, rangka baja ringan C75, atap miring satu arah 10° ke depan + insulasi foil, skylight tangga, dan talang parapet kiri/kanan.",
+      "Pemasangan kusen kayu solid, WPC/UPVC kamar mandi, dan kusen aluminium eksterior secara siku sebelum pekerjaan plesteran.",
     cekMutu: [
-      "Kemiringan atap 10° lancar mengalirkan hujan ke talang depan",
-      "Talang jurai dalam parapet dites rendam 24 jam tanpa bocor",
-      "Overstek samping 0 m (tidak menetes ke atap tetangga)",
+      "Kusen siku 90° & waterpass",
+      "Ambang bawah jendela miring keluar 5° cegah tampias",
     ],
   },
   {
+    id: "st-07",
     no: 7,
-    nama: "Rough-in MEP, Backflow & Kabel AC",
-    durasi: "1 minggu",
+    order: 7,
+    nama: "Ring Balk, Rangka Atap Shed & Talang",
+    dependsOn: ["st-05"],
+    crew: 4,
+    days: 10,
+    leadDays: 10,
+    durasi: "10 hari",
     deskripsi:
-      "Pipa air bersih PVC AW, pipa limbah dengan kemiringan 1,5% + Backflow Valve menuju Bio Septic bawah carport, serta conduit kabel lampu (1,5 mm²) & kontak/AC (2,5 mm²).",
+      "Ring balk pengikat di puncak lantai 2, rangka baja ringan C75, penutup atap dengan insulasi aluminium foil, skylight tangga, serta talang & downspout.",
     cekMutu: [
-      "Posisi stop kontak LT1 & MCB aman di atas rencana tinggi banjir",
-      "Uji tekan pipa air 4 bar sebelum ditutup plesteran",
-      "Backflow valve terpasang menghadap aliran keluar",
+      "Kemiringan atap tepat mengalir ke talang",
+      "Talang jurai dalam parapet tetangga diuji genang (tes bocor)",
+      "Sekrup atap & insulasi terpasang rapi",
     ],
   },
   {
+    id: "st-08",
     no: 8,
-    nama: "Plesteran, Acian, Plafon & Keramik",
-    durasi: "3 minggu",
+    order: 8,
+    nama: "Instalasi Rough-in MEP & Backflow",
+    dependsOn: ["st-05", "st-07"],
+    crew: 3,
+    days: 8,
+    leadDays: 5,
+    durasi: "8 hari",
     deskripsi:
-      "Plester + acian 2 sisi dinding, plafon gypsum 9 mm, rabat carport, serta pemasangan keramik lantai 30×30/40×40/60×60 dengan anti-slip di 4 area KM/WC.",
+      "Pemasangan jaringan pipa air bersih PVC AW, pipa limbah miring ke Bio Septic Tank + backflow valve, serta conduit listrik NYM tertanam di dinding.",
     cekMutu: [
-      "Kemiringan lantai KM 1,5% menuju floor drain",
-      "Keramik tidak kopong (uji ketuk palu karet)",
-      "Waterproofing area basah & dinding bawah 0–1,2 m",
+      "Tes tekan pipa air bersih 4 bar min. 2 jam",
+      "Kemiringan pipa limbah 1–2% ke bio septic + backflow valve terpasang",
+      "Conduit listrik & grounding arde sesuai PUIL",
     ],
   },
   {
+    id: "st-09",
     no: 9,
-    nama: "Pemasangan Pintu, Lampu, Kipas & AC",
-    durasi: "1 minggu",
+    order: 9,
+    nama: "Plesteran, Acian & Plafon",
+    dependsOn: ["st-06", "st-07", "st-08"],
+    crew: 5,
+    days: 14,
+    leadDays: 4,
+    durasi: "14 hari",
     deskripsi:
-      "Daun pintu & jendela aluminium, sanitair Toto/setara, lampu LED, unit AC Split Inverter, kipas plafon/exhaust, serta perlengkapan mitigasi banjir (sekat pintu & pompa).",
+      "Plesteran dan acian dinding, serta pemasangan rangka hollow dan plafon gypsum 9 mm pada seluruh ruang interior.",
     cekMutu: [
-      "Pintu & jendela geser lancar & kedap tampias",
-      "Arus listrik & ELCB diuji coba tanpa trip",
-      "Sekat banjir pintu teruji rapat pada kusen",
+      "Kerataan plester pakai jidar 2 m toleransi < 3 mm",
+      "Plafon area KM pakai gypsum tahan lembap",
     ],
   },
   {
+    id: "st-10",
     no: 10,
-    nama: "Cat Finishing, Uji Banjir & Serah Terima",
-    durasi: "1 minggu",
+    order: 10,
+    nama: "Lantai Keramik, Carport & Railing",
+    dependsOn: ["st-09"],
+    crew: 4,
+    days: 12,
+    leadDays: 7,
+    durasi: "12 hari",
     deskripsi:
-      "Cat eksterior weather-shield + interior 2 lapis, uji sirkulasi udara/lampu/drainase, pembersihan akhir, dan berita acara serah terima ke pemilik.",
+      "Cor rabat carport anti-slip, pemasangan keramik/granit tile, plint lantai, serta railing tangga dan balkon pengaman.",
     cekMutu: [
-      "Seluruh ceklist RAB & Gambar Kerja As-Built sesuai",
-      "Saluran talang depan lancar menuju sumur resapan",
-      "Kunci & kartu garansi AC/pompa diserahkan",
+      "Keramik tidak kopong saat diketuk",
+      "Lantai KM miring 1,5% ke floor drain",
+      "Railing balkon & void kokoh (tinggi min. 95 cm)",
+    ],
+  },
+  {
+    id: "st-11",
+    no: 11,
+    order: 11,
+    nama: "Sanitair, Saklar/Lampu, AC & Mitigasi Banjir",
+    dependsOn: ["st-10"],
+    crew: 3,
+    days: 6,
+    leadDays: 7,
+    durasi: "6 hari",
+    deskripsi:
+      "Pemasangan sanitair, box MCB/ELCB, saklar & stop kontak elevasi aman banjir, lampu LED, unit AC/kipas, sekat banjir pintu, dan pompa kuras.",
+    cekMutu: [
+      "Stop kontak LT1 di elevasi aman banjir",
+      "Uji vakum & arus AC/kipas",
+      "Tes sekat banjir pintu & pompa kuras",
+    ],
+  },
+  {
+    id: "st-12",
+    no: 12,
+    order: 12,
+    nama: "Cat, Waterproofing & Serah Terima",
+    dependsOn: ["st-11"],
+    crew: 4,
+    days: 8,
+    leadDays: 4,
+    durasi: "8 hari",
+    deskripsi:
+      "Aplikasi waterproofing KM/balkon/dinding bawah, pengecatan eksterior weather-shield & interior 2 lapis, uji sirkulasi, dan serah terima proyek.",
+    cekMutu: [
+      "Tes genang waterproofing KM & balkon 24 jam",
+      "Seluruh checklist SNI & RAB disetujui bersama kontraktor",
     ],
   },
 ];
+
+export const CONSTRUCTION_STAGES_GUIDE = CONSTRUCTION_STAGES;
 
 export const DETAIL_ELEMEN_2LANTAI = [
   {

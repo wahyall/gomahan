@@ -1,7 +1,7 @@
 import type { Project, Vec3 } from "@/lib/model/types";
 import { computeMasonryTakeoff, type MasonryTakeoff } from "@/lib/geometry/masonry";
 import { buildCanonicalMepNetwork, type CanonicalMepNetwork } from "@/lib/geometry/mepNetwork";
-import { computeLevelRoomsMetrics, type FloorLevelMetrics } from "@/lib/geometry/rooms";
+import { computeLevelRoomsMetrics, isIndoorRoomProgram, isTiledFloorProgram, type FloorLevelMetrics } from "@/lib/geometry/rooms";
 import { computeRoofMetrics, validateProjectModel, type RoofDerivedMetrics, type ValidationIssue } from "@/lib/geometry/roofAndStairs";
 
 export interface DerivedMepSummary {
@@ -34,6 +34,10 @@ export interface DerivedProjectModel {
   validation: ValidationIssue[];
   totalGrossAreaM2: number;
   totalNetFloorM2: number;
+  indoorNetAreaM2: number;
+  semiOutdoorAreaM2: number;
+  landscapeAreaM2: number;
+  totalTiledAreaM2: number;
   totalLotAreaM2: number;
   totalWallDeductionM2: number;
   totalWallDeductionPct: number;
@@ -81,7 +85,7 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
   let totalElectricalWatts = 0;
 
   for (const lv of project.levels) {
-    const routes = lv.index === 0 ? mepNetwork.routesByLevel[0] : mepNetwork.routesByLevel[1];
+    const routes = lv.index === 0 ? mepNetwork.routesByLevel[0] : (mepNetwork.routesByLevel[1] ?? []);
     for (const r of routes) {
       const len = polylineLen(r.pts);
       if (r.kind === "air_bersih") airBersihM += len;
@@ -145,12 +149,24 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
     }
   }
 
-  const enclosedNet = floors.reduce(
+  const indoorNetAreaM2 = floors.reduce(
+    (s, lv) => s + lv.rooms.filter((r) => isIndoorRoomProgram(r.room.program)).reduce((a, r) => a + r.netAreaM2, 0),
+    0,
+  );
+  const semiOutdoorAreaM2 = floors.reduce(
     (s, lv) =>
       s +
       lv.rooms
-        .filter((r) => r.room.program !== "garden" && r.room.program !== "carport" && r.room.program !== "balcony" && r.room.program !== "void")
+        .filter((r) => r.room.program === "carport" || r.room.program === "balcony")
         .reduce((a, r) => a + r.netAreaM2, 0),
+    0,
+  );
+  const landscapeAreaM2 = floors.reduce(
+    (s, lv) => s + lv.rooms.filter((r) => r.room.program === "garden").reduce((a, r) => a + r.netAreaM2, 0),
+    0,
+  );
+  const totalTiledAreaM2 = floors.reduce(
+    (s, lv) => s + lv.rooms.filter((r) => isTiledFloorProgram(r.room.program)).reduce((a, r) => a + r.netAreaM2, 0),
     0,
   );
 
@@ -182,6 +198,10 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
     validation,
     totalGrossAreaM2,
     totalNetFloorM2,
+    indoorNetAreaM2,
+    semiOutdoorAreaM2,
+    landscapeAreaM2,
+    totalTiledAreaM2,
     totalLotAreaM2,
     totalWallDeductionM2,
     totalWallDeductionPct,
@@ -190,6 +210,6 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
     totalWindows,
     totalVents,
     totalWindowAreaM2,
-    lightingRatioPct: enclosedNet > 0 ? (totalWindowAreaM2 / enclosedNet) * 100 : 0,
+    lightingRatioPct: indoorNetAreaM2 > 0 ? (totalWindowAreaM2 / indoorNetAreaM2) * 100 : 0,
   };
 }

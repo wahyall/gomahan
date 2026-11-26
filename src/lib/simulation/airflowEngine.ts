@@ -85,10 +85,14 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
   const gridD = 85; // 17m @ 0.2m
 
   const solveLevelField = (lvIdx: number) => {
-    const lv = project.levels[lvIdx]!;
+    const lv = project.levels[lvIdx];
     const velX = new Float32Array(gridW * gridD);
     const velZ = new Float32Array(gridW * gridD);
     const temp = new Float32Array(gridW * gridD);
+    if (!lv) {
+      temp.fill(sim.ambientTempC);
+      return { velX, velZ, temp };
+    }
 
     // Precollect open vents/windows/doors on this floor
     const openFlows: { x: number; z: number; strength: number; isRear: boolean }[] = [];
@@ -294,31 +298,46 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
         ? 25
         : Math.max(0.6, Math.min(20, (naturalFlowM3h + mechFlowM3h) / Math.max(4, volumeM3)));
 
+      // Determine genuine cross-ventilation: open path on >= 2 wall directions or forced exhaust / active fan
+      let openDirections = 0;
+      const seenAxis = new Set<string>();
+      for (const w of lv.walls) {
+        for (const op of w.openings) {
+          if (op.openPct <= 5 && op.kind !== "arch") continue;
+          const wLen = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) || 1;
+          const ox = w.start.x + ((w.end.x - w.start.x) * op.offset) / wLen;
+          const oz = w.start.z + ((w.end.z - w.start.z) * op.offset) / wLen;
+          if (ox >= minX - 0.25 && ox <= maxX + 0.25 && oz >= minZ - 0.25 && oz <= maxZ + 0.25) {
+            const sideTag = Math.abs(w.end.x - w.start.x) >= Math.abs(w.end.z - w.start.z)
+              ? (oz <= (minZ + maxZ) * 0.5 ? "N" : "S")
+              : (ox <= (minX + maxX) * 0.5 ? "W" : "E");
+            seenAxis.add(sideTag);
+          }
+        }
+      }
+      openDirections = seenAxis.size;
+
       const crossVentilated =
         isOpenProgram ||
-        rm.room.program === "living" ||
-        rm.room.program === "kitchen" ||
+        openDirections >= 2 ||
         hasExhaust ||
         (hasFan && ach >= 2.8) ||
-        (rm.windowAreaM2 >= 0.8 && ach >= 3.2);
+        (rm.windowAreaM2 >= 0.8 && ach >= 3.5);
 
-      // Perceived temperature accounts for convective cooling from airflow velocity
       const windChill = Math.min(2.6, Math.max(0, (avgVel - 0.15) * 2.1));
       const effectiveTemp = avgTemp - windChill;
 
-      // CO2 balance (2 occupants baseline in bedrooms/living, 420 ppm ambient)
       const occ = rm.room.program === "bedroom" ? 2 : rm.room.program === "living" ? 3 : 1;
       const freshM3h = Math.max(8, ach * volumeM3 * (hasAc ? 0.35 : 0.85));
       const co2Ppm = Math.round(420 + (occ * 18_000) / freshM3h);
 
-      // Simplified ASHRAE 55 PMV approximation for tropical indoor (clo=0.5, met=1.1)
       const pmv = Math.max(-2.5, Math.min(2.8, (effectiveTemp - 25.5) * 0.28 + (sim.humidityPct - 60) * 0.012));
       const ppdPct = Math.round(Math.min(99, 5 + 95 * (1 - Math.exp(-0.03353 * Math.pow(pmv, 4) - 0.2179 * Math.pow(pmv, 2)))));
 
       let comfortStatus: ZoneAirflowResult["comfortStatus"] = "NYAMAN";
-      if (hasAc && avgTemp <= 26.2) comfortStatus = "SEJUK AC";
-      else if (ach < 2.2 && !hasAc) comfortStatus = "PENGAP";
-      else if (effectiveTemp > 29.0) comfortStatus = "HANGAT";
+      if (hasAc && avgTemp <= 26.2 && co2Ppm <= 1400) comfortStatus = "SEJUK AC";
+      else if (ach < 2.2 || co2Ppm > 1200) comfortStatus = "PENGAP";
+      else if (effectiveTemp > 29.0 || (hasAc && avgTemp > 27.2)) comfortStatus = "HANGAT";
 
       zones.push({
         roomId: rm.room.id,
@@ -344,7 +363,7 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
   );
   const avgAch = indoor.length > 0 ? indoor.reduce((s, z) => s + z.ach, 0) / indoor.length : 0;
   const crossCount = indoor.filter((z) => z.crossVentilated).length;
-  const crossVentPct = indoor.length > 0 ? Math.round((crossCount / indoor.length) * 100) : 100;
+  const crossVentPct = indoor.length > 0 ? Math.round((crossCount / indoor.length) * 100) : 0;
 
   const stuffy = indoor.filter((z) => z.comfortStatus === "PENGAP");
   if (stuffy.length > 0) {
@@ -360,10 +379,19 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
   }
 
   const comfortableCount = indoor.filter((z) => z.comfortStatus === "NYAMAN" || z.comfortStatus === "SEJUK AC").length;
-  const airflowScore = Math.min(
-    100,
-    Math.round((comfortableCount / Math.max(1, indoor.length)) * 65 + crossVentPct * 0.35),
-  );
+  const avgPmvAbs = indoor.length > 0 ? indoor.reduce((s, z) => s + Math.abs(z.pmv), 0) / indoor.length : 0;
+  const co2Penalty = highCo2.length * 4;
+  const pmvPenalty = Math.max(0, Math.round((avgPmvAbs - 0.5) * 10));
+  const airflowScore =
+    indoor.length === 0
+      ? 0
+      : Math.max(
+          0,
+          Math.min(
+            100,
+            Math.round((comfortableCount / indoor.length) * 65 + crossVentPct * 0.35) - co2Penalty - pmvPenalty,
+          ),
+        );
 
   return {
     zones,

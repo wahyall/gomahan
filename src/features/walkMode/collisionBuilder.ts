@@ -142,6 +142,7 @@ export interface WalkCollisionWorld {
   terasY: number;
   streetY: number;
   terrainHeights: number[];
+  floorTileMap: Map<string, string>;
   pools: { x1: number; x2: number; z1: number; z2: number }[];
 }
 
@@ -160,9 +161,24 @@ export function pointInPoly2D(px: number, pz: number, poly: Vec2[]): boolean {
 }
 
 function floorMaterialToWalkSurface(materialId: string | undefined, program?: Room["program"]): WalkSurfaceMaterial {
-  if (program === "garden" || materialId === "grass_tropical") return "grass";
-  if (program === "carport" || materialId === "carport_stone" || materialId === "concrete") return "stone";
-  if (materialId === "wood_deck" || materialId === "tile_wood_warm" || materialId === "custom_parquet_oak") return "wood";
+  if (materialId === "garden_grass" || program === "garden" || materialId === "grass_tropical") return "grass";
+  if (
+    materialId === "concrete_carport" ||
+    program === "carport" ||
+    materialId === "carport_stone" ||
+    materialId === "concrete"
+  ) {
+    return "stone";
+  }
+  if (
+    materialId === "wood_oak" ||
+    materialId === "terrace_deck" ||
+    materialId === "wood_deck" ||
+    materialId === "tile_wood_warm" ||
+    materialId === "custom_parquet_oak"
+  ) {
+    return "wood";
+  }
   return "tile";
 }
 
@@ -474,10 +490,10 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
     blocksCamera: false,
   });
 
-  // 3. Furniture & Floor HVAC Colliders
-  const lt1FurnitureBaseY = (x: number, z: number): number => {
+  // 3. Furniture, Floor HVAC, Trees & Outdoor AC Condensers
+  const lt1FurnitureBaseY = (x: number, z: number, cat: string): number => {
     if (z < 3.05 && x < 1.5) return 0.05;
-    if (z < 4.5 && x >= 1.5 && !(x < 2.25 && z >= 3.0)) return carportY;
+    if (cat === "vehicle" || (z < 4.5 && x >= 1.5 && !(x < 2.25 && z >= 3.0))) return carportY;
     if (z >= 3.0 && z <= 4.0 && x < 2.25) return terasY;
     return lt1Y;
   };
@@ -488,7 +504,7 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
     for (const f of level.furniture) {
       if (f.position.y > WALK_CONFIG.tabletopSkipElevationM) continue;
       if (f.size.y < WALK_CONFIG.flatRugMaxHeightM) continue;
-      const baseY = lvIdx === 0 ? lt1FurnitureBaseY(f.position.x, f.position.z) : lt2Y;
+      const baseY = lvIdx === 0 ? lt1FurnitureBaseY(f.position.x, f.position.z, f.category) : lt2Y;
       addObbToWorld(colliders, spatial, {
         id: `furn:${f.id}`,
         kind: "furniture",
@@ -507,23 +523,80 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
     }
 
     for (const h of level.hvac) {
-      if (h.type !== "stand_fan" || h.position.y > 0.6) continue;
-      const baseY = lvIdx === 0 ? lt1Y : lt2Y;
-      addObbToWorld(colliders, spatial, {
-        id: `hvac:${h.id}`,
-        kind: "furniture",
-        label: h.name,
-        cx: h.position.x,
-        cz: h.position.z,
-        halfW: 0.22,
-        halfD: 0.22,
-        rotY: 0,
-        yMin: baseY,
-        yMax: baseY + 1.35,
-        levelIndex: lvIdx,
-        blocksCamera: false,
-      });
+      if (h.type === "stand_fan" && h.position.y <= 0.6) {
+        const baseY = lvIdx === 0 ? lt1Y : lt2Y;
+        addObbToWorld(colliders, spatial, {
+          id: `hvac:${h.id}`,
+          kind: "furniture",
+          label: h.name,
+          cx: h.position.x,
+          cz: h.position.z,
+          halfW: 0.22,
+          halfD: 0.22,
+          rotY: 0,
+          yMin: baseY,
+          yMax: baseY + 1.35,
+          levelIndex: lvIdx,
+          blocksCamera: false,
+        });
+      }
     }
+
+    // Outdoor AC condenser colliders mapped from outdoor_ac points if defined
+    for (const mp of level.mepPoints) {
+      if (mp.kind === "outdoor_ac") {
+        const baseY = lvIdx === 0 ? lt1Y : lt2Y;
+        addObbToWorld(colliders, spatial, {
+          id: `ac-out:${mp.id}`,
+          kind: "furniture",
+          label: mp.label || "Outdoor Unit AC",
+          cx: mp.x,
+          cz: mp.z,
+          halfW: 0.38,
+          halfD: 0.18,
+          rotY: 0,
+          yMin: baseY + mp.y - 0.3,
+          yMax: baseY + mp.y + 0.45,
+          levelIndex: lvIdx,
+          blocksCamera: false,
+        });
+      }
+    }
+  }
+
+  // Front & rear garden tree trunk colliders when gardens exist in LT1
+  const lt1RoomsForTrees = project.levels[0]?.rooms ?? [];
+  if (lt1RoomsForTrees.some((r) => r.program === "garden" && r.polygon.some((p) => p.z < 3.5))) {
+    addObbToWorld(colliders, spatial, {
+      id: "tree:front",
+      kind: "furniture",
+      label: "Pohon Taman Depan",
+      cx: 0.48,
+      cz: 1.32,
+      halfW: 0.2,
+      halfD: 0.2,
+      rotY: 0,
+      yMin: 0.05,
+      yMax: 2.8,
+      levelIndex: 0,
+      blocksCamera: true,
+    });
+  }
+  if (lt1RoomsForTrees.some((r) => r.program === "garden" && r.polygon.some((p) => p.z > 14.5))) {
+    addObbToWorld(colliders, spatial, {
+      id: "tree:rear",
+      kind: "furniture",
+      label: "Pohon Taman Belakang",
+      cx: 3.95,
+      cz: 16.15,
+      halfW: 0.18,
+      halfD: 0.18,
+      rotY: 0,
+      yMin: lt1Y - 0.05,
+      yMax: lt1Y + 2.5,
+      levelIndex: 0,
+      blocksCamera: true,
+    });
   }
 
   // 4. Neighbor Lot Boundaries & Outer Walk Bounds
@@ -598,6 +671,11 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
   const lt2Slabs = (project.levels[1]?.slabs ?? []).filter((s) => !s.isVoid && s.polygon.length >= 3);
   const lt2VoidSlabs = (project.levels[1]?.slabs ?? []).filter((s) => s.isVoid && s.polygon.length >= 3);
 
+  const floorTileMap = new Map<string, string>();
+  for (const ct of project.buildExtras?.floorTiles ?? []) {
+    floorTileMap.set(`${ct.levelIndex}:${ct.gx}:${ct.gz}`, ct.materialId);
+  }
+
   return {
     colliders,
     spatial,
@@ -612,8 +690,17 @@ export function buildWalkCollisionWorld(project: Project): WalkCollisionWorld {
     terasY,
     streetY,
     terrainHeights,
+    floorTileMap,
     pools,
   };
+}
+
+function resolveTileOverrideSurface(world: WalkCollisionWorld, levelIndex: number, x: number, z: number, fallback: WalkSurfaceMaterial): WalkSurfaceMaterial {
+  if (world.floorTileMap.size === 0) return fallback;
+  const gx = Math.floor(x / 0.5);
+  const gz = Math.floor(z / 0.5);
+  const mat = world.floorTileMap.get(`${levelIndex}:${gx}:${gz}`);
+  return mat ? floorMaterialToWalkSurface(mat) : fallback;
 }
 
 /**
@@ -655,7 +742,7 @@ export function sampleWalkSurface(world: WalkCollisionWorld, x: number, z: numbe
         if (pointInPoly2D(x, z, slab.polygon)) {
           return {
             y: world.lt2Y,
-            surface: floorMaterialToWalkSurface(slab.materialId),
+            surface: resolveTileOverrideSurface(world, 1, x, z, floorMaterialToWalkSurface(slab.materialId)),
             levelIndex: 1,
             onStairId: null,
             roomName: slab.name,
@@ -691,9 +778,10 @@ export function sampleWalkSurface(world: WalkCollisionWorld, x: number, z: numbe
     if (pointInPoly2D(x, z, zone.polygon)) {
       const terrainOff = zone.surface === "grass" ? sampleTerrainOffset(x, z, world.terrainHeights) : 0;
       const inPool = world.pools.some((p) => x >= p.x1 && x <= p.x2 && z >= p.z1 && z <= p.z2);
+      const surf = resolveTileOverrideSurface(world, 0, x, z, inPool ? "tile" : zone.surface);
       return {
         y: zone.y + terrainOff + (inPool ? 0.05 : 0),
-        surface: inPool ? "tile" : zone.surface,
+        surface: surf,
         levelIndex: 0,
         onStairId: null,
         roomName: inPool ? "Kolam Renang" : zone.name,
