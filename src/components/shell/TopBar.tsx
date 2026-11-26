@@ -7,7 +7,6 @@ import {
   CalendarRange,
   ChevronDown,
   ClipboardCheck,
-  CloudRain,
   Download,
   DraftingCompass,
   FileSpreadsheet,
@@ -20,14 +19,9 @@ import {
   RotateCcw,
   Save,
   Search,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-  Sun,
   Undo2,
   Volume2,
   VolumeX,
-  Wind,
 } from "lucide-react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
@@ -40,17 +34,13 @@ interface WorkspaceNavItem {
   id: WorkspaceId;
   label: string;
   short: string;
-  group: "desain" | "simulasi" | "dokumen";
+  group: "desain" | "dokumen";
   icon: React.ElementType;
 }
 
 const WORKSPACES: WorkspaceNavItem[] = [
-  { id: "build", label: "Build Mode", short: "Build", group: "desain", icon: Hammer },
+  { id: "build", label: "Build Studio", short: "Studio", group: "desain", icon: Hammer },
   { id: "walk", label: "Walk Mode", short: "Walk", group: "desain", icon: Footprints },
-  { id: "structure", label: "Struktur", short: "Struktur", group: "simulasi", icon: ShieldCheck },
-  { id: "lighting", label: "Cahaya", short: "Cahaya", group: "simulasi", icon: Sun },
-  { id: "airflow", label: "Udara", short: "Udara", group: "simulasi", icon: Wind },
-  { id: "flood", label: "Banjir", short: "Banjir", group: "simulasi", icon: CloudRain },
   { id: "drawings", label: "Denah 2D", short: "Denah", group: "dokumen", icon: DraftingCompass },
   { id: "rab", label: "RAB", short: "RAB", group: "dokumen", icon: FileSpreadsheet },
   { id: "timeline", label: "Jadwal", short: "Jadwal", group: "dokumen", icon: CalendarRange },
@@ -70,8 +60,6 @@ interface TopBarProps {
 export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapshot }: TopBarProps) {
   const workspace = useStudioStore((s) => s.workspace);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
-  const mode = useStudioStore((s) => s.project.gamification.mode);
-  const setMode = useStudioStore((s) => s.setGamificationMode);
   const soundEnabled = useStudioStore((s) => s.project.gamification.soundEnabled);
   const setSoundEnabled = useStudioStore((s) => s.setSoundEnabled);
   const setCommandPaletteOpen = useStudioStore((s) => s.setCommandPaletteOpen);
@@ -169,35 +157,7 @@ export function TopBar({ derived, rab, onExportJson, onImportJson, onSaveSnapsho
             <span className="hidden font-mono text-[10px] 2xl:inline">Ctrl+K</span>
           </button>
 
-          {/* Ringkas / Pro Switch */}
-          <div className="flex rounded-lg border border-border bg-[#161a21] p-0.5 text-[11px] font-medium">
-            <button
-              type="button"
-              onClick={() => setMode("simple")}
-              className={cn(
-                "flex h-7 items-center gap-1 rounded-md px-2 transition",
-                mode === "simple" ? "bg-primary font-semibold text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-              )}
-              title="Mode Ringkas (Skor & Anggaran Aktif)"
-            >
-              <Sparkles className="h-3 w-3" />
-              <span className="hidden sm:inline">Ringkas</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("pro")}
-              className={cn(
-                "flex h-7 items-center gap-1 rounded-md px-2 transition",
-                mode === "pro" ? "bg-primary font-semibold text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-              )}
-              title="Mode Pro (Parameter Teknis Penuh)"
-            >
-              <SlidersHorizontal className="h-3 w-3" />
-              <span className="hidden sm:inline">Pro</span>
-            </button>
-          </div>
-
-          {/* Unified Project Actions Menu (replaces 5 cramped mystery icon buttons) */}
+          {/* Unified Project Actions Menu */}
           <DropdownMenu.Root>
             <DropdownMenu.Trigger asChild>
               <button

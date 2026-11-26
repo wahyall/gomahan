@@ -12,12 +12,15 @@ import {
   Footprints,
   Hammer,
   HelpCircle,
+  Moon,
   RotateCcw,
+  Sun,
   User,
   X,
 } from "lucide-react";
 import { WalkScene, type WalkHudTelemetry } from "@/features/walkMode";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
+import { useBuildModeStore } from "@/features/buildMode/store";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { cn } from "@/lib/utils";
@@ -34,6 +37,19 @@ const SURFACE_LABEL: Record<WalkHudTelemetry["surface"], string> = {
   grass: "Rumput Taman",
   stone: "Batu / Jalan",
 };
+
+/** Same daylight presets as the Build viewport so both modes share one sun. */
+const TIMES_OF_DAY: { id: string; hour: number; label: string }[] = [
+  { id: "morning", hour: 7.5, label: "Pagi" },
+  { id: "noon", hour: 12.0, label: "Siang" },
+  { id: "sunset", hour: 17.2, label: "Sore" },
+  { id: "night", hour: 21.0, label: "Malam" },
+];
+
+function activeTimeIdx(hourOfDay: number): number {
+  const idx = TIMES_OF_DAY.findIndex((t) => Math.abs(hourOfDay - t.hour) < 2.2);
+  return idx >= 0 ? idx : 1;
+}
 
 export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -95,6 +111,41 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
   useEffect(() => {
     sceneRef.current?.updateProjectData(derived, struct);
   }, [derived, struct]);
+
+  // Cinematic RT-look & quality tier follow the exact same settings as the Build viewport
+  const rtLook = useBuildModeStore((s) => s.rtLook);
+  const renderTier = useBuildModeStore((s) => s.renderTier);
+
+  useEffect(() => {
+    sceneRef.current?.setRayTracingLook(rtLook);
+  }, [rtLook]);
+
+  useEffect(() => {
+    sceneRef.current?.setQualityOverride(renderTier);
+  }, [renderTier]);
+
+  // Dynamic time-of-day (T cycles Pagi → Siang → Sore → Malam, same presets as Build mode)
+  const hourOfDay = derived.project.simulation.hourOfDay;
+  const cycleTime = () => {
+    const next = TIMES_OF_DAY[(activeTimeIdx(hourOfDay) + 1) % TIMES_OF_DAY.length]!;
+    useStudioStore.getState().patchSimulation({ hourOfDay: next.hour });
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (
+        e.code === "KeyT" &&
+        !(e.target instanceof HTMLInputElement) &&
+        !(e.target instanceof HTMLTextAreaElement) &&
+        !(e.target instanceof HTMLSelectElement)
+      ) {
+        e.preventDefault();
+        cycleTime();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   if (webglError) {
     return (
@@ -227,6 +278,34 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
         </div>
       </div>
 
+      {/* Dynamic Time-of-Day Pills (same daylight presets as the Build viewport) */}
+      <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center px-3 sm:top-3">
+        <div className="studio-glass pointer-events-auto flex items-center gap-0.5 rounded-full p-0.5">
+          <span className="px-2 text-amber-300" title="Waktu Pencahayaan Matahari (T untuk ganti)">
+            {hourOfDay >= 18.5 ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+          </span>
+          {TIMES_OF_DAY.map((t) => {
+            const active = Math.abs(hourOfDay - t.hour) < 2.2;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => useStudioStore.getState().patchSimulation({ hourOfDay: t.hour })}
+                className={cn(
+                  "rounded-full px-2.5 py-1 text-[10.5px] font-medium transition",
+                  active
+                    ? "bg-[#f2efe8] font-semibold text-[#14171c] shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+          <kbd className="hidden rounded bg-white/10 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground sm:inline">T</kbd>
+        </div>
+      </div>
+
       {/* Interactive Door Prompt */}
       {nearDoor && (
         <div className="absolute bottom-40 left-4 z-20 sm:bottom-14 sm:left-1/2 sm:-translate-x-1/2 [@media(max-height:480px)]:bottom-4 [@media(max-height:480px)]:left-1/2 [@media(max-height:480px)]:-translate-x-1/2">
@@ -259,6 +338,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
             <li><strong className="text-foreground">V</strong>: 1st Person ↔ 3rd Person</li>
             <li><strong className="text-foreground">E</strong>: Buka / Tutup pintu terdekat</li>
             <li><strong className="text-foreground">Scroll</strong>: Atur jarak kamera 3rd Person</li>
+            <li><strong className="text-foreground">T</strong>: Ganti waktu (Pagi / Siang / Sore / Malam)</li>
             <li><strong className="text-foreground">F3 / Esc</strong>: Debug / Kembali ke Build Mode</li>
           </ul>
         </div>
@@ -339,6 +419,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
         <span><strong className="text-foreground">Klik / Seret</strong> Lihat 360°</span>
         <span><strong className="text-foreground">V</strong> Sudut Pandang</span>
         <span><strong className="text-foreground">E</strong> Pintu</span>
+        <span><strong className="text-foreground">T</strong> Waktu</span>
         <span><strong className="text-foreground">Esc</strong> Build</span>
       </div>
     </div>

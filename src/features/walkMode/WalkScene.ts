@@ -1,4 +1,11 @@
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
+import type { BuildQualityTier } from "@/features/buildMode/BuildScene";
 import { WalkAvatar } from "@/features/walkMode/WalkAvatar";
 import { WalkController, type WalkSnapshotState } from "@/features/walkMode/WalkController";
 import { WalkDebugOverlay } from "@/features/walkMode/WalkDebugOverlay";
@@ -10,6 +17,7 @@ import {
   createEnvironmentMap,
   createMaterialPalette,
   createSkyGradientTexture,
+  makeSunSpriteTexture,
   type MaterialPalette,
 } from "@/lib/scene/materials";
 import { buildProjectHouse, buildStaticNeighborhood } from "@/lib/scene/projectHouseBuilder";
@@ -49,6 +57,27 @@ export class WalkScene {
   private readonly contactShadowMat: THREE.MeshBasicMaterial;
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly sunLight: THREE.DirectionalLight;
+  private readonly fillLight: THREE.DirectionalLight;
+
+  /** Cinematic ray-traced-look post stack, mirroring BuildScene (`GTAO + sun shafts + bloom + MSAA HDR`). */
+  private composer: EffectComposer | null = null;
+  private renderPass: RenderPass | null = null;
+  private gtaoPass: GTAOPass | null = null;
+  private atmospherePass: AtmospherePass | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private outputPass: OutputPass | null = null;
+  private postActive = false;
+  private rayTracingEnabled = true;
+  private qualityOverride: BuildQualityTier = "auto";
+  private activeTier: "high" | "medium" | "low" = "high";
+  private readonly softwareGpu: boolean;
+  private readonly mobileViewport: boolean;
+  private godRayStrength = 0;
+  private simElapsedS = 0;
+  private sunCore: THREE.Sprite | null = null;
+  private sunHalo: THREE.Sprite | null = null;
+  private readonly sunDir = new THREE.Vector3(0.45, 0.78, -0.42);
+  private readonly _v1 = new THREE.Vector3();
 
   private readonly envGroup = new THREE.Group();
   private readonly neighborsGroup = new THREE.Group();
@@ -151,13 +180,29 @@ export class WalkScene {
     this.actions = actions;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
-    this.baseDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
+    this.mobileViewport = mobileViewport;
+    // Software rasterizers (SwiftShader / llvmpipe) must never receive the cinematic stack
+    // (MSAA resolve on HalfFloat targets wedges them into ghost-white frames).
+    let softwareGpu = false;
+    try {
+      const gl = this.renderer.getContext();
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      const gpuName = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "";
+      softwareGpu = /swiftshader|llvmpipe|softpipe|software|basic render|angle \(google/i.test(gpuName);
+    } catch {
+      softwareGpu = false;
+    }
+    this.softwareGpu = softwareGpu;
+    this.activeTier = softwareGpu ? "low" : mobileViewport ? "medium" : "high";
+    const rawDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    this.baseDpr = softwareGpu ? Math.min(1, rawDpr) : mobileViewport ? Math.min(1.5, rawDpr) : Math.min(2, Math.max(1.5, rawDpr));
     this.currentDpr = this.baseDpr;
     this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.0;
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.FogExp2(0xd2e1ec, 0.0042);
@@ -171,25 +216,47 @@ export class WalkScene {
     this.hemiLight = new THREE.HemisphereLight(0xd9ecff, 0x6f6859, 0.78);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff5e0, 2.3);
+    this.sunLight = new THREE.DirectionalLight(0xfff5e0, 2.75);
     this.sunLight.position.set(14, 22, -10);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(1024, 1024);
+    this.sunLight.shadow.mapSize.set(mobileViewport ? 1024 : 2048, mobileViewport ? 1024 : 2048);
     this.sunLight.shadow.camera.near = 1.5;
     this.sunLight.shadow.camera.far = 56;
     this.sunLight.shadow.camera.left = -10.5;
     this.sunLight.shadow.camera.right = 10.5;
     this.sunLight.shadow.camera.top = 14.5;
     this.sunLight.shadow.camera.bottom = -14.5;
-    this.sunLight.shadow.bias = -0.0003;
-    this.sunLight.shadow.normalBias = 0.006;
+    this.sunLight.shadow.bias = -0.00025;
+    this.sunLight.shadow.normalBias = 0.0085;
     this.sunLight.target.position.set(2.5, 2.4, 8.5);
     this.scene.add(this.sunLight, this.sunLight.target);
+
+    // Cool sky shadow-side fill light keeps unlit brickwork crisp without flat ambient
+    // (same `3d-wood-lighting-scorecard` rig as the Build viewport).
+    this.fillLight = new THREE.DirectionalLight(0xb2cff0, 0.4);
+    this.fillLight.position.set(-14, 12, 20);
+    this.scene.add(this.fillLight);
 
     const skyTex = createSkyGradientTexture(derived.project.simulation.hourOfDay, derived.project.simulation.season, derived.project.simulation.rainIntensityMmH);
     this.skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false, fog: false });
     this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(140, 32, 20), this.skyMat);
     this.scene.add(this.skyMesh);
+
+    // HDR sun billboards: a hot core that blooms and feeds the god-ray march, plus a wide soft halo
+    const sunCoreTex = makeSunSpriteTexture(0.5, 0.86);
+    const sunHaloTex = makeSunSpriteTexture(0.14, 0.3);
+    this.sunCore = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: sunCoreTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }),
+    );
+    this.sunCore.scale.set(11, 11, 1);
+    this.sunHalo = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: sunHaloTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }),
+    );
+    this.sunHalo.scale.set(42, 42, 1);
+    this.sunCore.material.color.setRGB(5.6, 5.0, 4.3);
+    this.sunHalo.material.color.setRGB(1.05, 1.0, 0.92);
+    this.scene.add(this.sunCore, this.sunHalo);
+    this.staticDisposables.push(sunCoreTex, sunHaloTex, this.sunCore.material, this.sunHalo.material);
 
     this.contactShadowTex = createContactShadowTexture();
     this.contactShadowMat = new THREE.MeshBasicMaterial({
@@ -243,7 +310,142 @@ export class WalkScene {
     }
 
     this.updateProjectData(derived, struct);
+    this.setupPostPipeline();
+    this.configurePostPipeline();
     this.startLoop();
+  }
+
+  /** Toggle the cinematic ray-traced-look stack (same setting as the Build viewport). */
+  public setRayTracingLook(enabled: boolean): void {
+    this.rayTracingEnabled = enabled;
+    this.configurePostPipeline();
+  }
+
+  /** Apply the shared render-quality tier (Auto / Tinggi / Sedang / Hemat). */
+  public setQualityOverride(tier: BuildQualityTier): void {
+    this.qualityOverride = tier;
+    const effective: "high" | "medium" | "low" =
+      tier === "auto"
+        ? this.softwareGpu
+          ? "low"
+          : this.mobileViewport
+            ? "medium"
+            : "high"
+        : tier;
+    this.applyQualityTier(effective);
+  }
+
+  /**
+   * Cinematic "ray-traced like" real-time pipeline, mirrored from BuildScene:
+   * linear HDR MSAA buffer → GTAO ambient occlusion → screen-space sun shafts with
+   * vignette/dither → UnrealBloom → single ACES tone-map + sRGB in OutputPass.
+   */
+  private setupPostPipeline(): void {
+    if (this.composer || this.disposed) return;
+    const parent = this.canvas.parentElement;
+    const w = Math.max(1, parent?.clientWidth ?? this.canvas.clientWidth);
+    const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
+    const target = new THREE.WebGLRenderTarget(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr), {
+      type: THREE.HalfFloatType,
+      // MSAA resolve on HalfFloat targets wedges software rasterizers into ghost-white frames.
+      samples: this.softwareGpu ? 0 : 4,
+    });
+    this.composer = new EffectComposer(this.renderer, target);
+    this.renderPass = new RenderPass(this.scene, this.camera);
+    this.gtaoPass = new GTAOPass(this.scene, this.camera, w, h);
+    // OUTPUT.Default = scene + denoised AO blended on top (Denoise would show the raw white AO buffer).
+    this.gtaoPass.output = GTAOPass.OUTPUT.Default;
+    this.gtaoPass.updateGtaoMaterial({
+      radius: 1.15,
+      distanceExponent: 1.4,
+      thickness: 1.4,
+      scale: 1.0,
+      samples: 14,
+      distanceFallOff: 0.7,
+      screenSpaceRadius: false,
+    });
+    this.gtaoPass.blendIntensity = 1.1;
+    this.atmospherePass = new AtmospherePass();
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.7, 1.45);
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.renderPass);
+    this.composer.addPass(this.gtaoPass);
+    this.composer.addPass(this.atmospherePass);
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(this.outputPass);
+    this.composer.setPixelRatio(this.currentDpr);
+    this.composer.setSize(w, h);
+    this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+  }
+
+  /** Enable / disable passes per quality tier; low tier falls back to the direct render. */
+  private configurePostPipeline(): void {
+    if (!this.composer || !this.rayTracingEnabled || this.activeTier === "low") {
+      this.postActive = false;
+      return;
+    }
+    this.postActive = true;
+    // GTAO's depth/normal gbuffer wedges software rasterizers into empty frames — hardware only.
+    if (this.gtaoPass) this.gtaoPass.enabled = this.activeTier === "high" && !this.softwareGpu;
+    if (this.atmospherePass) {
+      this.atmospherePass.atmosphereUniforms.uSamples.value = this.activeTier === "high" ? 40 : 22;
+    }
+  }
+
+  private applyQualityTier(tier: "high" | "medium" | "low"): void {
+    this.activeTier = tier;
+    const rawDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    // Software rasterizers never supersample — large HalfFloat buffers wedge them into empty frames.
+    const targetDpr =
+      tier === "high"
+        ? this.softwareGpu
+          ? 1
+          : Math.min(2, Math.max(1.5, rawDpr))
+        : tier === "medium"
+          ? Math.min(rawDpr, 1.35)
+          : 1;
+    if (Math.abs(targetDpr - this.baseDpr) > 0.04) {
+      this.baseDpr = targetDpr;
+      this.currentDpr = Math.min(this.currentDpr, this.baseDpr);
+      this.renderer.setPixelRatio(this.currentDpr);
+      if (this.composer) {
+        this.composer.setPixelRatio(this.currentDpr);
+      }
+      this.handleResize();
+    }
+    const wantShadow = tier === "high" ? (this.mobileViewport ? 1024 : 2048) : tier === "medium" ? 1024 : 512;
+    this.renderer.shadowMap.enabled = tier !== "low";
+    if (this.sunLight.shadow.mapSize.x !== wantShadow) {
+      this.sunLight.shadow.mapSize.set(wantShadow, wantShadow);
+      this.sunLight.shadow.map?.dispose();
+      this.sunLight.shadow.map = null;
+      this.sunLight.shadow.bias = wantShadow >= 2048 ? -0.00025 : wantShadow >= 1024 ? -0.0003 : -0.00035;
+      this.sunLight.shadow.normalBias = wantShadow >= 2048 ? 0.0085 : wantShadow >= 1024 ? 0.01 : 0.012;
+    }
+    this.configurePostPipeline();
+  }
+
+  /** Project the sun into screen space and drive the god-ray uniforms every frame (BuildScene parity). */
+  private updateAtmosphere(cam: THREE.Camera): void {
+    const ap = this.atmospherePass;
+    if (!ap) return;
+    cam.updateMatrixWorld();
+    this._v1.copy(this.sunLight.position).applyMatrix4(cam.matrixWorldInverse);
+    if (this._v1.z > -1) {
+      // Sun sits behind the camera: no shafts, no mirrored source flash.
+      ap.atmosphereUniforms.uSunFade.value = 0;
+      return;
+    }
+    this._v1.copy(this.sunLight.position).project(cam);
+    const ux = this._v1.x * 0.5 + 0.5;
+    const uy = this._v1.y * 0.5 + 0.5;
+    ap.atmosphereUniforms.uSunUv.value.set(ux, uy);
+    const aspect = ap.atmosphereUniforms.uAspect.value;
+    const d = Math.hypot((ux - 0.5) * aspect, uy - 0.5);
+    ap.atmosphereUniforms.uSunFade.value = THREE.MathUtils.clamp(1 - (d - 0.85) / 0.95, 0, 1);
+    ap.atmosphereUniforms.uIntensity.value = this.godRayStrength;
+    ap.atmosphereUniforms.uSunColor.value.copy(this.sunLight.color);
+    ap.atmosphereUniforms.uTime.value = this.simElapsedS;
   }
 
   public updateProjectData(derived: DerivedProjectModel, struct: StructuralReport): void {
@@ -270,17 +472,43 @@ export class WalkScene {
       this.envTex = env;
       this.scene.environment = env;
       const isNight = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
-      this.scene.environmentIntensity = isNight ? 0.35 : 0.72;
+      const isStorm = sim.rainIntensityMmH > 20;
+      this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.82 : 0.62;
       this.palette.bindEnvMap(env);
 
       const sunElev = Math.max(0.15, Math.sin(((sim.hourOfDay - 5.5) / 13) * Math.PI));
       const sunAz = ((sim.hourOfDay - 12) / 6) * 0.9;
-      this.sunLight.position.set(2.5 + Math.sin(sunAz) * 24, Math.max(3, sunElev * 24), 8.5 - Math.cos(sunAz) * 14);
-      this.sunLight.intensity = isNight ? 0.25 : 2.3;
+      const sx = Math.sin(sunAz);
+      const sy = sunElev;
+      const sz = -Math.cos(sunAz) * 0.6;
+      this.sunLight.position.set(2.5 + sx * 24, Math.max(3, sy * 24), 8.5 + sz * 24);
+      this.fillLight.position.set(2.5 - sx * 18, 12, 8.5 - sz * 18);
+      this.fillLight.intensity = isNight ? 0.14 : isStorm ? 0.35 : 0.4;
+      this.sunLight.intensity = isNight ? 0.18 : isStorm ? 1.15 : 2.75;
       this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff5e0);
-      this.hemiLight.intensity = isNight ? 0.34 : 0.78;
+      this.hemiLight.intensity = isNight ? 0.26 : isStorm ? 0.7 : 0.5;
+
+      // HDR sun billboards ride the true solar direction; halo warms up at golden hour
+      this.sunDir.set(sx, sy, sz).normalize();
+      const isGolden =
+        !isNight && ((sim.hourOfDay >= 5.2 && sim.hourOfDay <= 7.5) || (sim.hourOfDay >= 16.5 && sim.hourOfDay <= 18.8));
+      const sunUp = sy > 0.03;
+      if (this.sunCore) {
+        this.sunCore.visible = !isNight && sunUp;
+        this.sunCore.material.color.setRGB(isGolden ? 6.0 : 5.6, isGolden ? 3.6 : 5.0, isGolden ? 2.0 : 4.3);
+      }
+      if (this.sunHalo) {
+        this.sunHalo.visible = !isNight && sunUp && !isStorm;
+        this.sunHalo.material.color.setRGB(isGolden ? 1.2 : 0.9, isGolden ? 0.75 : 0.86, isGolden ? 0.46 : 0.78);
+      }
+
+      // Screen-space sun shaft strength (`3d-sky-rays`): strongest at a low golden sun, subtle at noon
+      this.godRayStrength = isNight ? 0 : isStorm ? 0.12 : isGolden ? 0.95 : 0.5;
+      this.godRayStrength *= THREE.MathUtils.lerp(1.3, 0.75, THREE.MathUtils.clamp(this.sunDir.y, 0, 1));
+
       if (this.scene.fog instanceof THREE.FogExp2) {
-        this.scene.fog.color.set(isNight ? 0x0e1628 : 0xd2e1ec);
+        this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
+        this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
       }
     }
 
@@ -553,6 +781,11 @@ export class WalkScene {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    if (this.composer) {
+      this.composer.setPixelRatio(this.currentDpr);
+      this.composer.setSize(w, h);
+    }
+    if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
   }
 
   private handleVisibility(): void {
@@ -599,6 +832,7 @@ export class WalkScene {
       }
       const dt = Math.min(0.1, Math.max(0.001, (now - this.lastFrameMs) / 1000));
       this.lastFrameMs = now;
+      this.simElapsedS += dt;
 
       // Spin ceiling/stand fans gently (skipped if user prefers reduced motion)
       if (!this.reducedMotion) {
@@ -652,7 +886,18 @@ export class WalkScene {
       // Update camera (1st-person or 3rd-person spring-arm collision)
       this.updateCamera(dt, snap, move.sprint);
 
-      this.renderer.render(this.scene, this.camera);
+      // Lock sky dome + sun billboards to the camera so walking never introduces parallax drift
+      this.skyMesh.position.copy(this.camera.position);
+      if (this.sunCore?.visible) this.sunCore.position.copy(this.camera.position).addScaledVector(this.sunDir, 132);
+      if (this.sunHalo?.visible) this.sunHalo.position.copy(this.camera.position).addScaledVector(this.sunDir, 132);
+
+      // Cinematic ray-traced-look stack (mirrors BuildScene), or the direct render fallback
+      if (this.postActive && this.composer) {
+        this.updateAtmosphere(this.camera);
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, this.camera);
+      }
 
       // FPS, Adaptive DPR Governor & Stats Telemetry
       const fpsInst = 1 / Math.max(0.001, dt);
@@ -664,10 +909,12 @@ export class WalkScene {
         if (avg < 36 && this.currentDpr > 1) {
           this.currentDpr = 1;
           this.renderer.setPixelRatio(1);
+          if (this.composer) this.composer.setPixelRatio(1);
           this.handleResize();
         } else if (avg > 54 && this.currentDpr < this.baseDpr) {
           this.currentDpr = this.baseDpr;
           this.renderer.setPixelRatio(this.currentDpr);
+          if (this.composer) this.composer.setPixelRatio(this.currentDpr);
           this.handleResize();
         }
       }
@@ -806,6 +1053,20 @@ export class WalkScene {
     for (const r of this.staticDisposables) r.dispose();
     this.envTex?.dispose();
     this.palette.dispose();
+
+    this.postActive = false;
+    this.gtaoPass?.dispose();
+    this.atmospherePass?.dispose();
+    this.bloomPass?.dispose();
+    this.outputPass?.dispose();
+    this.composer?.dispose();
+    this.composer = null;
+    this.renderPass = null;
+    this.gtaoPass = null;
+    this.atmospherePass = null;
+    this.bloomPass = null;
+    this.outputPass = null;
+
     this.renderer.dispose();
   }
 }

@@ -9,10 +9,10 @@ export interface BuildCameraBounds {
 }
 
 const DEFAULT_SNAPSHOT: BuildCameraSnapshot = {
-  target: [2.5, 0.35, 8.2], // center of 5m x 17m lot framed above bottom dock
-  yaw: -2.48, // ~ -142 deg three-quarter front-street angle (carport front -> back garden)
-  pitch: 0.86, // ~ 49 deg angled perspective
-  distance: 19.8,
+  target: [2.5, 3.25, 8.5], // visual centre of the 5m x 17m two-storey mass
+  yaw: Math.PI * 1.18, // architectural 3/4 from the garden side, carport receding to the right
+  pitch: 0.34, // shallower hero angle keeps the facade upright and leaves sky above the ridge
+  distance: 27.5, // full 17m lot plus foreground landscaping, no cropped eave
 };
 
 /**
@@ -21,8 +21,12 @@ const DEFAULT_SNAPSHOT: BuildCameraSnapshot = {
  */
 export class BuildCameraController {
   public readonly camera: THREE.PerspectiveCamera;
+  public readonly orthoCamera: THREE.OrthographicCamera;
+  private useOrtho = false;
+  private allowUnderground = false;
   private domElement: HTMLElement;
   private bounds: BuildCameraBounds;
+  private aspect = 16 / 9;
 
   // Target (desired damped goal) & Current (rendered smooth state)
   private goalTarget = new THREE.Vector3(...DEFAULT_SNAPSHOT.target);
@@ -71,7 +75,10 @@ export class BuildCameraController {
   constructor(domElement: HTMLElement, aspect = 16 / 9, initialBounds?: BuildCameraBounds) {
     this.domElement = domElement;
     this.bounds = initialBounds ?? { minX: -5, maxX: 10, minZ: -5, maxZ: 22 };
-    this.camera = new THREE.PerspectiveCamera(42, Math.max(0.1, aspect), 0.25, 260);
+    this.aspect = Math.max(0.1, aspect);
+    // 42° keeps verticals calmer than a wide game camera while still fitting the narrow lot.
+    this.camera = new THREE.PerspectiveCamera(42, this.aspect, 0.2, 280);
+    this.orthoCamera = new THREE.OrthographicCamera(-12, 12, 12, -12, 0.2, 280);
     this.updateCameraTransform();
 
     this.onKeyDownBound = (e) => this.handleKeyDown(e);
@@ -114,9 +121,28 @@ export class BuildCameraController {
     this.domElement.removeEventListener("contextmenu", this.onContextMenuBound);
   }
 
+  public get activeCamera(): THREE.Camera {
+    return this.useOrtho ? this.orthoCamera : this.camera;
+  }
+
+  public setOrtho(ortho: boolean): void {
+    this.useOrtho = ortho;
+    this.updateCameraTransform();
+  }
+
+  public setAllowUnderground(allow: boolean): void {
+    this.allowUnderground = allow;
+    if (!allow) {
+      this.goalPitch = Math.max(0.14, this.goalPitch);
+      this.goalTarget.y = Math.max(0.1, this.goalTarget.y);
+    }
+  }
+
   public setAspect(aspect: number): void {
-    this.camera.aspect = Math.max(0.1, aspect);
+    this.aspect = Math.max(0.1, aspect);
+    this.camera.aspect = this.aspect;
     this.camera.updateProjectionMatrix();
+    this.updateCameraTransform();
   }
 
   public setBounds(bounds: BuildCameraBounds): void {
@@ -141,11 +167,52 @@ export class BuildCameraController {
     this.goalYaw = this.goalYaw + dir * step;
   }
 
-  public resetOverview(centerX = 2.5, centerY = 0.35, centerZ = 8.5): void {
+  public resetOverview(centerX = 2.5, centerY = 3.25, centerZ = 8.5): void {
     this.goalTarget.set(centerX, centerY, centerZ);
     this.goalYaw = DEFAULT_SNAPSHOT.yaw;
     this.goalPitch = DEFAULT_SNAPSHOT.pitch;
     this.goalDistance = DEFAULT_SNAPSHOT.distance;
+  }
+
+  public setPreset(preset: "3d" | "front" | "back" | "side" | "top" | "foundation"): void {
+    switch (preset) {
+      case "front":
+        this.goalTarget.set(2.5, 3.15, 8.5);
+        this.goalYaw = Math.PI;
+        this.goalPitch = 0.18;
+        this.goalDistance = 25.5;
+        break;
+      case "back":
+        this.goalTarget.set(2.5, 3.15, 8.5);
+        this.goalYaw = 0;
+        this.goalPitch = 0.18;
+        this.goalDistance = 25.5;
+        break;
+      case "side":
+        this.goalTarget.set(2.5, 3.15, 8.5);
+        this.goalYaw = Math.PI * 0.5;
+        this.goalPitch = 0.22;
+        this.goalDistance = 29.5;
+        break;
+      case "top":
+        this.goalTarget.set(2.5, 1.0, 8.5);
+        this.goalYaw = Math.PI;
+        this.goalPitch = 1.48;
+        this.goalDistance = 28;
+        break;
+      case "foundation":
+        this.goalTarget.set(2.5, -0.45, 8.5);
+        this.goalYaw = -2.42;
+        this.goalPitch = this.allowUnderground ? -0.22 : 0.35;
+        this.goalDistance = 23.5;
+        break;
+      default:
+        this.goalTarget.set(...DEFAULT_SNAPSHOT.target);
+        this.goalYaw = DEFAULT_SNAPSHOT.yaw;
+        this.goalPitch = DEFAULT_SNAPSHOT.pitch;
+        this.goalDistance = DEFAULT_SNAPSHOT.distance;
+        break;
+    }
   }
 
   public getSnapshot(): BuildCameraSnapshot {
@@ -261,8 +328,8 @@ export class BuildCameraController {
 
     if (this.dragMode === "orbit") {
       this.goalYaw -= dx * 0.0065;
-      // Pitch stays safely within 22°..82° (0.384 .. 1.43 rad) — never flips over zenith or under terrain
-      this.goalPitch = Math.max(0.384, Math.min(1.43, this.goalPitch + dy * 0.0055));
+      const minPitch = this.allowUnderground ? -1.05 : 0.14;
+      this.goalPitch = Math.max(minPitch, Math.min(1.5, this.goalPitch + dy * 0.0055));
     } else if (this.dragMode === "pan") {
       this.panByPixels(dx, dy);
     }
@@ -295,7 +362,7 @@ export class BuildCameraController {
     // Cursor-directed zoom: trace cursor ray onto current floor horizontal plane
     this._plane.setFromNormalAndCoplanarPoint(this._up, this.goalTarget);
     this._wheelNdc.set(ndcX, ndcY);
-    this._raycaster.setFromCamera(this._wheelNdc, this.camera);
+    this._raycaster.setFromCamera(this._wheelNdc, this.activeCamera);
     const hitPoint = this._raycaster.ray.intersectPlane(this._plane, this._hit);
 
     const oldDist = this.goalDistance;
@@ -373,17 +440,30 @@ export class BuildCameraController {
   }
 
   private updateCameraTransform(): void {
-    // Sims 4 close-zoom lower angle shift: when zooming close near floor (< 8m), tilt gentler toward horizon
-    const closeT = Math.max(0, Math.min(1, (8.5 - this.currDistance) / 5.1));
-    const effectivePitch = Math.max(0.32, this.currPitch - closeT * 0.24);
+    // Sims 4 close-zoom lower angle shift only when above ground in perspective
+    const closeT = !this.allowUnderground && this.currPitch > 0.25 ? Math.max(0, Math.min(1, (8.5 - this.currDistance) / 5.1)) : 0;
+    const effectivePitch = this.allowUnderground
+      ? Math.max(-1.05, Math.min(1.5, this.currPitch))
+      : Math.max(0.14, this.currPitch - closeT * 0.18);
 
     const horizDist = Math.cos(effectivePitch) * this.currDistance;
     const vertDist = Math.sin(effectivePitch) * this.currDistance;
     const camX = this.currTarget.x + Math.sin(this.currYaw) * horizDist;
     const camZ = this.currTarget.z + Math.cos(this.currYaw) * horizDist;
-    const camY = Math.max(this.currTarget.y + 0.55, this.currTarget.y + vertDist);
+    const camY = this.allowUnderground
+      ? this.currTarget.y + vertDist
+      : Math.max(0.45, this.currTarget.y + vertDist);
 
     this.camera.position.set(camX, camY, camZ);
     this.camera.lookAt(this.currTarget);
+
+    const halfH = this.currDistance * 0.42;
+    this.orthoCamera.left = -halfH * this.aspect;
+    this.orthoCamera.right = halfH * this.aspect;
+    this.orthoCamera.top = halfH;
+    this.orthoCamera.bottom = -halfH;
+    this.orthoCamera.position.set(camX, camY, camZ);
+    this.orthoCamera.lookAt(this.currTarget);
+    this.orthoCamera.updateProjectionMatrix();
   }
 }

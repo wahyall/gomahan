@@ -34,6 +34,7 @@ export interface ProjectHouseBuildOptions {
   stage: number;
   showBricks: boolean;
   showStructure: boolean;
+  showTerrain?: boolean;
   showRoof: boolean;
   showRangka: boolean;
   showFinishing: boolean;
@@ -73,12 +74,16 @@ export function buildStaticNeighborhood(
   const ground = new THREE.Mesh(groundGeo, palette.grass);
   ground.position.set(2.5, -0.055, 8.5);
   ground.receiveShadow = true;
+  ground.name = "env-terrain-ground";
+  ground.userData.isTerrain = true;
   envGroup.add(ground);
 
   const roadGeo = new THREE.BoxGeometry(90, 0.06, 6.25);
   const road = new THREE.Mesh(roadGeo, palette.road);
   road.position.set(2.5, -0.04, -3.65);
   road.receiveShadow = true;
+  road.name = "env-terrain-road";
+  road.userData.isTerrain = true;
   envGroup.add(road);
 
   const stripeMat = new THREE.MeshStandardMaterial({ color: 0xd8d5c9, roughness: 0.85, metalness: 0.0 });
@@ -92,6 +97,7 @@ export function buildStaticNeighborhood(
   if (mergedStripes) {
     const m = new THREE.Mesh(mergedStripes, stripeMat);
     m.receiveShadow = true;
+    m.userData.isTerrain = true;
     envGroup.add(m);
   }
 
@@ -102,12 +108,15 @@ export function buildStaticNeighborhood(
   const gutterFrontWall = new THREE.Mesh(new THREE.BoxGeometry(28, 0.08, 0.12), curbMat);
   gutterFrontWall.position.set(2.5, -0.015, -0.52);
   gutterFrontWall.receiveShadow = true;
+  gutterFrontWall.userData.isTerrain = true;
   const gutterBackWall = new THREE.Mesh(new THREE.BoxGeometry(28, 0.08, 0.12), curbMat);
   gutterBackWall.position.set(2.5, -0.015, -0.06);
   gutterBackWall.receiveShadow = true;
+  gutterBackWall.userData.isTerrain = true;
   const gutterBed = new THREE.Mesh(new THREE.BoxGeometry(28, 0.02, 0.36), drainDarkMat);
   gutterBed.position.set(2.5, -0.045, -0.29);
   gutterBed.receiveShadow = true;
+  gutterBed.userData.isTerrain = true;
   envGroup.add(gutterFrontWall, gutterBackWall, gutterBed);
 
   const bridgeGeos: THREE.BufferGeometry[] = [];
@@ -122,6 +131,7 @@ export function buildStaticNeighborhood(
     const m = new THREE.Mesh(mergedBridge, curbMat);
     m.castShadow = true;
     m.receiveShadow = true;
+    m.userData.isTerrain = true;
     envGroup.add(m);
   }
 
@@ -135,8 +145,17 @@ export function buildStaticNeighborhood(
   if (mergedGrate) {
     const gm = new THREE.Mesh(mergedGrate, grateMat);
     gm.receiveShadow = true;
+    gm.userData.isTerrain = true;
     envGroup.add(gm);
   }
+
+  // Concrete pedestrian sidewalk curb between gutter and asphalt road (`3d-modular-buildings`)
+  const sidewalkGeo = new THREE.BoxGeometry(28, 0.045, 0.32);
+  const sidewalk = new THREE.Mesh(sidewalkGeo, curbMat);
+  sidewalk.position.set(2.5, -0.005, -0.68);
+  sidewalk.receiveShadow = true;
+  sidewalk.userData.isTerrain = true;
+  envGroup.add(sidewalk);
 
   const shadowMat = new THREE.MeshBasicMaterial({
     map: contactShadowTex,
@@ -146,7 +165,26 @@ export function buildStaticNeighborhood(
     polygonOffset: true,
     polygonOffsetFactor: -1,
   });
-  staticDisposables.push(shadowMat, groundGeo, roadGeo, stripeMat, curbMat, grateMat, drainDarkMat);
+  staticDisposables.push(shadowMat, groundGeo, roadGeo, sidewalkGeo, stripeMat, curbMat, grateMat, drainDarkMat);
+
+  // Subtle architectural base contact shadow strip under lot footprint (`3d-wood-lighting-scorecard`)
+  if (contactShadowTex) {
+    const basePoolGeo = new THREE.PlaneGeometry(6.6, 14.8);
+    basePoolGeo.rotateX(-Math.PI / 2);
+    const basePoolMat = new THREE.MeshBasicMaterial({
+      map: contactShadowTex,
+      transparent: true,
+      opacity: 0.38,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+    });
+    const basePool = new THREE.Mesh(basePoolGeo, basePoolMat);
+    basePool.position.set(2.5, 0.004, 10.2);
+    basePool.userData.isTerrain = true;
+    envGroup.add(basePool);
+    staticDisposables.push(basePoolGeo, basePoolMat);
+  }
 
   const addNeighborHouse = (cx: number, labelSide: string) => {
     const grp = new THREE.Group();
@@ -169,6 +207,7 @@ export function buildStaticNeighborhood(
       wm.castShadow = true;
       wm.receiveShadow = true;
       grp.add(wm);
+      staticDisposables.push(mergedWall);
     }
 
     const nRoof = createChamferBox(4.96, 0.24, 13.8, 0.025, 1);
@@ -178,38 +217,185 @@ export function buildStaticNeighborhood(
     rm.castShadow = true;
     rm.receiveShadow = true;
     grp.add(rm);
+    staticDisposables.push(nRoof);
 
-    const winMat = new THREE.MeshStandardMaterial({ color: 0x3b444f, roughness: 0.45, metalness: 0.35 });
-    const winGeos: THREE.BufferGeometry[] = [];
-    for (const [wy, wz] of [
-      [2.05, 3.98],
-      [5.25, 3.98],
-    ] as [number, number][]) {
-      const wFrame = createChamferBox(1.5, 1.55, 0.08, 0.01, 1);
-      wFrame.translate(cx + (labelSide === "left" ? -0.4 : 0.4), wy, wz);
-      winGeos.push(wFrame);
+    // Muted facade rhythm: plinth, floor band, corner pilasters, window frames + sills, door.
+    // This turns the old translucent boxes into believable adjacent houses without stealing focus.
+    const detailGeos: THREE.BufferGeometry[] = [];
+    const addDetail = (geo: THREE.BufferGeometry) => detailGeos.push(geo);
+    const plinth = createChamferBox(5.02, 0.62, 0.1, 0.012, 1);
+    plinth.translate(cx, 0.33, 3.95);
+    addDetail(plinth);
+    const floorBand = createChamferBox(5.04, 0.13, 0.11, 0.012, 1);
+    floorBand.translate(cx, 3.52, 3.95);
+    addDetail(floorBand);
+    const fascia = createChamferBox(5.08, 0.18, 13.92, 0.02, 1);
+    fascia.rotateX(-0.14);
+    fascia.translate(cx, 7.46, 10.5);
+    addDetail(fascia);
+    for (const side of [-1, 1]) {
+      const pilaster = createChamferBox(0.15, 6.7, 0.14, 0.012, 1);
+      pilaster.translate(cx + side * 2.42, 3.45, 3.94);
+      addDetail(pilaster);
     }
-    const mergedWin = mergeGeometryBatch(winGeos);
-    if (mergedWin) grp.add(new THREE.Mesh(mergedWin, winMat));
+    const doorX = cx + (labelSide === "left" ? 0.72 : -0.72);
+    const doorGeo = createChamferBox(0.98, 2.18, 0.1, 0.012, 1);
+    doorGeo.translate(doorX, 1.19, 4.03);
+    addDetail(doorGeo);
+    const doorCanopy = createChamferBox(1.45, 0.11, 0.82, 0.012, 1);
+    doorCanopy.translate(doorX, 2.55, 3.66);
+    addDetail(doorCanopy);
 
-    const treeZ = -0.82;
-    const treeX = cx + (labelSide === "left" ? 1.15 : -1.15);
-    const trunkGeo = new THREE.CylinderGeometry(0.085, 0.14, 2.55, 8);
-    trunkGeo.translate(treeX, 1.25, treeZ);
-    const trunk = new THREE.Mesh(trunkGeo, palette.woodTeak);
-    trunk.castShadow = true;
-    grp.add(trunk);
+    const mergedDetail = mergeGeometryBatch(detailGeos);
+    if (mergedDetail) {
+      const dm = new THREE.Mesh(mergedDetail, palette.lisplank);
+      dm.castShadow = true;
+      dm.receiveShadow = true;
+      grp.add(dm);
+      staticDisposables.push(mergedDetail);
+    }
 
-    const foliageMat = new THREE.MeshStandardMaterial({ color: 0x528044, roughness: 0.86, envMapIntensity: 0.25 });
+    const winMat = new THREE.MeshStandardMaterial({
+      color: 0x2a3744,
+      roughness: 0.16,
+      metalness: 0.35,
+      envMapIntensity: 0.9,
+    });
+    const winFrameGeos: THREE.BufferGeometry[] = [];
+    const winGlassGeos: THREE.BufferGeometry[] = [];
+    const winSillGeos: THREE.BufferGeometry[] = [];
+    for (const [wy, wz] of [
+      [2.16, 3.97],
+      [5.3, 3.97],
+    ] as [number, number][]) {
+      const wx = cx + (labelSide === "left" ? -0.55 : 0.55);
+      const frameW = 1.62;
+      const frameH = 1.6;
+      const rail = 0.055;
+      for (const [ox, oy, w, h] of [
+        [0, frameH * 0.5 - rail * 0.5, frameW, rail],
+        [0, -frameH * 0.5 + rail * 0.5, frameW, rail],
+        [-frameW * 0.5 + rail * 0.5, 0, rail, frameH],
+        [frameW * 0.5 - rail * 0.5, 0, rail, frameH],
+        [0, 0, 0.045, frameH - rail * 1.2],
+      ] as [number, number, number, number][]) {
+        const fg = createChamferBox(w, h, 0.085, 0.006, 1);
+        fg.translate(wx + ox, wy + oy, wz);
+        winFrameGeos.push(fg);
+      }
+      const glass = new THREE.BoxGeometry(frameW - rail * 2, frameH - rail * 2, 0.024);
+      glass.translate(wx, wy, wz - 0.012);
+      winGlassGeos.push(glass);
+      const sill = createChamferBox(frameW + 0.12, 0.075, 0.2, 0.008, 1);
+      sill.translate(wx, wy - frameH * 0.5 - 0.035, wz - 0.035);
+      winSillGeos.push(sill);
+    }
+    // Side window facing the hero lot keeps the neighbouring elevation from feeling blank.
+    const sideWinX = cx + (labelSide === "left" ? 2.47 : -2.47);
+    for (const [wy, wz] of [
+      [2.25, 6.3],
+      [5.35, 6.3],
+      [2.25, 12.3],
+    ] as [number, number][]) {
+      const glass = new THREE.BoxGeometry(0.024, 1.18, 1.34);
+      glass.translate(sideWinX, wy, wz);
+      winGlassGeos.push(glass);
+      const sill = createChamferBox(0.18, 0.07, 1.46, 0.008, 1);
+      sill.translate(sideWinX + (labelSide === "left" ? 0.04 : -0.04), wy - 0.63, wz);
+      winSillGeos.push(sill);
+    }
+    const mergedWinFrame = mergeGeometryBatch(winFrameGeos);
+    if (mergedWinFrame) {
+      const fm = new THREE.Mesh(mergedWinFrame, palette.aluDark);
+      fm.castShadow = true;
+      grp.add(fm);
+      staticDisposables.push(mergedWinFrame);
+    }
+    const mergedWinGlass = mergeGeometryBatch(winGlassGeos);
+    if (mergedWinGlass) {
+      const gm = new THREE.Mesh(mergedWinGlass, winMat);
+      gm.castShadow = true;
+      grp.add(gm);
+      staticDisposables.push(mergedWinGlass);
+    }
+    const mergedWinSill = mergeGeometryBatch(winSillGeos);
+    if (mergedWinSill) {
+      const sm = new THREE.Mesh(mergedWinSill, palette.lisplank);
+      sm.castShadow = true;
+      grp.add(sm);
+      staticDisposables.push(mergedWinSill);
+    }
+
+    // Rooftop water tank + side condenser: small silhouettes that make the context read as lived-in.
+    const tankGeos: THREE.BufferGeometry[] = [];
+    const tank = new THREE.CylinderGeometry(0.42, 0.46, 1.12, 14);
+    tank.translate(cx + 1.18, 8.78, 14.1);
+    tankGeos.push(tank);
+    const tankCap = new THREE.CylinderGeometry(0.48, 0.48, 0.08, 14);
+    tankCap.translate(cx + 1.18, 9.38, 14.1);
+    tankGeos.push(tankCap);
+    const mergedTank = mergeGeometryBatch(tankGeos);
+    if (mergedTank) {
+      const tm = new THREE.Mesh(mergedTank, palette.aluDark);
+      tm.castShadow = true;
+      grp.add(tm);
+      staticDisposables.push(mergedTank);
+    }
+    const acGeo = new THREE.BoxGeometry(0.68, 0.54, 0.3);
+    acGeo.translate(cx + (labelSide === "left" ? -2.58 : 2.58), 4.28, 9.3);
+    const ac = new THREE.Mesh(acGeo, palette.aluDark);
+    ac.castShadow = true;
+    grp.add(ac);
+    staticDisposables.push(acGeo);
+
+    // Front hedge behind the low fence, tucked under the neighbour tree.
+    const hedgeGeo = createChamferBox(3.95, 0.52, 0.32, 0.07, 1);
+    hedgeGeo.translate(cx, 0.55, 0.56);
+    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x4c7c3d, roughness: 0.9, envMapIntensity: 0.16 });
+    const hedge = new THREE.Mesh(hedgeGeo, hedgeMat);
+    hedge.castShadow = true;
+    hedge.receiveShadow = true;
+    grp.add(hedge);
+    staticDisposables.push(hedgeGeo, hedgeMat);
+
+    const treeZ = 1.62;
+    const treeX = cx + (labelSide === "left" ? 1.18 : -1.18);
+    // Planter curb & soil ring (`3d-kasumidera-ultra-realism` / `3d-modular-buildings`)
+    const ringCurbGeo = new THREE.CylinderGeometry(0.46, 0.5, 0.12, 12);
+    ringCurbGeo.translate(treeX, 0.04, treeZ);
+    const ringCurb = new THREE.Mesh(ringCurbGeo, curbMat);
+    ringCurb.receiveShadow = true;
+    grp.add(ringCurb);
+
+    const trunkGeos: THREE.BufferGeometry[] = [];
+    const mainTrunk = new THREE.CylinderGeometry(0.08, 0.145, 2.55, 8);
+    mainTrunk.translate(treeX, 1.25, treeZ);
+    trunkGeos.push(mainTrunk);
+    const b1 = new THREE.CylinderGeometry(0.038, 0.065, 1.05, 6);
+    b1.rotateZ(0.48);
+    b1.translate(treeX - 0.25, 2.3, treeZ + 0.08);
+    trunkGeos.push(b1);
+    const b2 = new THREE.CylinderGeometry(0.036, 0.06, 0.95, 6);
+    b2.rotateZ(-0.44);
+    b2.translate(treeX + 0.22, 2.26, treeZ - 0.08);
+    trunkGeos.push(b2);
+    const mergedTrunk = mergeGeometryBatch(trunkGeos);
+    if (mergedTrunk) {
+      const trunk = new THREE.Mesh(mergedTrunk, palette.woodTeak);
+      trunk.castShadow = true;
+      grp.add(trunk);
+    }
+
+    const foliageMat = new THREE.MeshStandardMaterial({ color: 0x568746, roughness: 0.86, envMapIntensity: 0.28 });
+    const foliageHiMat = new THREE.MeshStandardMaterial({ color: 0x6ba055, roughness: 0.84, envMapIntensity: 0.3 });
     const crownGeos: THREE.BufferGeometry[] = [];
     for (const [ox, oy, oz, rad] of [
-      [0, 2.85, 0, 0.88],
-      [-0.45, 2.58, 0.25, 0.66],
-      [0.44, 2.62, -0.22, 0.64],
-      [0.05, 3.28, 0.08, 0.56],
+      [0, 2.88, 0, 0.9],
+      [-0.48, 2.6, 0.26, 0.68],
+      [0.46, 2.64, -0.22, 0.66],
     ] as [number, number, number, number][]) {
       const c = new THREE.IcosahedronGeometry(rad, 1);
-      c.scale(1.05, 0.82, 1.05);
+      c.scale(1.06, 0.84, 1.06);
       c.translate(treeX + ox, oy, treeZ + oz);
       crownGeos.push(c);
     }
@@ -220,14 +406,20 @@ export function buildStaticNeighborhood(
       cm.receiveShadow = true;
       grp.add(cm);
     }
+    const topCap = new THREE.IcosahedronGeometry(0.58, 1);
+    topCap.scale(1.08, 0.8, 1.08);
+    topCap.translate(treeX + 0.06, 3.34, treeZ + 0.08);
+    const tcm = new THREE.Mesh(topCap, foliageHiMat);
+    tcm.castShadow = true;
+    grp.add(tcm);
 
-    const discGeo = new THREE.PlaneGeometry(2.3, 2.3);
+    const discGeo = new THREE.PlaneGeometry(2.5, 2.5);
     discGeo.rotateX(-Math.PI / 2);
     const disc = new THREE.Mesh(discGeo, shadowMat);
     disc.position.set(treeX, 0.008, treeZ);
     grp.add(disc);
     neighborsGroup.add(grp);
-    staticDisposables.push(winMat, foliageMat);
+    staticDisposables.push(winMat, foliageMat, foliageHiMat, ringCurbGeo, discGeo, topCap);
   };
 
   addNeighborHouse(-2.58, "left");
@@ -393,13 +585,15 @@ export function buildProjectHouse(
   const showPlasterPaint = !hidden.has("cat") && opts.showFinishing && (stage === 0 || stage >= 8);
   const showTileFloor = !hidden.has("lantai") && (stage === 0 || stage >= 8);
   const showProps = stage === 0 || stage >= 9;
+  const showTerrain = opts.showTerrain !== false && !hidden.has("tanah");
+  const concreteStructMat = opts.xrayRebar ? palette.concreteXray : palette.concrete;
 
   const batchBase = new StaticBatchCollector();
   const batchLt2 = new StaticBatchCollector();
   const batchRoof = new StaticBatchCollector();
 
-  // 1. Plinth & Site Surfaces (including sculpted Build Terrain heights when customized!)
-  if (stage === 0 || stage >= 1) {
+  // 1. Plinth & Site Surfaces (hidden cleanly when showTerrain === false to expose foundations!)
+  if (showTerrain && (stage === 0 || stage >= 1)) {
     batchBase.addBox("site:grass", palette.grass, "lantai", "Taman Depan", 0.75, 0.04, 1.5, 1.5, 0.08, 3.0);
     const cpH = Math.max(0.08, peil.carportPeilM);
     batchBase.addGeo(
@@ -447,11 +641,125 @@ export function buildProjectHouse(
       Math.max(0.1, lt1Y - 0.08),
       13.0,
     );
+
+    // Human-scale landscaping gives the hero lot depth and a lived-in silhouette.
+    const leafDeep = new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 });
+    const leafLight = new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 });
+    const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 });
+    const gardenLightMat = new THREE.MeshStandardMaterial({
+      color: 0xffe7b2,
+      emissive: 0xffc46b,
+      emissiveIntensity: 1.8,
+      roughness: 0.38,
+      metalness: 0.1,
+    });
+    resources.push(leafDeep, leafLight, hedgeMat, gardenLightMat);
+
+    const addGardenTree = (x: number, z: number, scale: number, mat: THREE.Material) => {
+      const trunkGeos: THREE.BufferGeometry[] = [];
+      const trunk = new THREE.CylinderGeometry(0.065 * scale, 0.11 * scale, 2.25 * scale, 7);
+      trunk.translate(x, 0.08 + 1.125 * scale, z);
+      trunkGeos.push(trunk);
+      for (const [ox, oz, ang, len] of [
+        [0.22, 0.08, 0.5, 0.9],
+        [-0.2, -0.1, -0.45, 0.82],
+      ] as [number, number, number, number][]) {
+        const branch = new THREE.CylinderGeometry(0.025 * scale, 0.05 * scale, len * scale, 6);
+        branch.rotateZ(ang);
+        branch.translate(x + ox * scale, 0.08 + 1.92 * scale, z + oz * scale);
+        trunkGeos.push(branch);
+      }
+      const mergedTrunk = mergeGeometryBatch(trunkGeos);
+      if (mergedTrunk) {
+        const tm = new THREE.Mesh(mergedTrunk, palette.woodTeak);
+        tm.castShadow = true;
+        tm.receiveShadow = true;
+        levelRoots[0].add(tm);
+        resources.push(mergedTrunk);
+      }
+
+      const crownGeos: THREE.BufferGeometry[] = [];
+      for (const [ox, oy, oz, rad] of [
+        [0, 2.7, 0, 0.82],
+        [-0.55, 2.35, 0.28, 0.58],
+        [0.52, 2.42, -0.22, 0.62],
+        [0.1, 2.18, 0.52, 0.46],
+        [-0.16, 3.12, -0.12, 0.44],
+      ] as [number, number, number, number][]) {
+        const crown = new THREE.IcosahedronGeometry(rad * scale, 1);
+        crown.scale(1.08, 0.82, 1.08);
+        crown.translate(x + ox * scale, 0.08 + oy * scale, z + oz * scale);
+        crownGeos.push(crown);
+      }
+      const mergedCrown = mergeGeometryBatch(crownGeos);
+      if (mergedCrown) {
+        const cm = new THREE.Mesh(mergedCrown, mat);
+        cm.castShadow = true;
+        cm.receiveShadow = true;
+        levelRoots[0].add(cm);
+        resources.push(mergedCrown);
+      }
+    };
+
+    addGardenTree(0.48, 1.32, 1.0, leafLight);
+    addGardenTree(3.95, 16.15, 0.82, leafDeep);
+
+    const hedgeGeos: THREE.BufferGeometry[] = [];
+    const frontHedge = createChamferBox(1.28, 0.42, 0.3, 0.06, 1);
+    frontHedge.translate(0.76, 0.29, 0.17);
+    hedgeGeos.push(frontHedge);
+    const backHedge = createChamferBox(2.45, 0.52, 0.34, 0.06, 1);
+    backHedge.translate(2.6, 0.34, 16.78);
+    hedgeGeos.push(backHedge);
+    const mergedHedge = mergeGeometryBatch(hedgeGeos);
+    if (mergedHedge) {
+      const hm = new THREE.Mesh(mergedHedge, hedgeMat);
+      hm.castShadow = true;
+      hm.receiveShadow = true;
+      levelRoots[0].add(hm);
+      resources.push(mergedHedge);
+    }
+
+    // Two small bollards anchor the garden path and bloom warmly after dusk.
+    const bollardGeos: THREE.BufferGeometry[] = [];
+    for (const [bx, bz] of [
+      [0.08, 0.82],
+      [0.08, 2.28],
+    ] as [number, number][]) {
+      const post = new THREE.CylinderGeometry(0.028, 0.032, 0.46, 7);
+      post.translate(bx, 0.31, bz);
+      bollardGeos.push(post);
+      const bulb = new THREE.SphereGeometry(0.065, 10, 7);
+      bulb.translate(bx, 0.57, bz);
+      levelRoots[0].add(new THREE.Mesh(bulb, gardenLightMat));
+      resources.push(bulb);
+    }
+    const mergedBollard = mergeGeometryBatch(bollardGeos);
+    if (mergedBollard) {
+      const bm = new THREE.Mesh(mergedBollard, palette.aluDark);
+      bm.castShadow = true;
+      levelRoots[0].add(bm);
+      resources.push(mergedBollard);
+    }
+  }
+
+  // Ground datum ±0.00 lot outline when terrain is hidden so spatial reference stays crisp
+  if (!showTerrain) {
+    const lotOutlineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0.005, 0),
+      new THREE.Vector3(project.site.width, 0.005, 0),
+      new THREE.Vector3(project.site.width, 0.005, project.site.depth),
+      new THREE.Vector3(0, 0.005, project.site.depth),
+    ]);
+    const lotOutlineMat = new THREE.LineBasicMaterial({ color: 0xe28a48, transparent: true, opacity: 0.65 });
+    const lotLoop = new THREE.LineLoop(lotOutlineGeo, lotOutlineMat);
+    levelRoots[0].add(lotLoop);
+    resources.push(lotOutlineGeo, lotOutlineMat);
   }
 
   // Optional Terrain Sculpting Overlay from Build Mode
   const th = project.buildExtras?.terrainHeights;
-  if (th && th.some((h) => Math.abs(h) > 0.01)) {
+  if (showTerrain && th && th.some((h) => Math.abs(h) > 0.01)) {
     const segW = 10;
     const segD = 34;
     const tGeo = new THREE.PlaneGeometry(5.4, 17.4, segW, segD);
@@ -472,13 +780,13 @@ export function buildProjectHouse(
     resources.push(tGeo);
   }
 
-  // 2. Foundations & Sumur Resapan
+  // 2. Foundations, Batu Kali / Cakar Ayam / Strauss Pile & Sumur Resapan
   if (showFnd) {
     for (const f of struct.foundations) {
-      const fw = project.systems.foundation === "footplate_full" ? 1.2 : 1.0;
+      const fw = project.systems.foundation === "footplate_full" ? 1.2 : project.systems.foundation === "cakar_ayam" ? 1.1 : 1.0;
       batchBase.addGeo(
         "fnd:all",
-        palette.concrete,
+        concreteStructMat,
         "pondasi",
         `Pondasi (${project.systems.foundation})`,
         createChamferBox(fw, 0.32, fw, 0.015, 1),
@@ -490,7 +798,7 @@ export function buildProjectHouse(
       );
       batchBase.addBox(
         "fnd:all",
-        palette.concrete,
+        concreteStructMat,
         "pondasi",
         `Pondasi (${project.systems.foundation})`,
         f.x,
@@ -502,24 +810,116 @@ export function buildProjectHouse(
         { explodeOff: [0, -1.4, 0] },
       );
       if (project.systems.foundation === "strauss_pile") {
+        for (const sxOff of [-0.24, 0.24]) {
+          batchBase.addGeo(
+            "fnd:all",
+            concreteStructMat,
+            "pondasi",
+            "Pondasi Strauss Pile Ø30",
+            new THREE.CylinderGeometry(0.14, 0.14, 2.4, 10),
+            f.x + sxOff,
+            -1.95,
+            f.z,
+            0,
+            [0, -1.6, 0],
+          );
+          if (opts.xrayRebar) {
+            batchBase.addGeo(
+              "fnd:rebar",
+              palette.rebar,
+              "pondasi",
+              "Tulangan Strauss Pile",
+              new THREE.CylinderGeometry(0.08, 0.08, 2.35, 8),
+              f.x + sxOff,
+              -1.92,
+              f.z,
+              0,
+              [0, -1.6, 0],
+            );
+          }
+        }
+      } else if (project.systems.foundation === "cakar_ayam") {
         batchBase.addGeo(
           "fnd:all",
-          palette.concrete,
+          concreteStructMat,
           "pondasi",
-          "Pondasi Strauss Pile",
-          new THREE.CylinderGeometry(0.15, 0.15, 2.4, 10),
+          "Buis Beton Cakar Ayam Ø40",
+          new THREE.CylinderGeometry(0.22, 0.22, 1.1, 12),
           f.x,
-          -1.9,
+          -1.25,
           f.z,
           0,
-          [0, -1.4, 0],
+          [0, -1.5, 0],
         );
       }
+      if (opts.xrayRebar) {
+        for (const off of [-0.32, 0, 0.32]) {
+          batchBase.addBox("fnd:rebar", palette.rebar, "pondasi", "Tulangan Footplate", f.x, -0.68, f.z + off, fw * 0.84, 0.03, 0.03, { explodeOff: [0, -1.4, 0] });
+          batchBase.addBox("fnd:rebar", palette.rebar, "pondasi", "Tulangan Footplate", f.x + off, -0.68, f.z, 0.03, 0.03, fw * 0.84, { explodeOff: [0, -1.4, 0] });
+        }
+        for (const [rx, rz] of [[-0.07, -0.07], [0.07, -0.07], [-0.07, 0.07], [0.07, 0.07]] as const) {
+          batchBase.addBox(
+            "fnd:rebar",
+            palette.rebar,
+            "pondasi",
+            "Stek Tulangan Pedestal",
+            f.x + rx,
+            (lt1Y - 0.65) * 0.5 - 0.1,
+            f.z + rz,
+            0.025,
+            lt1Y + 0.5,
+            0.025,
+            { explodeOff: [0, -1.4, 0] },
+          );
+        }
+      }
     }
+
+    if (project.systems.foundation === "footplate_batukali") {
+      for (const w of project.levels[0]?.walls ?? []) {
+        if (w.height < 1.5) continue;
+        const dx = w.end.x - w.start.x;
+        const dz = w.end.z - w.start.z;
+        const len = Math.hypot(dx, dz);
+        if (len < 0.2) continue;
+        const cx = (w.start.x + w.end.x) * 0.5;
+        const cz = (w.start.z + w.end.z) * 0.5;
+        const ang = -Math.atan2(dz, dx);
+        const stripH = Math.max(0.38, lt1Y + 0.18);
+        batchBase.addBox(
+          "fnd:batukali",
+          palette.mortar,
+          "pondasi",
+          "Pondasi Jalur Batu Kali",
+          cx,
+          lt1Y - 0.16 - stripH * 0.5,
+          cz,
+          len,
+          stripH,
+          0.34,
+          { rotY: ang, explodeOff: [0, -0.95, 0] },
+        );
+      }
+    } else if (project.systems.foundation === "cakar_ayam" && (project.levels[0]?.walls.length ?? 0) > 0) {
+      batchBase.addBox(
+        "fnd:cakar-plate",
+        concreteStructMat,
+        "pondasi",
+        "Pelat Cakar Ayam 12 cm",
+        2.5,
+        -0.12,
+        10.5,
+        5.0,
+        0.12,
+        13.0,
+        { explodeOff: [0, -1.0, 0] },
+      );
+    }
+
     for (let i = 0; i < project.floodMitigation.infiltrationWells; i++) {
       batchBase.addGeo(
         "fnd:resapan",
-        palette.concrete,
+        concreteStructMat,
         "sumurResapan",
         "Sumur Resapan SNI 03-2453",
         new THREE.CylinderGeometry(0.42, 0.42, 1.5, 14),
@@ -534,7 +934,7 @@ export function buildProjectHouse(
 
   // 3. Structural Frame (LT1 & LT2 Columns/Beams — strictly bounded to each column's spanned levels!)
   if (showSloofCol) {
-    const colMat = project.systems.frame === "steel_wf" ? palette.steelWf : palette.concrete;
+    const colMat = project.systems.frame === "steel_wf" ? palette.steelWf : concreteStructMat;
     const hLt1 = project.levels[0]?.height ?? 3.6;
     const hLt2 = project.levels[1]?.height ?? 3.6;
 
@@ -632,6 +1032,21 @@ export function buildProjectHouse(
         bm.widthM,
         { rotY: ang, explodeOff: [0, expY, 0] },
       );
+      if (opts.xrayRebar && project.systems.frame !== "steel_wf") {
+        targetBatch.addBox(
+          `struct:rebar-${partId}`,
+          palette.rebar,
+          partId,
+          `Tulangan ${bm.kind.toUpperCase()}`,
+          cx,
+          y,
+          cz,
+          Math.max(0.1, bm.lengthM - 0.06),
+          bm.heightM * 0.58,
+          bm.widthM * 0.56,
+          { rotY: ang, explodeOff: [0, expY, 0] },
+        );
+      }
     }
   }
 
@@ -648,7 +1063,7 @@ export function buildProjectHouse(
       const geo = new THREE.ExtrudeGeometry(shape, { depth: slab.thickness, bevelEnabled: false });
       geo.rotateX(-Math.PI / 2);
       const matKey = slab.isOverhang ? "woodDeck" : showTileFloor ? "tileFloor" : "concrete";
-      const mat = slab.isOverhang ? palette.woodDeck : showTileFloor ? palette.tileFloor : palette.concrete;
+      const mat = slab.isOverhang ? palette.woodDeck : showTileFloor ? palette.tileFloor : concreteStructMat;
       batchLt2.addGeo(`slab:${matKey}`, mat, "pelat", slab.name, geo, 0, lt2Y - slab.thickness, 0, 0, [0, 1.5, 0]);
       if (opts.showFinishing && !slab.isOverhang) {
         const soffitGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.014, bevelEnabled: false });
@@ -659,18 +1074,20 @@ export function buildProjectHouse(
   }
 
   if (showTileFloor) {
-    batchBase.addBox("site:grass", palette.grass, "lantai", "Taman Belakang", 3.32, lt1Y - 0.015, 16.15, 3.16, 0.04, 1.52);
-    for (const px of [2.15, 2.75, 3.35, 3.95]) {
-      batchBase.addGeo(
-        "floor1:woodDeck",
-        palette.woodDeck,
-        "lantai",
-        "Pijakan Taman Belakang",
-        createChamferBox(0.46, 0.03, 0.42, 0.008, 1),
-        px,
-        lt1Y + 0.01,
-        15.85,
-      );
+    if (showTerrain) {
+      batchBase.addBox("site:grass", palette.grass, "lantai", "Taman Belakang", 3.32, lt1Y - 0.015, 16.15, 3.16, 0.04, 1.52);
+      for (const px of [2.15, 2.75, 3.35, 3.95]) {
+        batchBase.addGeo(
+          "floor1:woodDeck",
+          palette.woodDeck,
+          "lantai",
+          "Pijakan Taman Belakang",
+          createChamferBox(0.46, 0.03, 0.42, 0.008, 1),
+          px,
+          lt1Y + 0.01,
+          15.85,
+        );
+      }
     }
     for (const lvIdx of [0, 1] as const) {
       if (lvIdx === 1 && opts.activeLevelView === "lt1") continue;
@@ -794,7 +1211,9 @@ export function buildProjectHouse(
     }
   }
   if (opts.activeLevelView !== "lt1") {
-    batchLt2.addBox("rail:glass-stair", palette.glass, "tangga", "Railing Tangga", 1.35, lt2Y + 0.5, 10.0, 0.035, 0.98, 4.9);
+    batchLt2.addBox("rail:glass-stair", palette.glass, "tangga", "Railing Tangga", 1.35, lt2Y + 0.5, 10.0, 0.035, 0.98, 4.9, {
+      explodeOff: [0, 1.5, 0],
+    });
     batchLt2.addGeo(
       "rail:alu",
       palette.aluDark,
@@ -804,11 +1223,17 @@ export function buildProjectHouse(
       1.35,
       lt2Y + 1.0,
       10.0,
+      0,
+      [0, 1.5, 0],
     );
     for (let pz = 7.6; pz <= 12.45; pz += 1.2) {
-      batchLt2.addBox("rail:alu", palette.aluDark, "tangga", "Handrail Tangga & Balkon", 1.35, lt2Y + 0.5, pz, 0.04, 1.0, 0.04);
+      batchLt2.addBox("rail:alu", palette.aluDark, "tangga", "Handrail Tangga & Balkon", 1.35, lt2Y + 0.5, pz, 0.04, 1.0, 0.04, {
+        explodeOff: [0, 1.5, 0],
+      });
     }
-    batchLt2.addBox("rail:glass-balc", palette.glass, "pelat", "Railing Balkon", 1.25, lt2Y + 0.5, 3.04, 2.45, 0.98, 0.035);
+    batchLt2.addBox("rail:glass-balc", palette.glass, "pelat", "Railing Balkon", 1.25, lt2Y + 0.5, 3.04, 2.45, 0.98, 0.035, {
+      explodeOff: [0, 1.5, 0],
+    });
     batchLt2.addGeo(
       "rail:alu",
       palette.aluDark,
@@ -818,9 +1243,13 @@ export function buildProjectHouse(
       1.25,
       lt2Y + 1.0,
       3.04,
+      0,
+      [0, 1.5, 0],
     );
     for (const px of [0.06, 0.85, 1.65, 2.44]) {
-      batchLt2.addBox("rail:alu", palette.aluDark, "pelat", "Handrail Balkon", px, lt2Y + 0.5, 3.04, 0.04, 1.0, 0.04);
+      batchLt2.addBox("rail:alu", palette.aluDark, "pelat", "Handrail Balkon", px, lt2Y + 0.5, 3.04, 0.04, 1.0, 0.04, {
+        explodeOff: [0, 1.5, 0],
+      });
     }
   }
 
@@ -837,6 +1266,9 @@ export function buildProjectHouse(
     const s1 = new THREE.Vector3();
     const up = new THREE.Vector3(0, 1, 0);
 
+    // "Bongkar Granular" (Struktur Mode signature): every brick gets its own radial burst vector
+    // out of the lot centre, stacked by its own height, so the wall visibly dissolves brick-by-brick.
+    // Rigid per-wall transforms are reserved for the plaster skins & openings below.
     const buildBrickIM = (list: typeof visibleBricks, mat: THREE.Material, label: string, lvTarget: number) => {
       if (list.length === 0) return;
       const im = new THREE.InstancedMesh(unitGeo, mat, list.length);
@@ -935,11 +1367,13 @@ export function buildProjectHouse(
         fullGroup.add(mesh);
         resources.push(geo);
         tagPickable(mesh, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
-        opts.onExplodePiece?.(
-          mesh,
-          new THREE.Vector3(((w.start.x + w.end.x) * 0.5 - 2.5) * 0.5, lvIdx * 1.3, 0),
-        );
       }
+      // Keep plaster skin and its door/window/vent openings locked together during Bongkar,
+      // using the original Struktur Mode travel factors (X-splay 0.5, per-level lift 1.3).
+      opts.onExplodePiece?.(
+        fullGroup,
+        new THREE.Vector3(((w.start.x + w.end.x) * 0.5 - 2.5) * 0.5, lvIdx * 1.3, 0),
+      );
 
       if (showOpenings) {
         for (const op of w.openings) {
@@ -1216,6 +1650,8 @@ export function buildProjectHouse(
         midX,
         eaveY,
         roof.minZ + 0.05,
+        0,
+        [0, 2.85, 0],
       );
       for (const [dx, wallZ] of [
         [0.14, 3.04],
@@ -1229,9 +1665,9 @@ export function buildProjectHouse(
           new THREE.Vector3(dx, 0.09, wallZ - 0.22),
         ]);
         const tubeGeo = attachBvh(new THREE.TubeGeometry(curve, 22, 0.044, 10, false));
-        batchRoof.addGeo("roof:gutter", palette.aluDark, "talang", "Pipa Turun Hujan (Downspout)", tubeGeo);
+        batchRoof.addGeo("roof:gutter", palette.aluDark, "talang", "Pipa Turun Hujan (Downspout)", tubeGeo, 0, 0, 0, 0, [0, 2.85, 0]);
         for (const cy of [1.2, 3.4, 5.6]) {
-          batchRoof.addGeo("roof:gutter", palette.aluDark, "talang", "Klem Pipa Talang", new THREE.CylinderGeometry(0.062, 0.062, 0.045, 10), dx, cy, wallZ);
+          batchRoof.addGeo("roof:gutter", palette.aluDark, "talang", "Klem Pipa Talang", new THREE.CylinderGeometry(0.062, 0.062, 0.045, 10), dx, cy, wallZ, 0, [0, 2.85, 0]);
         }
       }
 
@@ -1250,15 +1686,18 @@ export function buildProjectHouse(
         roofGroup.add(cpRoof);
         resources.push(cpGeo);
         tagPickable(cpRoof, { kind: "part", id: "genteng" }, "Kanopi Carport Depan");
-        opts.onExplodePiece?.(cpRoof, new THREE.Vector3(0, 1.8, 0));
+        opts.onExplodePiece?.(cpRoof, new THREE.Vector3(0, 1.9, -0.45));
       }
 
       const cpFrontY = cpHeightAt(cpMidX, cpZ0);
       const cpAvgY = (cpHeightAt(cpMinX, cpZ0) + cpHeightAt(cpMinX, cpZ1)) * 0.5;
       const cpTilt = Math.atan(0.055);
-      batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpFrontY - 0.03, cpZ0 + 0.03, cpW, 0.1, 0.06);
+      batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMidX, cpFrontY - 0.03, cpZ0 + 0.03, cpW, 0.1, 0.06, {
+        explodeOff: [0, 1.75, -0.45],
+      });
       batchRoof.addBox("roof:cpframe", palette.aluDark, "rangka", "Rangka Kanopi Carport", cpMinX + 0.03, cpAvgY - 0.03, (cpZ0 + cpZ1) * 0.5, 0.06, 0.1, cpZ1 - cpZ0, {
         rotX: cpTilt,
+        explodeOff: [0, 1.75, -0.45],
       });
     }
   }
@@ -1364,13 +1803,24 @@ export function buildProjectHouse(
     }
   }
 
-  // 10. MEP X-Ray Overlay
+  // 10. Canonical Orthogonal MEP X-Ray Overlay (1:1 identical coordinates with Denah 2D!)
   if (showMep) {
     const mepGrp = new THREE.Group();
-    for (const lv of project.levels) {
-      if (lv.index === 1 && opts.activeLevelView === "lt1") continue;
-      const baseY = lv.index === 0 ? lt1Y : lt2Y;
-      for (const rt of lv.mepRoutes) {
+    const mepCollector = new StaticBatchCollector();
+    const upVec = new THREE.Vector3(0, 1, 0);
+    const segDir = new THREE.Vector3();
+    const segQuat = new THREE.Quaternion();
+    const segMid = new THREE.Vector3();
+    const segScale = new THREE.Vector3(1, 1, 1);
+    const segMat4 = new THREE.Matrix4();
+
+    for (const lvIdx of [0, 1] as const) {
+      if (lvIdx === 1 && opts.activeLevelView === "lt1") continue;
+      const baseY = lvIdx === 0 ? lt1Y : lt2Y;
+      const routes = derived.mepNetwork.routesByLevel[lvIdx];
+      const symbols = derived.mepNetwork.symbolsByLevel[lvIdx];
+
+      for (const rt of routes) {
         const isAir = rt.kind === "air_bersih" || rt.kind === "air_kotor" || rt.kind === "air_hujan";
         if (isAir && !opts.showAir && stage !== 7) continue;
         if (!isAir && !opts.showListrik && stage !== 7) continue;
@@ -1386,23 +1836,96 @@ export function buildProjectHouse(
                   : rt.kind === "listrik_ac"
                     ? palette.mepElecAc
                     : palette.mepElecOutlet;
-        const vecs = rt.pts.map((p) => new THREE.Vector3(p.x, baseY + p.y, p.z));
-        const curve = new THREE.CatmullRomCurve3(vecs, false, "catmullrom", 0.05);
-        const tubeGeo = new THREE.TubeGeometry(curve, Math.max(8, vecs.length * 6), rt.kind === "air_kotor" ? 0.045 : 0.025, 8, false);
-        const mesh = new THREE.Mesh(tubeGeo, mat);
-        mesh.renderOrder = 950;
-        mepGrp.add(mesh);
-        resources.push(tubeGeo);
-        tagPickable(mesh, { kind: "part", id: isAir ? "pipaAirBersih" : "listrikLampu" }, rt.label);
+        const radius = rt.kind === "air_kotor" ? 0.042 : rt.kind === "air_bersih" || rt.kind === "air_hujan" ? 0.028 : 0.022;
+        const partId = isAir ? "pipaAirBersih" : "listrikLampu";
+
+        for (let i = 1; i < rt.pts.length; i++) {
+          const a = rt.pts[i - 1]!;
+          const b = rt.pts[i]!;
+          const ax = a.x;
+          const ay = baseY + a.y;
+          const az = a.z;
+          const bx = b.x;
+          const by = baseY + b.y;
+          const bz = b.z;
+          segDir.set(bx - ax, by - ay, bz - az);
+          const len = segDir.length();
+          if (len < 0.01) continue;
+          segDir.divideScalar(len);
+          segQuat.setFromUnitVectors(upVec, segDir);
+          segMid.set((ax + bx) * 0.5, (ay + by) * 0.5, (az + bz) * 0.5);
+          segMat4.compose(segMid, segQuat, segScale);
+          const cyl = new THREE.CylinderGeometry(radius, radius, len, 8);
+          cyl.applyMatrix4(segMat4);
+          mepCollector.addGeo(`mep:${rt.kind}`, mat, partId, rt.label, cyl, 0, 0, 0, 0, undefined, false, false);
+
+          const joint = new THREE.SphereGeometry(radius * 1.18, 8, 6);
+          joint.translate(bx, by, bz);
+          mepCollector.addGeo(`mep:${rt.kind}`, mat, partId, rt.label, joint, 0, 0, 0, 0, undefined, false, false);
+        }
+      }
+
+      for (const sym of symbols) {
+        if (sym.kind === "panel_mcb" && (opts.showListrik || stage === 7)) {
+          mepCollector.addBox(
+            "mep:sym-mcb",
+            palette.mepElecLamp,
+            "panelMcb",
+            sym.label,
+            sym.x,
+            baseY + sym.y,
+            sym.z,
+            0.3,
+            0.4,
+            0.12,
+            { castShadow: false, receiveShadow: false },
+          );
+        } else if (sym.kind === "stopkontak" && (opts.showListrik || stage === 7)) {
+          mepCollector.addBox(
+            "mep:sym-sk",
+            palette.mepElecOutlet,
+            "stopkontak",
+            sym.label,
+            sym.x,
+            baseY + sym.y,
+            sym.z,
+            0.1,
+            0.1,
+            0.05,
+            { castShadow: false, receiveShadow: false },
+          );
+        } else if (sym.kind === "meter_air" && (opts.showAir || stage === 7)) {
+          mepCollector.addBox(
+            "mep:sym-mtr",
+            palette.mepWaterClean,
+            "meterAir",
+            sym.label,
+            sym.x,
+            0.12,
+            sym.z,
+            0.24,
+            0.18,
+            0.18,
+            { castShadow: false, receiveShadow: false },
+          );
+        }
       }
     }
-    const bioGeo = new THREE.CylinderGeometry(0.55, 0.55, 1.35, 16);
-    const bio = new THREE.Mesh(bioGeo, palette.mepWaterWaste);
-    bio.position.set(2.8, -0.75, 1.6);
-    bio.renderOrder = 951;
-    mepGrp.add(bio);
-    resources.push(bioGeo);
-    tagPickable(bio, { kind: "part", id: "septic" }, "Bio Septic Tank (di bawah Carport)");
+
+    mepCollector.flush(mepGrp, resources, (mesh, partId, label) => {
+      mesh.renderOrder = 950;
+      tagPickable(mesh, { kind: "part", id: partId as never }, label);
+    });
+
+    if (opts.showAir || stage === 7) {
+      const bioGeo = new THREE.CylinderGeometry(0.55, 0.55, 1.35, 16);
+      const bio = new THREE.Mesh(bioGeo, palette.mepWaterWaste);
+      bio.position.set(2.8, -0.75, 1.6);
+      bio.renderOrder = 951;
+      mepGrp.add(bio);
+      resources.push(bioGeo);
+      tagPickable(bio, { kind: "part", id: "septic" }, "Bio Septic Tank (di bawah Carport)");
+    }
     houseRoot.add(mepGrp);
   }
 

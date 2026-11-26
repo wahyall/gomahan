@@ -23,6 +23,7 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
   const project = useStudioStore((s) => s.project);
   const patchStructuralParams = useStudioStore((s) => s.patchStructuralParams);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
+  const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
 
   const criticalVal = bundleBase.derived.validation.filter((v) => v.severity === "critical");
   const missingPrices = bundleBase.rab.warnings.filter((w) => w.severity === "critical");
@@ -64,7 +65,7 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             <GateItem
               pass={criticalVal.length === 0}
               label={`Validasi Desain Bebas Error Kritis (${criticalVal.length} error)`}
-              action={!criticalVal.length ? undefined : () => setWorkspace("build")}
+              action={!criticalVal.length ? undefined : () => openBuildPanel("inspection")}
             />
             <GateItem
               pass={missingPrices.length === 0}
@@ -74,7 +75,7 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             <GateItem
               pass={engChecked}
               label="Checklist Review Struktur SNI Telah Dicentang"
-              action={engChecked ? undefined : () => setWorkspace("structure")}
+              action={engChecked ? undefined : () => openBuildPanel("structure")}
             />
             <GateItem pass={revSet} label={`Revisi Gambar Kerja Terisi (${project.structuralParams.drawingRevision})`} />
           </div>

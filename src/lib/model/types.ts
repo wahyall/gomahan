@@ -354,7 +354,7 @@ export interface StructuralParams {
 }
 
 export interface GamificationState {
-  mode: "simple" | "pro";
+  mode: "pro";
   budgetCapIdr: number; // default 450_000_000
   soundEnabled: boolean;
   completedQuests: string[];

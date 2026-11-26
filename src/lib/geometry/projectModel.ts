@@ -1,5 +1,6 @@
 import type { Project, Vec3 } from "@/lib/model/types";
 import { computeMasonryTakeoff, type MasonryTakeoff } from "@/lib/geometry/masonry";
+import { buildCanonicalMepNetwork, type CanonicalMepNetwork } from "@/lib/geometry/mepNetwork";
 import { computeLevelRoomsMetrics, type FloorLevelMetrics } from "@/lib/geometry/rooms";
 import { computeRoofMetrics, validateProjectModel, type RoofDerivedMetrics, type ValidationIssue } from "@/lib/geometry/roofAndStairs";
 
@@ -29,6 +30,7 @@ export interface DerivedProjectModel {
   floors: FloorLevelMetrics[];
   roof: RoofDerivedMetrics;
   mep: DerivedMepSummary;
+  mepNetwork: CanonicalMepNetwork;
   validation: ValidationIssue[];
   totalGrossAreaM2: number;
   totalNetFloorM2: number;
@@ -60,6 +62,7 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
     computeLevelRoomsMetrics(lv, project.systems.brick, project.systems.tileSizeCm),
   );
   const validation = validateProjectModel(project, floors, roof);
+  const mepNetwork = buildCanonicalMepNetwork(project);
 
   let airBersihM = 0;
   let airKotorM = 0;
@@ -78,7 +81,8 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
   let totalElectricalWatts = 0;
 
   for (const lv of project.levels) {
-    for (const r of lv.mepRoutes) {
+    const routes = lv.index === 0 ? mepNetwork.routesByLevel[0] : mepNetwork.routesByLevel[1];
+    for (const r of routes) {
       const len = polylineLen(r.pts);
       if (r.kind === "air_bersih") airBersihM += len;
       else if (r.kind === "air_kotor") airKotorM += len;
@@ -101,8 +105,6 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
       totalElectricalWatts += h.powerW;
       if (h.type === "ac_split") {
         acCount++;
-        // Dynamic AC power feeder per placed unit
-        kabelAcM += Math.max(4, Math.hypot(h.position.x - 0.35, h.position.z - 4.15) * 0.5);
       } else if (h.type === "exhaust_fan") {
         exhaustCount++;
       } else {
@@ -176,6 +178,7 @@ export function buildDerivedModel(project: Project): DerivedProjectModel {
       totalElectricalWatts,
       recommendedPlnVa,
     },
+    mepNetwork,
     validation,
     totalGrossAreaM2,
     totalNetFloorM2,

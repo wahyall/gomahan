@@ -353,7 +353,7 @@ export const projectSchema = z.object({
     }),
   ),
   gamification: z.object({
-    mode: z.enum(["simple", "pro"]),
+    mode: z.enum(["simple", "pro"]).transform(() => "pro" as const),
     budgetCapIdr: z.number().min(50_000_000),
     soundEnabled: z.boolean(),
     completedQuests: z.array(z.string()),

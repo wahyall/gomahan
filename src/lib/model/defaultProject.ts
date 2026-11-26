@@ -1191,7 +1191,8 @@ export function createDefaultProject(): Project {
             pts: [
               { x: 0.65, y: -0.45, z: 16.45 },
               { x: 0.65, y: -0.45, z: 8.2 },
-              { x: 2.5, y: -0.5, z: 4.0 },
+              { x: 0.65, y: -0.48, z: 4.0 },
+              { x: 2.8, y: -0.52, z: 4.0 },
               { x: 2.8, y: -0.55, z: 1.6 },
             ],
           },
@@ -1201,9 +1202,9 @@ export function createDefaultProject(): Project {
             label: "MCB → Sirkuit Lampu LT1",
             pts: [
               { x: 0.35, y: 1.55, z: 4.15 },
-              { x: 1.15, y: 3.22, z: 5.75 },
-              { x: 3.2, y: 3.22, z: 10.0 },
-              { x: 3.45, y: 3.22, z: 13.85 },
+              { x: 0.35, y: 3.22, z: 4.15 },
+              { x: 2.25, y: 3.22, z: 4.15 },
+              { x: 2.25, y: 3.22, z: 13.85 },
             ],
           },
           {
@@ -1212,8 +1213,8 @@ export function createDefaultProject(): Project {
             label: "MCB → Sirkuit Stop Kontak LT1",
             pts: [
               { x: 0.35, y: 1.55, z: 4.15 },
-              { x: 0.2, y: 3.18, z: 5.2 },
-              { x: 4.8, y: 3.18, z: 10.6 },
+              { x: 0.35, y: 3.18, z: 4.15 },
+              { x: 0.2, y: 3.18, z: 4.15 },
               { x: 0.2, y: 3.18, z: 13.8 },
             ],
           },
@@ -1222,9 +1223,10 @@ export function createDefaultProject(): Project {
             kind: "air_hujan",
             label: "Downspout Atap Depan → Sumur Resapan",
             pts: [
-              { x: 0.2, y: 6.8, z: 3.4 },
-              { x: 0.2, y: 0.1, z: 3.4 },
-              { x: 0.75, y: -0.35, z: 1.8 },
+              { x: 0.14, y: 3.6, z: 3.04 },
+              { x: 0.14, y: -0.32, z: 3.04 },
+              { x: 0.75, y: -0.32, z: 3.04 },
+              { x: 0.75, y: -0.35, z: 1.2 },
             ],
           },
         ],
@@ -1697,7 +1699,9 @@ export function createDefaultProject(): Project {
             pts: [
               { x: 0.35, y: -0.25, z: 16.45 },
               { x: 0.35, y: 0.25, z: 16.45 },
-              { x: 0.65, y: 0.25, z: 16.45 },
+              { x: 0.35, y: 0.25, z: 12.5 },
+              { x: 3.5, y: 0.25, z: 12.5 },
+              { x: 3.5, y: 0.25, z: 8.85 },
               { x: 4.35, y: 0.25, z: 8.85 },
             ],
           },
@@ -1707,6 +1711,9 @@ export function createDefaultProject(): Project {
             label: "Shaft Limbah Toilet LT2 → LT1",
             pts: [
               { x: 4.35, y: -0.15, z: 8.85 },
+              { x: 3.5, y: -0.15, z: 8.85 },
+              { x: 3.5, y: -0.15, z: 12.5 },
+              { x: 0.65, y: -0.15, z: 12.5 },
               { x: 0.65, y: -0.15, z: 16.45 },
               { x: 0.65, y: -3.6, z: 16.45 },
             ],
@@ -1718,7 +1725,7 @@ export function createDefaultProject(): Project {
             pts: [
               { x: 0.35, y: -2.05, z: 4.15 },
               { x: 0.35, y: 3.1, z: 4.15 },
-              { x: 4.82, y: 3.1, z: 5.8 },
+              { x: 4.82, y: 3.1, z: 4.15 },
               { x: 4.82, y: 3.1, z: 13.9 },
             ],
           },
@@ -1767,7 +1774,7 @@ export function createDefaultProject(): Project {
     },
     stageProgress: {},
     gamification: {
-      mode: "simple",
+      mode: "pro",
       budgetCapIdr: 450_000_000,
       soundEnabled: true,
       completedQuests: [],

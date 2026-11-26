@@ -81,8 +81,13 @@ function normalMapFromHeight(heightCanvas: HTMLCanvasElement, strength = 2.2): T
   return tex;
 }
 
-export function createWoodTextures(baseHex: string, darkHex: string) {
-  const S = 512;
+/**
+ * `texScale` multiplies the hero canvas resolution (`3d-high-resolution-textures`: choose
+ * resolution from the closest intended camera view). Desktop build scenes pass 2 (1024px),
+ * mobile keeps 512px to stay inside GPU memory budgets.
+ */
+export function createWoodTextures(baseHex: string, darkHex: string, texScale = 1) {
+  const S = Math.min(1024, 512 * Math.max(1, Math.round(texScale)));
   const heightCv = document.createElement("canvas");
   heightCv.width = S;
   heightCv.height = S;
@@ -152,8 +157,8 @@ export function createWoodTextures(baseHex: string, darkHex: string) {
   return { albedo, rough, normal };
 }
 
-export function createPlasterTextures(hex: string) {
-  const S = 512;
+export function createPlasterTextures(hex: string, texScale = 1) {
+  const S = Math.min(1024, 512 * Math.max(1, Math.round(texScale)));
   const heightCv = document.createElement("canvas");
   heightCv.width = S;
   heightCv.height = S;
@@ -183,8 +188,8 @@ export function createPlasterTextures(hex: string) {
   return { albedo, normal };
 }
 
-export function createTileTextures(tileCm: number, baseHex: string, groutHex: string) {
-  const S = 512;
+export function createTileTextures(tileCm: number, baseHex: string, groutHex: string, texScale = 1) {
+  const S = Math.min(1024, 512 * Math.max(1, Math.round(texScale)));
   const heightCv = document.createElement("canvas");
   heightCv.width = S;
   heightCv.height = S;
@@ -242,33 +247,61 @@ export function createGrassTextures() {
   heightCv.width = S;
   heightCv.height = S;
   const hCtx = heightCv.getContext("2d")!;
-  hCtx.fillStyle = "#767676";
+  hCtx.fillStyle = "#7e7e7e";
   hCtx.fillRect(0, 0, S, S);
+
+  // Deterministic PRNG (`3d-high-resolution-textures`) avoids periodic modulo dot lattices at grazing angles
+  let seed = 0x5f3759df;
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 
   const albedo = makeSeededCanvas(
     S,
     S,
     (ctx) => {
-      ctx.fillStyle = "#5c8647";
+      ctx.fillStyle = "#5c8c46";
       ctx.fillRect(0, 0, S, S);
-      // Sims 4 subtle mown bands
-      ctx.fillStyle = "rgba(128, 175, 92, 0.14)";
+      // Soft painterly lawn tonal clouds (wrapped smoothly for tileability)
+      for (let i = 0; i < 42; i++) {
+        const cx = rand() * S;
+        const cy = rand() * S;
+        const rad = 28 + rand() * 52;
+        const warm = i % 2 === 0;
+        for (const ox of [-S, 0, S]) {
+          for (const oy of [-S, 0, S]) {
+            const g = ctx.createRadialGradient(cx + ox, cy + oy, 2, cx + ox, cy + oy, rad);
+            g.addColorStop(0, warm ? "rgba(130, 174, 86, 0.14)" : "rgba(68, 108, 49, 0.13)");
+            g.addColorStop(1, "rgba(0,0,0,0)");
+            ctx.fillStyle = g;
+            ctx.fillRect(cx + ox - rad, cy + oy - rad, rad * 2, rad * 2);
+          }
+        }
+      }
+      // Subtle lawn mowing sheen bands
+      ctx.fillStyle = "rgba(148, 192, 104, 0.08)";
       ctx.fillRect(0, 0, S * 0.5, S);
-      for (let i = 0; i < 4200; i++) {
-        const x = (i * 139) % S;
-        const y = (i * 251) % S;
-        const shade = i % 4 === 0 ? "#476a37" : i % 3 === 0 ? "#77a55b" : "#5e8b48";
-        ctx.fillStyle = shade;
-        ctx.fillRect(x, y, 2, 4 + (i % 4));
-        hCtx.fillStyle = i % 2 === 0 ? "#b0b0b0" : "#555555";
-        hCtx.fillRect(x, y, 2, 4);
+
+      // Fine organic grass blades without high-contrast dot aliasing
+      for (let i = 0; i < 6500; i++) {
+        const x = rand() * S;
+        const y = rand() * S;
+        const r = rand();
+        ctx.fillStyle =
+          r < 0.32 ? "rgba(72, 114, 52, 0.28)" : r < 0.68 ? "rgba(122, 168, 86, 0.26)" : "rgba(92, 138, 68, 0.24)";
+        ctx.fillRect(x, y, 1.4, 3.2 + rand() * 3.5);
+        hCtx.fillStyle = r > 0.5 ? "rgba(142,142,142,0.45)" : "rgba(110,110,110,0.45)";
+        hCtx.fillRect(x, y, 1.5, 3.5);
       }
     },
     true,
   );
-  albedo.repeat.set(8, 8);
-  const normal = normalMapFromHeight(heightCv, 2.0);
-  normal.repeat.set(8, 8);
+  albedo.repeat.set(14, 14);
+  const normal = normalMapFromHeight(heightCv, 1.0);
+  normal.repeat.set(14, 14);
   return { albedo, normal };
 }
 
@@ -349,9 +382,12 @@ export function createStandingSeamBumpTexture() {
 }
 
 export function createSkyGradientTexture(hourOfDay: number, season: "kemarau" | "hujan", rainMmH: number): THREE.CanvasTexture {
+  // Seamless 360-degree equirectangular atmospheric sky dome (`3d-sky-background`)
+  const W = 512;
+  const H = 256;
   const cv = document.createElement("canvas");
-  cv.width = 8;
-  cv.height = 512;
+  cv.width = W;
+  cv.height = H;
   const ctx = cv.getContext("2d")!;
 
   const isStorm = rainMmH > 20;
@@ -362,22 +398,64 @@ export function createSkyGradientTexture(hourOfDay: number, season: "kemarau" | 
   if (isNight) {
     stops = ["#0a1020", "#111b32", "#1a2844", "#243554", "#273852", "#1e2a3f"];
   } else if (isStorm) {
-    stops = ["#39424e", "#4b5764", "#647180", "#7f8c9b", "#929ea9", "#78828d"];
+    stops = ["#3d4754", "#4f5c6b", "#6a7888", "#8794a3", "#98a4af", "#7d8894"];
   } else if (isGolden) {
-    stops = ["#2f4e78", "#5b799d", "#c78b6b", "#ebb67c", "#f3cfa0", "#e6c39b"];
+    stops = ["#284c7c", "#5278a4", "#c98b69", "#f0b97b", "#f6d4a4", "#e6c39b"];
   } else if (season === "hujan") {
-    stops = ["#4f78a4", "#7299bf", "#9cb9d4", "#bed2e2", "#d8e3eb", "#c7d4dd"];
+    stops = ["#4474a8", "#6593c2", "#92b8da", "#bad3e6", "#d8e4ee", "#c5d3de"];
   } else {
-    stops = ["#2b6cb0", "#4b8cc6", "#7cb6e0", "#b3d7ee", "#dfeaf2", "#cfdce4"];
+    stops = ["#1f62aa", "#3e85c6", "#6fb0e0", "#a6d1ee", "#dcebf4", "#ccdae4"];
   }
 
-  const grd = ctx.createLinearGradient(0, 0, 0, 512);
-  const pos = [0, 0.28, 0.5, 0.68, 0.85, 1];
+  const grd = ctx.createLinearGradient(0, 0, 0, H);
+  const pos = [0, 0.26, 0.48, 0.68, 0.84, 1];
   pos.forEach((p, i) => grd.addColorStop(p, stops[i]!));
   ctx.fillStyle = grd;
-  ctx.fillRect(0, 0, 8, 512);
+  ctx.fillRect(0, 0, W, H);
+
+  if (!isStorm) {
+    // Periodic harmonic cirrus / cumulus bands along azimuth so longitude wrap at x=0/W is 100% seam-free
+    const img = ctx.getImageData(0, 0, W, H);
+    const d = img.data;
+    for (let y = Math.floor(H * 0.1); y < Math.floor(H * 0.62); y++) {
+      const elev = 1 - Math.abs((y - H * 0.38) / (H * 0.25));
+      const bandWeight = Math.max(0, elev) * (isNight ? 0.08 : isGolden ? 0.22 : 0.26);
+      for (let x = 0; x < W; x++) {
+        const theta = (x / W) * Math.PI * 2;
+        const sx = Math.cos(theta);
+        const sz = Math.sin(theta);
+        const f1 = Math.sin(sx * 2.4 + y * 0.065) * Math.cos(sz * 2.1 - y * 0.04);
+        const f2 = Math.sin(sx * 5.2 - sz * 4.3 + y * 0.13) * 0.5;
+        const wisp = Math.max(0, (f1 + f2) * 0.55 - 0.18) * bandWeight;
+        if (wisp > 0.005) {
+          const idx = (y * W + x) * 4;
+          const targetR = isNight ? 58 : isGolden ? 255 : 252;
+          const targetG = isNight ? 84 : isGolden ? 216 : 254;
+          const targetB = isNight ? 124 : isGolden ? 174 : 255;
+          d[idx] = Math.min(255, Math.round(d[idx]! * (1 - wisp) + targetR * wisp));
+          d[idx + 1] = Math.min(255, Math.round(d[idx + 1]! * (1 - wisp) + targetG * wisp));
+          d[idx + 2] = Math.min(255, Math.round(d[idx + 2]! * (1 - wisp) + targetB * wisp));
+        }
+      }
+    }
+    if (isNight) {
+      let sSeed = 918273;
+      for (let i = 0; i < 240; i++) {
+        sSeed = (sSeed * 1664525 + 1013904223) >>> 0;
+        const sx = sSeed % W;
+        const sy = ((sSeed >>> 12) % Math.floor(H * 0.45));
+        const idx = (sy * W + sx) * 4;
+        d[idx] = 235;
+        d[idx + 1] = 242;
+        d[idx + 2] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
 
   const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
   return tex;
@@ -423,6 +501,24 @@ export function createEnvironmentMap(renderer: THREE.WebGLRenderer, hourOfDay: n
   return rt.texture;
 }
 
+/** Soft radial sprite texture for the HDR sun core / halo billboards (shared by Build & Walk viewports). */
+export function makeSunSpriteTexture(coreAlpha: number, falloff: number): THREE.CanvasTexture {
+  const S = 128;
+  const cv = document.createElement("canvas");
+  cv.width = S;
+  cv.height = S;
+  const ctx = cv.getContext("2d")!;
+  const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  g.addColorStop(0, `rgba(255,255,255,${coreAlpha})`);
+  g.addColorStop(falloff, `rgba(255,255,255,${coreAlpha * 0.42})`);
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, S, S);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 export interface FloodWaterUniforms {
   uTime: { value: number };
   uRain: { value: number };
@@ -433,6 +529,7 @@ export interface MaterialPalette {
   brickInner: THREE.MeshStandardMaterial;
   mortar: THREE.MeshStandardMaterial;
   concrete: THREE.MeshStandardMaterial;
+  concreteXray: THREE.MeshStandardMaterial;
   rebar: THREE.MeshStandardMaterial;
   steelWf: THREE.MeshStandardMaterial;
   steelLight: THREE.MeshStandardMaterial;
@@ -469,12 +566,12 @@ export interface MaterialPalette {
   dispose: () => void;
 }
 
-export function createMaterialPalette(): MaterialPalette {
-  const woodMain = createWoodTextures("#9c6b42", "#58351c");
-  const woodDeckTex = createWoodTextures("#b28558", "#6d4827");
-  const plasterTex = createPlasterTextures("#f4f0e7");
-  const tileCream = createTileTextures(40, "#dfd9cd", "#b4aba0");
-  const tileGrey = createTileTextures(30, "#8f959c", "#63686f");
+export function createMaterialPalette(texScale = 1): MaterialPalette {
+  const woodMain = createWoodTextures("#9c6b42", "#58351c", texScale);
+  const woodDeckTex = createWoodTextures("#b28558", "#6d4827", texScale);
+  const plasterTex = createPlasterTextures("#f4f0e7", texScale);
+  const tileCream = createTileTextures(40, "#dfd9cd", "#b4aba0", texScale);
+  const tileGrey = createTileTextures(30, "#8f959c", "#63686f", texScale);
   const grassTex = createGrassTextures();
   const roadTex = createRoadTextures();
   const brushedRough = createMetalBrushedRoughness();
@@ -507,7 +604,7 @@ export function createMaterialPalette(): MaterialPalette {
   const brickOuter = new THREE.MeshStandardMaterial({
     color: 0xefede6,
     normalMap: plasterTex.normal,
-    normalScale: new THREE.Vector2(0.35, 0.35),
+    normalScale: new THREE.Vector2(0.48, 0.48),
     roughness: 0.9,
     metalness: 0.0,
     envMapIntensity: 0.3,
@@ -515,7 +612,7 @@ export function createMaterialPalette(): MaterialPalette {
   const brickInner = new THREE.MeshStandardMaterial({
     color: 0xe6e3da,
     normalMap: plasterTex.normal,
-    normalScale: new THREE.Vector2(0.35, 0.35),
+    normalScale: new THREE.Vector2(0.48, 0.48),
     roughness: 0.92,
     metalness: 0.0,
     envMapIntensity: 0.28,
@@ -524,17 +621,28 @@ export function createMaterialPalette(): MaterialPalette {
   const concrete = new THREE.MeshStandardMaterial({
     color: 0x92969a,
     normalMap: plasterTex.normal,
-    normalScale: new THREE.Vector2(0.45, 0.45),
+    normalScale: new THREE.Vector2(0.55, 0.55),
     roughness: 0.84,
     metalness: 0.02,
     envMapIntensity: 0.32,
   });
+  const concreteXray = new THREE.MeshStandardMaterial({
+    color: 0x7b93ab,
+    roughness: 0.65,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+    envMapIntensity: 0.25,
+  });
   const rebar = new THREE.MeshStandardMaterial({
-    color: 0xd96b38,
-    roughness: 0.42,
+    color: 0xf97316,
+    emissive: 0x7c2d12,
+    emissiveIntensity: 0.45,
+    roughness: 0.38,
     metalness: 0.85,
     transparent: true,
-    opacity: 0.94,
+    opacity: 0.96,
     envMapIntensity: 0.8,
   });
 
@@ -566,7 +674,7 @@ export function createMaterialPalette(): MaterialPalette {
     map: woodMain.albedo,
     roughnessMap: woodMain.rough,
     normalMap: woodMain.normal,
-    normalScale: new THREE.Vector2(0.55, 0.55),
+    normalScale: new THREE.Vector2(0.7, 0.7),
     roughness: 0.5,
     metalness: 0,
     ior: 1.43,
@@ -579,7 +687,7 @@ export function createMaterialPalette(): MaterialPalette {
     map: woodDeckTex.albedo,
     roughnessMap: woodDeckTex.rough,
     normalMap: woodDeckTex.normal,
-    normalScale: new THREE.Vector2(0.65, 0.65),
+    normalScale: new THREE.Vector2(0.78, 0.78),
     roughness: 0.62,
     metalness: 0,
     ior: 1.43,
@@ -591,7 +699,7 @@ export function createMaterialPalette(): MaterialPalette {
   const plasterExt = new THREE.MeshStandardMaterial({
     map: plasterTex.albedo,
     normalMap: plasterTex.normal,
-    normalScale: new THREE.Vector2(0.45, 0.45),
+    normalScale: new THREE.Vector2(0.58, 0.58),
     color: 0xf2ece1,
     roughness: 0.74,
     metalness: 0,
@@ -600,7 +708,7 @@ export function createMaterialPalette(): MaterialPalette {
   const plasterInt = new THREE.MeshStandardMaterial({
     map: plasterTex.albedo,
     normalMap: plasterTex.normal,
-    normalScale: new THREE.Vector2(0.32, 0.32),
+    normalScale: new THREE.Vector2(0.42, 0.42),
     color: 0xf7f5ef,
     roughness: 0.7,
     metalness: 0,
@@ -611,7 +719,7 @@ export function createMaterialPalette(): MaterialPalette {
     map: tileCream.albedo,
     roughnessMap: tileCream.rough,
     normalMap: tileCream.normal,
-    normalScale: new THREE.Vector2(0.5, 0.5),
+    normalScale: new THREE.Vector2(0.62, 0.62),
     roughness: 0.42,
     metalness: 0.02,
     envMapIntensity: 0.65,
@@ -620,7 +728,7 @@ export function createMaterialPalette(): MaterialPalette {
     map: tileGrey.albedo,
     roughnessMap: tileGrey.rough,
     normalMap: tileGrey.normal,
-    normalScale: new THREE.Vector2(0.55, 0.55),
+    normalScale: new THREE.Vector2(0.66, 0.66),
     roughness: 0.78,
     metalness: 0.02,
     envMapIntensity: 0.42,
@@ -628,7 +736,7 @@ export function createMaterialPalette(): MaterialPalette {
   const tileWood = new THREE.MeshStandardMaterial({
     map: woodDeckTex.albedo,
     normalMap: woodDeckTex.normal,
-    normalScale: new THREE.Vector2(0.45, 0.45),
+    normalScale: new THREE.Vector2(0.58, 0.58),
     color: 0xd8c3a8,
     roughness: 0.46,
     metalness: 0.02,
@@ -646,14 +754,14 @@ export function createMaterialPalette(): MaterialPalette {
   const glass = new THREE.MeshPhysicalMaterial({
     color: 0xdcf0f7,
     transparent: true,
-    opacity: 0.34,
-    roughness: 0.05,
+    opacity: 0.32,
+    roughness: 0.04,
     metalness: 0.0,
     ior: 1.52,
-    reflectivity: 0.92,
+    reflectivity: 0.94,
     clearcoat: 1.0,
-    clearcoatRoughness: 0.06,
-    envMapIntensity: 1.35,
+    clearcoatRoughness: 0.05,
+    envMapIntensity: 1.5,
     depthWrite: false,
   });
 
@@ -688,23 +796,23 @@ export function createMaterialPalette(): MaterialPalette {
     envMapIntensity: 0.38,
   });
 
+  // Neighbours are architectural context, not a ghost overlay. Keep them opaque and muted so
+  // they read as real houses while the hero lot still owns the contrast and saturation.
   const neighborWall = new THREE.MeshStandardMaterial({
-    color: 0xd4cec2,
+    color: 0xc7c1b5,
     normalMap: plasterTex.normal,
     normalScale: new THREE.Vector2(0.3, 0.3),
-    roughness: 0.86,
-    transparent: true,
-    opacity: 0.52,
-    depthWrite: false,
-    envMapIntensity: 0.25,
+    roughness: 0.9,
+    metalness: 0,
+    envMapIntensity: 0.18,
   });
   const neighborRoof = new THREE.MeshStandardMaterial({
-    color: 0x7b5241,
-    roughness: 0.78,
-    transparent: true,
-    opacity: 0.58,
-    depthWrite: false,
-    envMapIntensity: 0.3,
+    color: 0x5c4b40,
+    normalMap: plasterTex.normal,
+    normalScale: new THREE.Vector2(0.18, 0.18),
+    roughness: 0.82,
+    metalness: 0.04,
+    envMapIntensity: 0.22,
   });
 
   // Realistic animated Surabaya flood water surface shader (`3d-harbour-water` / `3d-ultra-realistic-water`)
@@ -777,6 +885,7 @@ export function createMaterialPalette(): MaterialPalette {
     brickInner,
     mortar,
     concrete,
+    concreteXray,
     rebar,
     steelWf,
     steelLight,
@@ -811,6 +920,7 @@ export function createMaterialPalette(): MaterialPalette {
     brickInner,
     mortar,
     concrete,
+    concreteXray,
     rebar,
     steelWf,
     steelLight,
@@ -829,6 +939,8 @@ export function createMaterialPalette(): MaterialPalette {
     ceiling,
     grass,
     road,
+    neighborWall,
+    neighborRoof,
     floodWater,
   ];
 
@@ -839,6 +951,7 @@ export function createMaterialPalette(): MaterialPalette {
     brickInner,
     mortar,
     concrete,
+    concreteXray,
     rebar,
     steelWf,
     steelLight,

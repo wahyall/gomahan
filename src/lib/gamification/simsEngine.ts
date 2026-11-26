@@ -108,9 +108,9 @@ export function evaluateGamification(
     {
       id: "q-hvac",
       title: "2. Optimalkan Kipas & AC yang Bisa Dipindah",
-      description: "Geser atau tambahkan AC/Kipas pada workspace Sirkulasi Udara hingga skor kenyamanan udara ≥ 80.",
+      description: "Geser atau tambahkan AC/Kipas pada panel Udara di Build Mode hingga skor kenyamanan udara ≥ 80.",
       done: airflow.airflowScore >= 80,
-      targetWorkspace: "airflow",
+      targetWorkspace: "build",
     },
     {
       id: "q-flood",
@@ -120,7 +120,7 @@ export function evaluateGamification(
         derived.project.floodMitigation.backflowValve &&
         derived.project.floodMitigation.infiltrationWells >= 1 &&
         derived.project.floodMitigation.outletHeightM >= 0.9,
-      targetWorkspace: "flood",
+      targetWorkspace: "build",
     },
     {
       id: "q-budget",

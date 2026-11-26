@@ -35,7 +35,6 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
   const brick = sys.brick;
   const sp = project.structuralParams;
   const soil = project.site.soil;
-  const isPro = project.gamification.mode === "pro";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -212,17 +211,15 @@ export function InspectorPanel({ derived }: { derived: DerivedProjectModel }) {
                   value={brick.mortarMm}
                   onChange={(v) => patchBrickSpec({ mortarMm: v })}
                 />
-                {isPro && (
-                  <StudioRange
-                    label="Faktor Waste Potongan"
-                    display={`${brick.wastePct}%`}
-                    min={0}
-                    max={20}
-                    step={1}
-                    value={brick.wastePct}
-                    onChange={(v) => patchBrickSpec({ wastePct: v })}
-                  />
-                )}
+                <StudioRange
+                  label="Faktor Waste Potongan"
+                  display={`${brick.wastePct}%`}
+                  min={0}
+                  max={20}
+                  step={1}
+                  value={brick.wastePct}
+                  onChange={(v) => patchBrickSpec({ wastePct: v })}
+                />
                 <div className="rounded-lg bg-black/25 px-2.5 py-2 text-[10.5px] leading-snug text-muted-foreground">
                   Luas bersih 2 lantai: <b className="font-mono text-foreground tabular-nums">{fmtNum(derived.totalNetFloorM2, 2)} m²</b> (tebal bata memakai{" "}
                   <b className="font-mono text-amber-300 tabular-nums">{fmtNum(derived.totalWallDeductionM2, 2)} m²</b>).

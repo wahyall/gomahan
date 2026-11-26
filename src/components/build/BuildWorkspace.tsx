@@ -1,17 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  Box,
+  Boxes,
   BrickWall,
+  Check,
   ChevronDown,
+  CloudRain,
   Compass,
   Copy,
+  Droplets,
   Eye,
   Footprints,
+  GitCompare,
   Grid3x3,
   Hammer,
   HelpCircle,
   Home,
+  Landmark,
   Layers,
   Moon,
   MousePointer2,
@@ -20,6 +28,7 @@ import {
   RotateCw,
   Save,
   Search,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Sun,
@@ -28,6 +37,9 @@ import {
   Wind,
 } from "lucide-react";
 import { toast } from "sonner";
+import { StudioSidePanel } from "@/components/build/StudioSidePanel";
+import { PartInfoPanel } from "@/components/panels/PartInfoPanel";
+import { StageTimelineBar } from "@/components/panels/StageTimelineBar";
 import {
   BuildScene,
   UNIFIED_BUILD_CATALOG,
@@ -42,19 +54,22 @@ import { simsAudio } from "@/lib/audio/simsAudio";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { PAINT_SWATCHES, ROOF_SWATCHES } from "@/lib/model/catalog";
 import type { RoofType } from "@/lib/model/types";
+import type { RabSummary } from "@/lib/quantities/rabEngine";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
+import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
-import { useStudioStore } from "@/lib/store/useStudioStore";
+import { useStudioStore, type CameraPreset, type StudioPanelId } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { cn } from "@/lib/utils";
 
 interface BuildWorkspaceProps {
   derived: DerivedProjectModel;
   struct: StructuralReport;
-  lighting?: LightingSimulationResult;
-  airflow?: AirflowSimulationResult;
-  buildSniOpen?: boolean;
-  onToggleBuildSni?: () => void;
+  rab: RabSummary;
+  lighting: LightingSimulationResult;
+  airflow: AirflowSimulationResult;
+  flood: FloodSimulationResult;
+  onCanvasReady?: (canvas: HTMLCanvasElement | null) => void;
   onSnapshotCapture?: (dataUrl: string) => void;
 }
 
@@ -172,18 +187,21 @@ function ItemThumbnail({ item }: { item: BuildCatalogEntry }) {
 export function BuildWorkspace({
   derived,
   struct,
+  rab,
   lighting,
   airflow,
-  buildSniOpen = false,
-  onToggleBuildSni,
+  flood,
+  onCanvasReady,
   onSnapshotCapture,
 }: BuildWorkspaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<BuildScene | null>(null);
   const onSnapshotRef = useRef(onSnapshotCapture);
+  const onCanvasReadyRef = useRef(onCanvasReady);
   useEffect(() => {
     onSnapshotRef.current = onSnapshotCapture;
-  }, [onSnapshotCapture]);
+    onCanvasReadyRef.current = onCanvasReady;
+  }, [onSnapshotCapture, onCanvasReady]);
 
   const project = derived.project;
   const selected = useStudioStore((s) => s.selected);
@@ -191,6 +209,10 @@ export function BuildWorkspace({
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
   const view = useStudioStore((s) => s.view);
   const patchView = useStudioStore((s) => s.patchView);
+  const studioPanel = useStudioStore((s) => s.studioPanel);
+  const setStudioPanel = useStudioStore((s) => s.setStudioPanel);
+  const stageTimelineOpen = useStudioStore((s) => s.stageTimelineOpen);
+  const setStageTimelineOpen = useStudioStore((s) => s.setStageTimelineOpen);
 
   const activeLevel = useBuildModeStore((s) => s.activeLevel);
   const wallVisibility = useBuildModeStore((s) => s.wallVisibility);
@@ -209,6 +231,10 @@ export function BuildWorkspace({
   const hover = useBuildModeStore((s) => s.hover);
   const previewHud = useBuildModeStore((s) => s.previewHud);
   const savedCameraSnapshot = useBuildModeStore((s) => s.savedCameraSnapshot);
+  const rtLook = useBuildModeStore((s) => s.rtLook);
+  const renderTier = useBuildModeStore((s) => s.renderTier);
+  const setRtLook = useBuildModeStore((s) => s.setRtLook);
+  const setRenderTier = useBuildModeStore((s) => s.setRenderTier);
 
   const setActiveLevel = useBuildModeStore((s) => s.setActiveLevel);
   const stepLevel = useBuildModeStore((s) => s.stepLevel);
@@ -229,6 +255,8 @@ export function BuildWorkspace({
   const setHover = useBuildModeStore((s) => s.setHover);
   const setPreviewHud = useBuildModeStore((s) => s.setPreviewHud);
   const saveCameraSnapshot = useBuildModeStore((s) => s.saveCameraSnapshot);
+  const baselineProject = useStudioStore((s) => s.baselineProject);
+  const lockBaseline = useStudioStore((s) => s.lockBaseline);
 
   const [query, setQuery] = useState("");
   const [stats, setStats] = useState<BuildSceneStats | null>(null);
@@ -301,6 +329,7 @@ export function BuildWorkspace({
       });
       if (savedCameraSnapshot) bs.cameraCtrl.applySnapshot(savedCameraSnapshot);
       sceneRef.current = bs;
+      onCanvasReadyRef.current?.(canvas);
       return () => {
         saveCameraSnapshot(bs.cameraCtrl.getSnapshot());
         try {
@@ -310,6 +339,7 @@ export function BuildWorkspace({
         } catch {
           // ignore readback failure
         }
+        onCanvasReadyRef.current?.(null);
         bs.dispose();
         sceneRef.current = null;
       };
@@ -323,8 +353,17 @@ export function BuildWorkspace({
   }, []);
 
   useEffect(() => {
-    sceneRef.current?.updateProjectData(derived, struct, selected, view, lighting, airflow);
-  }, [derived, struct, selected, view, lighting, airflow]);
+    sceneRef.current?.updateProjectData(derived, struct, selected, view, lighting, airflow, flood);
+  }, [derived, struct, selected, view, lighting, airflow, flood]);
+
+  // Cinematic RT-look & quality tier are pushed into the scene whenever they change
+  useEffect(() => {
+    sceneRef.current?.setRayTracingLook(rtLook);
+  }, [rtLook]);
+
+  useEffect(() => {
+    sceneRef.current?.setQualityOverride(renderTier);
+  }, [renderTier]);
 
   useEffect(() => {
     sceneRef.current?.setViewOptions({
@@ -507,10 +546,9 @@ export function BuildWorkspace({
       } else if (e.key === "Escape") {
         if (resetModalOpen) setResetModalOpen(false);
         else if (helpOpen) setHelpOpen(false);
-        else {
-          setSelected(null);
-          selectCatalogById("tool_select");
-        }
+        else if (selected) setSelected(null);
+        else if (studioPanel !== "none") setStudioPanel("none");
+        else selectCatalogById("tool_select");
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -524,11 +562,24 @@ export function BuildWorkspace({
     selectCatalogById,
     handleRotateSelected,
     selected,
+    studioPanel,
+    setStudioPanel,
     handleDeleteSelected,
     resetModalOpen,
     helpOpen,
     setSelected,
   ]);
+
+  const handleFocusFoundation = useCallback(() => {
+    patchView({ showTerrain: false, showStructure: true });
+    sceneRef.current?.cameraCtrl.setPreset("foundation");
+    simsAudio.play("select");
+  }, [patchView]);
+
+  const handleCameraPreset = useCallback((preset: CameraPreset) => {
+    sceneRef.current?.cameraCtrl.setPreset(preset);
+    simsAudio.play("select");
+  }, []);
 
   const filteredItems = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -539,6 +590,8 @@ export function BuildWorkspace({
 
   const activeItem = UNIFIED_BUILD_CATALOG.find((c) => c.id === selectedCatalogId) ?? UNIFIED_BUILD_CATALOG[0]!;
   const criticalCount = derived.validation.filter((v) => v.severity === "critical").length;
+  const floodActive = view.showFloodWater || view.showRain;
+  const floodDanger = flood.lt1FloorFloodCm > 0 || flood.electricalHazardMcb || flood.electricalHazardOutlets;
 
   const handleSelectItemClick = (item: BuildCatalogEntry) => {
     if (item.toolId === "roof" && item.roofType) {
@@ -551,296 +604,561 @@ export function BuildWorkspace({
     simsAudio.play("select");
   };
 
+  const panelTabs: { id: Exclude<StudioPanelId, "none">; label: string; icon: React.ElementType; badge?: number; dotClass?: string }[] = [
+    { id: "structure", label: "Struktur", icon: ShieldCheck, badge: criticalCount > 0 ? criticalCount : undefined },
+    { id: "lighting", label: "Cahaya", icon: Sun },
+    { id: "airflow", label: "Udara", icon: Wind },
+    { id: "flood", label: "Banjir", icon: CloudRain, dotClass: floodDanger ? "bg-rose-400" : flood.streetFloodCm > 0 ? "bg-cyan-400" : undefined },
+    { id: "inspection", label: "Inspeksi", icon: SlidersHorizontal },
+  ];
+
+  const layerChecklist: { key: "showAir" | "showListrik" | "showLabels" | "showDims" | "wireframe"; label: string }[] = [
+    { key: "showAir", label: "Jalur Pipa Air & Bio Septic" },
+    { key: "showListrik", label: "Jalur Kabel Listrik & PUIL" },
+    { key: "showLabels", label: "Label Ruangan 3D" },
+    { key: "showDims", label: "Garis Dimensi 3D" },
+    { key: "wireframe", label: "Mode Wireframe Struktur" },
+  ];
+
   return (
-    <div className="@container relative flex h-full w-full flex-1 flex-col overflow-hidden bg-[#10141a] select-none">
-      <canvas
-        ref={canvasRef}
-        className={cn("viewport-canvas touch-none h-full w-full flex-1", activeTool === "select" ? "cursor-pointer" : "cursor-crosshair")}
-      />
+    <div className="flex min-h-0 w-full flex-1 overflow-hidden bg-[#10141a]">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="@container relative flex min-h-0 w-full flex-1 flex-col overflow-hidden select-none">
+          <canvas
+            ref={canvasRef}
+            className={cn("viewport-canvas touch-none h-full w-full flex-1", activeTool === "select" ? "cursor-pointer" : "cursor-crosshair")}
+          />
 
-      {webglError && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#111418]/95 p-6 text-center">
-          <div className="studio-glass max-w-md rounded-2xl border-rose-500/40 p-6">
-            <h2 className="text-base font-bold text-rose-300">WebGL Tidak Tersedia</h2>
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{webglError}</p>
-          </div>
-        </div>
-      )}
-
-      {/* TOP HUD: 3 cleanly separated edge zones — corners lock top-left & top-right on every container width */}
-      <div className="pointer-events-none absolute inset-x-0 top-2.5 z-20 flex flex-wrap items-start justify-between gap-2 px-3">
-        {/* TOP-LEFT: SNI Drawer Toggle + Walk Shortcut */}
-        <div className="pointer-events-auto order-1 flex items-center gap-1 rounded-2xl p-1 studio-glass">
-          {onToggleBuildSni && (
-            <button
-              type="button"
-              onClick={onToggleBuildSni}
-              className={cn(
-                "flex h-7 items-center gap-1 rounded-xl px-2 text-[11px] font-semibold transition active:scale-[0.98] sm:h-8 sm:gap-1.5 sm:px-2.5 sm:text-xs",
-                buildSniOpen
-                  ? "bg-primary text-primary-foreground shadow-sm"
-                  : "text-foreground hover:bg-white/[0.08]",
-              )}
-              title="Buka Panel Data SNI Struktur & Ukuran Bata Custom"
-            >
-              <SlidersHorizontal className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">{buildSniOpen ? "Tutup SNI" : "SNI & Bata"}</span>
-              <span className="sm:hidden">{buildSniOpen ? "Tutup" : "SNI"}</span>
-              {criticalCount > 0 && (
-                <span className="rounded-full bg-rose-500 px-1.5 py-0.2 font-mono text-[10px] font-bold text-white">
-                  {criticalCount}
-                </span>
-              )}
-            </button>
+          {webglError && (
+            <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#111418]/95 p-6 text-center">
+              <div className="studio-glass max-w-md rounded-2xl border-rose-500/40 p-6">
+                <h2 className="text-base font-bold text-rose-300">WebGL Tidak Tersedia</h2>
+                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{webglError}</p>
+              </div>
+            </div>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              simsAudio.play("select");
-              setWorkspace("walk");
-            }}
-            title="Masuk Walk Mode Orang Pertama / Ketiga (Shift+V)"
-            className="flex h-7 items-center gap-1.5 rounded-xl bg-white/[0.06] px-2 text-xs font-medium text-foreground transition hover:bg-white/[0.12] active:scale-[0.98] sm:h-8 sm:px-2.5"
-          >
-            <Footprints className="h-3.5 w-3.5 text-primary" />
-            <span className="hidden sm:inline">Walk Mode</span>
-          </button>
-        </div>
 
-        {/* TOP-CENTER: Unified Edit Tools & Live Simulation Overlays */}
-        <div className="order-3 flex w-full justify-center @[1240px]:order-2 @[1240px]:w-auto">
-          <div className="no-scrollbar pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto scroll-smooth rounded-2xl p-1 studio-glass">
-          <button
-            type="button"
-            onClick={() => {
-              selectCatalogById("tool_select");
-              simsAudio.play("select");
-            }}
-            title="Mode Pilih & Geser Objek 3D (V / Esc)"
-            className={cn(
-              "flex h-8 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition active:scale-[0.98]",
-              activeTool === "select"
-                ? "bg-[#f2efe8] text-[#14171c] shadow-sm"
-                : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
-            )}
-          >
-            <MousePointer2 className="h-3.5 w-3.5" />
-            <span>Pilih</span>
-            <kbd className="hidden rounded bg-black/15 px-1 font-mono text-[9.5px] sm:inline">V</kbd>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              selectCatalogById("tool_sledgehammer");
-              simsAudio.play("select");
-            }}
-            title="Palu Hapus Elemen (K / Del)"
-            className={cn(
-              "flex h-8 items-center gap-1 rounded-xl px-2.5 text-xs font-medium transition active:scale-[0.98]",
-              activeTool === "sledgehammer"
-                ? "bg-rose-500/25 text-rose-200 ring-1 ring-rose-400/50"
-                : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
-            )}
-          >
-            <Hammer className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Hapus</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              selectCatalogById("tool_eyedropper");
-              simsAudio.play("select");
-            }}
-            title="Pipet Salin Material/Objek (I)"
-            className={cn(
-              "flex h-8 items-center gap-1 rounded-xl px-2.5 text-xs font-medium transition active:scale-[0.98]",
-              activeTool === "eyedropper"
-                ? "bg-primary/25 text-[#f6ba86] ring-1 ring-primary/50"
-                : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
-            )}
-          >
-            <Pipette className="h-3.5 w-3.5" />
-            <span className="hidden md:inline">Pipet</span>
-          </button>
-
-          <span className="mx-1 h-4 w-px bg-white/10" aria-hidden />
-
-          <OverlayBtn active={gridVisible} onClick={toggleGrid} title="Tampilkan Grid 0.5 m (G)">
-            <Grid3x3 className="h-3.5 w-3.5" />
-            <span className="hidden md:inline">Grid</span>
-          </OverlayBtn>
-
-          <OverlayBtn active={showBricksOverlay} onClick={toggleBricksOverlay} title="Susunan Bata Hebel/Merah Asli">
-            <BrickWall className="h-3.5 w-3.5" />
-            <span className="hidden lg:inline">Bata</span>
-          </OverlayBtn>
-
-          <OverlayBtn
-            active={view.showLuxHeatmap}
-            tone="amber"
-            onClick={() => patchView({ showLuxHeatmap: !view.showLuxHeatmap })}
-            title="Overlay Heatmap Pencahayaan (Lux)"
-          >
-            <Sun className="h-3.5 w-3.5" />
-            <span className="hidden xl:inline">Lux</span>
-          </OverlayBtn>
-
-          <OverlayBtn
-            active={view.showAirParticles}
-            tone="teal"
-            onClick={() => patchView({ showAirParticles: !view.showAirParticles })}
-            title="Overlay Partikel Aliran Angin & AC/Kipas"
-          >
-            <Wind className="h-3.5 w-3.5" />
-            <span className="hidden xl:inline">Angin</span>
-          </OverlayBtn>
-
-          <OverlayBtn active={snap90Enabled} onClick={toggleSnap90} title="Kunci Sudut 90° saat Menggambar">
-            <Compass className="h-3.5 w-3.5" />
-            <span className="hidden xl:inline">90°</span>
-          </OverlayBtn>
-
-          <OverlayBtn active={neighborsVisible} onClick={toggleNeighbors} title="Tampilkan Dinding Batas Tetangga" className="hidden sm:flex">
-            <Layers className="h-3.5 w-3.5" />
-            <span className="hidden 2xl:inline">Tetangga</span>
-          </OverlayBtn>
-
-          <OverlayBtn active={edgeScrollEnabled} onClick={toggleEdgeScroll} title="Geser Kamera di Tepi Layar" className="hidden lg:flex">
-            <span className="font-mono text-[10px]">Pan</span>
-          </OverlayBtn>
-
-          <span className="mx-1 h-4 w-px bg-white/10" aria-hidden />
-
-          <button
-            type="button"
-            onClick={() => setResetModalOpen(true)}
-            title="Atur Ulang atau Kosongkan Kavling 5×17 m"
-            className="flex h-8 w-8 items-center justify-center rounded-xl text-rose-300/80 transition hover:bg-rose-500/15 hover:text-rose-200"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setHelpOpen((v) => !v)}
-            title="Pintasan Keyboard & Panduan Cepat"
-            className={cn(
-              "flex h-8 w-8 items-center justify-center rounded-xl transition",
-              helpOpen ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
-            )}
-          >
-            <HelpCircle className="h-3.5 w-3.5" />
-          </button>
-          </div>
-        </div>
-
-        {/* TOP-RIGHT: Direct Floor Jump + Wall Cutaway + Camera Controls */}
-        <div className="pointer-events-auto order-2 flex shrink-0 flex-col items-end gap-2 @[1240px]:order-3">
-          <div className="flex flex-col gap-1 rounded-2xl p-1.5 sm:gap-1.5 sm:p-2 studio-glass">
-            {/* Direct Floor Selector (LT1 / LT2 / Atap) */}
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex flex-1 items-center gap-0.5 rounded-lg bg-black/30 p-0.5">
-                {([
-                  [0, "LT 1"],
-                  [1, "LT 2"],
-                  [2, "Atap"],
-                ] as const).map(([lvl, label]) => (
+          {/* TOP HUD: 3 cleanly separated edge zones */}
+          <div className="pointer-events-none absolute inset-x-0 top-2.5 z-20 flex flex-wrap items-start justify-between gap-2 px-3">
+            {/* TOP-LEFT: Unified Simulation/Analysis Panel Switcher + Walk Mode */}
+            <div className="pointer-events-auto order-1 flex max-w-full items-center gap-0.5 overflow-x-auto rounded-2xl p-1 studio-glass">
+              {panelTabs.map((t) => {
+                const Icon = t.icon;
+                const active = studioPanel === t.id;
+                return (
                   <button
-                    key={lvl}
+                    key={t.id}
                     type="button"
-                    onClick={() => {
-                      setActiveLevel(lvl);
-                      simsAudio.play("select");
-                    }}
-                    title={`Pindah ke ${label} (PgUp/PgDn)`}
+                    onClick={() => setStudioPanel(active ? "none" : t.id)}
                     className={cn(
-                      "flex-1 whitespace-nowrap rounded-md px-2 py-1 text-[10.5px] font-semibold transition sm:text-[11px]",
-                      activeLevel === lvl
-                        ? "bg-[#f2efe8] text-[#14171c] shadow-sm"
-                        : "text-muted-foreground hover:text-foreground",
+                      "relative flex h-7 shrink-0 items-center gap-1 rounded-xl px-2 text-[11px] font-medium transition active:scale-[0.98] sm:h-8 sm:px-2.5",
+                      active
+                        ? "bg-[#f2efe8] font-semibold text-[#14171c] shadow-sm"
+                        : "text-foreground/90 hover:bg-white/[0.08] hover:text-foreground",
                     )}
+                    title={`Buka / tutup panel ${t.label}`}
                   >
-                    {label}
+                    <Icon className={cn("h-3.5 w-3.5 shrink-0", active ? "text-[#b9662a]" : "opacity-85")} aria-hidden />
+                    <span className="hidden sm:inline">{t.label}</span>
+                    {t.badge !== undefined && (
+                      <span className="rounded-full bg-rose-500 px-1 font-mono text-[9.5px] font-bold text-white">
+                        {t.badge}
+                      </span>
+                    )}
+                    {t.dotClass && <span className={cn("h-1.5 w-1.5 rounded-full", t.dotClass)} />}
                   </button>
-                ))}
+                );
+              })}
+
+              <span className="mx-0.5 h-4 w-px shrink-0 bg-white/15" aria-hidden />
+
+              <button
+                type="button"
+                onClick={() => {
+                  simsAudio.play("select");
+                  setWorkspace("walk");
+                }}
+                title="Masuk Walk Mode Orang Pertama / Ketiga (Shift+V)"
+                className="flex h-7 shrink-0 items-center gap-1 rounded-xl bg-white/[0.06] px-2 text-[11px] font-medium text-foreground transition hover:bg-white/[0.12] active:scale-[0.98] sm:h-8 sm:px-2.5"
+              >
+                <Footprints className="h-3.5 w-3.5 text-primary" />
+                <span className="hidden md:inline">Walk</span>
+              </button>
+            </div>
+
+            {/* TOP-CENTER: Unified Build Tools & Live 3D Analysis Overlays */}
+            <div className="order-3 flex w-full justify-center @[1360px]:order-2 @[1360px]:w-auto">
+              <div className="no-scrollbar pointer-events-auto flex max-w-full items-center gap-0.5 overflow-x-auto scroll-smooth rounded-2xl p-1 studio-glass">
+              <button
+                type="button"
+                onClick={() => {
+                  selectCatalogById("tool_select");
+                  simsAudio.play("select");
+                }}
+                title="Mode Pilih & Geser Objek 3D (V / Esc)"
+                className={cn(
+                  "flex h-8 shrink-0 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition active:scale-[0.98]",
+                  activeTool === "select"
+                    ? "bg-[#f2efe8] text-[#14171c] shadow-sm"
+                    : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
+                )}
+              >
+                <MousePointer2 className="h-3.5 w-3.5" />
+                <span>Pilih</span>
+                <kbd className="hidden rounded bg-black/15 px-1 font-mono text-[9.5px] sm:inline">V</kbd>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  selectCatalogById("tool_sledgehammer");
+                  simsAudio.play("select");
+                }}
+                title="Palu Hapus Elemen (K / Del)"
+                className={cn(
+                  "flex h-8 shrink-0 items-center gap-1 rounded-xl px-2 text-xs font-medium transition active:scale-[0.98]",
+                  activeTool === "sledgehammer"
+                    ? "bg-rose-500/25 text-rose-200 ring-1 ring-rose-400/50"
+                    : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
+                )}
+              >
+                <Hammer className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Hapus</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  selectCatalogById("tool_eyedropper");
+                  simsAudio.play("select");
+                }}
+                title="Pipet Salin Material/Objek (I)"
+                className={cn(
+                  "flex h-8 shrink-0 items-center gap-1 rounded-xl px-2 text-xs font-medium transition active:scale-[0.98]",
+                  activeTool === "eyedropper"
+                    ? "bg-primary/25 text-[#f6ba86] ring-1 ring-primary/50"
+                    : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
+                )}
+              >
+                <Pipette className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">Pipet</span>
+              </button>
+
+              <span className="mx-1 h-4 w-px shrink-0 bg-white/10" aria-hidden />
+
+              <OverlayBtn
+                active={!view.showTerrain}
+                tone="amber"
+                onClick={() => patchView({ showTerrain: !view.showTerrain })}
+                title={view.showTerrain ? "Sembunyikan tanah untuk inspeksi pondasi" : "Tampilkan kembali tanah & halaman"}
+              >
+                <Layers className="h-3.5 w-3.5" />
+                <span>{view.showTerrain ? "Tanah" : "Tanah Off"}</span>
+              </OverlayBtn>
+
+              <button
+                type="button"
+                onClick={handleFocusFoundation}
+                title="Sembunyikan tanah & arahkan kamera ke struktur pondasi"
+                className="flex h-8 shrink-0 items-center gap-1 rounded-xl bg-white/[0.05] px-2 text-xs font-medium text-amber-200 transition hover:bg-amber-500/20"
+              >
+                <Landmark className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">Pondasi</span>
+              </button>
+
+              <OverlayBtn active={gridVisible} onClick={toggleGrid} title="Tampilkan Grid 0.5 m (G)">
+                <Grid3x3 className="h-3.5 w-3.5" />
+                <span className="hidden 2xl:inline">Grid</span>
+              </OverlayBtn>
+
+              <OverlayBtn active={showBricksOverlay} onClick={toggleBricksOverlay} title="Susunan Bata Hebel/Merah Asli">
+                <BrickWall className="h-3.5 w-3.5" />
+                <span className="hidden 2xl:inline">Bata</span>
+              </OverlayBtn>
+
+              <OverlayBtn
+                active={view.xrayRebar}
+                tone="amber"
+                onClick={() => patchView({ xrayRebar: !view.xrayRebar, showStructure: true })}
+                title="X-Ray Besi Tulangan Pondasi, Kolom & Balok"
+              >
+                <Boxes className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">Besi</span>
+              </OverlayBtn>
+
+              <OverlayBtn
+                active={view.explode > 0.05}
+                onClick={() => patchView({ explode: view.explode > 0.05 ? 0 : 1 })}
+                title="Bongkar Lapisan Konstruksi (Exploded View)"
+              >
+                <Box className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">Bongkar</span>
+              </OverlayBtn>
+
+              <OverlayBtn
+                active={view.showLuxHeatmap}
+                tone="amber"
+                onClick={() => patchView({ showLuxHeatmap: !view.showLuxHeatmap })}
+                title="Overlay Heatmap Pencahayaan (Lux)"
+              >
+                <Sun className="h-3.5 w-3.5" />
+                <span className="hidden 2xl:inline">Lux</span>
+              </OverlayBtn>
+
+              <OverlayBtn
+                active={view.showAirParticles}
+                tone="teal"
+                onClick={() => patchView({ showAirParticles: !view.showAirParticles })}
+                title="Overlay Partikel Aliran Angin & AC/Kipas"
+              >
+                <Wind className="h-3.5 w-3.5" />
+                <span className="hidden 2xl:inline">Angin</span>
+              </OverlayBtn>
+
+              <OverlayBtn
+                active={floodActive}
+                tone="cyan"
+                onClick={() => patchView({ showFloodWater: !floodActive, showRain: !floodActive })}
+                title="Overlay Air Banjir & Hujan 3D"
+              >
+                <Droplets className="h-3.5 w-3.5" />
+                <span className="hidden 2xl:inline">Banjir</span>
+              </OverlayBtn>
+
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    title="Lapisan MEP, Dimensi, 10 Tahap Konstruksi & Opsi Kamera"
+                    className="flex h-8 shrink-0 items-center gap-1 rounded-xl px-2 text-xs font-medium text-muted-foreground transition hover:bg-white/[0.08] hover:text-foreground"
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                    <span className="hidden lg:inline">Lapisan</span>
+                    <ChevronDown className="h-3 w-3 opacity-70" />
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    align="center"
+                    sideOffset={6}
+                    className="studio-glass z-50 w-60 rounded-xl p-1.5 text-xs shadow-2xl"
+                  >
+                    {layerChecklist.map((item) => {
+                      const active = view[item.key];
+                      return (
+                        <DropdownMenu.Item
+                          key={item.key}
+                          onSelect={(e) => {
+                            e.preventDefault();
+                            patchView({ [item.key]: !active });
+                          }}
+                          className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                        >
+                          <span>{item.label}</span>
+                          {active && <Check className="h-3.5 w-3.5 text-primary" />}
+                        </DropdownMenu.Item>
+                      );
+                    })}
+                    <DropdownMenu.Item
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        const next = !stageTimelineOpen;
+                        setStageTimelineOpen(next);
+                        if (!next && view.stage > 0) patchView({ stage: 0 });
+                      }}
+                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                    >
+                      <span>Timeline 10 Tahap Konstruksi</span>
+                      {(stageTimelineOpen || view.stage > 0) && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-px bg-white/[0.08]" />
+                    <DropdownMenu.Item
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        patchView({ beforeAfterEnabled: !view.beforeAfterEnabled });
+                      }}
+                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                    >
+                      <span className="flex items-center gap-1.5"><GitCompare className="h-3.5 w-3.5 opacity-75" /> Bandingkan Baseline vs Revisi</span>
+                      {view.beforeAfterEnabled && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-px bg-white/[0.08]" />
+                    <DropdownMenu.Item
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        toggleSnap90();
+                      }}
+                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                    >
+                      <span className="flex items-center gap-1.5"><Compass className="h-3.5 w-3.5 opacity-75" /> Kunci Sudut 90°</span>
+                      {snap90Enabled && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        toggleNeighbors();
+                      }}
+                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                    >
+                      <span>Tampilkan Dinding Tetangga</span>
+                      {neighborsVisible && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Item
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        toggleEdgeScroll();
+                      }}
+                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                    >
+                      <span>Geser Kamera Tepi Layar</span>
+                      {edgeScrollEnabled && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-px bg-white/[0.08]" />
+                    <DropdownMenu.Item
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        setRtLook(!rtLook);
+                      }}
+                      className="flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 outline-none transition hover:bg-white/[0.08] focus:bg-white/[0.08]"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <Sparkles className="h-3.5 w-3.5 text-amber-300/90" />
+                        Render Sinematik (Ray-Traced Look)
+                      </span>
+                      {rtLook && <Check className="h-3.5 w-3.5 text-primary" />}
+                    </DropdownMenu.Item>
+                    <div className="px-2.5 pb-1.5 pt-1">
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Kualitas Render
+                      </div>
+                      <div className="flex items-center gap-0.5 rounded-lg bg-black/30 p-0.5">
+                        {([
+                          ["auto", "Auto"],
+                          ["high", "Tinggi"],
+                          ["medium", "Sedang"],
+                          ["low", "Hemat"],
+                        ] as const).map(([tier, label]) => (
+                          <button
+                            key={tier}
+                            type="button"
+                            onClick={() => setRenderTier(tier)}
+                            className={cn(
+                              "flex-1 rounded-md px-1.5 py-1 text-[10px] font-semibold transition",
+                              renderTier === tier
+                                ? "bg-[#f2efe8] text-[#14171c] shadow-sm"
+                                : "text-muted-foreground hover:text-foreground",
+                            )}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-1.5 text-[9.5px] leading-relaxed text-muted-foreground">
+                        {rtLook
+                          ? "GTAO, berkas matahari, bloom HDR & MSAA aktif sesuai tier (mode Banjir/hujan mematikan GTAO otomatis)."
+                          : "Mode kompatibilitas: render langsung tanpa pasca-pemrosesan."}
+                      </p>
+                    </div>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+
+              <span className="mx-1 h-4 w-px shrink-0 bg-white/10" aria-hidden />
+
+              <button
+                type="button"
+                onClick={() => setResetModalOpen(true)}
+                title="Atur Ulang atau Kosongkan Kavling 5×17 m"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-rose-300/80 transition hover:bg-rose-500/15 hover:text-rose-200"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setHelpOpen((v) => !v)}
+                title="Pintasan Keyboard & Panduan Cepat"
+                className={cn(
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition",
+                  helpOpen ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-white/[0.08] hover:text-foreground",
+                )}
+              >
+                <HelpCircle className="h-3.5 w-3.5" />
+              </button>
               </div>
             </div>
 
-            {/* Wall Cutaway Mode */}
-            <div className="flex items-center gap-0.5 rounded-lg bg-black/30 p-0.5">
-              {WALL_MODES.map((wm) => (
-                <button
-                  key={wm.id}
-                  type="button"
-                  title={wm.hint}
-                  onClick={() => {
-                    setWallVisibility(wm.id);
-                    simsAudio.play("select");
-                  }}
-                  className={cn(
-                    "flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition",
-                    wallVisibility === wm.id
-                      ? "bg-primary text-primary-foreground font-semibold shadow-sm"
-                      : "text-muted-foreground hover:text-foreground",
+            {/* TOP-RIGHT: Floor Jump + Wall Cutaway + Mode Struktur Camera Cube & Ortho */}
+            <div className="pointer-events-auto order-2 flex shrink-0 flex-col items-end gap-2 @[1360px]:order-3">
+              <div className="flex flex-col gap-1 rounded-2xl p-1.5 sm:gap-1.5 sm:p-2 studio-glass">
+                {/* Direct Floor Selector (LT1 / LT2 / Atap) */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-1 items-center gap-0.5 rounded-lg bg-black/30 p-0.5">
+                    {([
+                      [0, "LT 1"],
+                      [1, "LT 2"],
+                      [2, "Atap"],
+                    ] as const).map(([lvl, label]) => (
+                      <button
+                        key={lvl}
+                        type="button"
+                        onClick={() => {
+                          setActiveLevel(lvl);
+                          simsAudio.play("select");
+                        }}
+                        title={`Pindah ke ${label} (PgUp/PgDn)`}
+                        className={cn(
+                          "flex-1 whitespace-nowrap rounded-md px-2 py-1 text-[10.5px] font-semibold transition sm:text-[11px]",
+                          activeLevel === lvl
+                            ? "bg-[#f2efe8] text-[#14171c] shadow-sm"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Wall Cutaway Mode */}
+                <div className="flex items-center gap-0.5 rounded-lg bg-black/30 p-0.5">
+                  {WALL_MODES.map((wm) => (
+                    <button
+                      key={wm.id}
+                      type="button"
+                      title={wm.hint}
+                      onClick={() => {
+                        setWallVisibility(wm.id);
+                        simsAudio.play("select");
+                      }}
+                      className={cn(
+                        "flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition",
+                        wallVisibility === wm.id
+                          ? "bg-primary text-primary-foreground font-semibold shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      <WallModeIcon mode={wm.id} />
+                      <span className="hidden sm:inline">{wm.label}</span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Roof Visibility + Persp/Orto + Quick Orbit */}
+                <div className="hidden items-center justify-between gap-1.5 pt-0.5 sm:flex">
+                  <div className="flex items-center gap-0.5">
+                    {(["auto", "show", "hide"] as RoofVisibilityMode[]).map((rm) => (
+                      <button
+                        key={rm}
+                        type="button"
+                        onClick={() => setRoofVisibility(rm)}
+                        className={cn(
+                          "rounded-md px-1.5 py-0.5 text-[10px] font-medium transition",
+                          roofVisibility === rm
+                            ? "bg-primary/20 text-[#f6ba86] ring-1 ring-primary/40"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {rm === "auto" ? "Atap Auto" : rm === "show" ? "On" : "Off"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      type="button"
+                      onClick={() => patchView({ ortho: !view.ortho })}
+                      title="Ganti proyeksi Perspektif / Ortografis (CAD)"
+                      className={cn(
+                        "flex h-7 items-center rounded-md px-1.5 font-mono text-[10px] font-semibold transition",
+                        view.ortho ? "bg-primary/25 text-[#f6ba86] ring-1 ring-primary/40" : "bg-white/[0.06] text-foreground hover:bg-white/[0.14]",
+                      )}
+                    >
+                      {view.ortho ? "Orto" : "Persp"}
+                    </button>
+                    <button
+                      type="button"
+                      title="Putar Kamera 90° Kiri (Q)"
+                      aria-label="Putar Kamera 90° Kiri"
+                      onClick={() => sceneRef.current?.cameraCtrl.rotateQuarter(-1)}
+                      className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Putar Kamera 90° Kanan (E)"
+                      aria-label="Putar Kamera 90° Kanan"
+                      onClick={() => sceneRef.current?.cameraCtrl.rotateQuarter(1)}
+                      className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
+                    >
+                      <RotateCw className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Reset Sudut Kamera"
+                      onClick={() => sceneRef.current?.cameraCtrl.resetOverview()}
+                      className="flex h-7 items-center justify-center rounded-md bg-white/[0.06] px-2 text-[10.5px] font-medium text-foreground hover:bg-white/[0.14]"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+
+                {/* View Cube Presets (from Mode Struktur) */}
+                <div className="hidden grid-cols-6 gap-0.5 rounded-lg bg-black/30 p-0.5 sm:grid">
+                  {([
+                    ["3d", "3/4"],
+                    ["top", "Atas"],
+                    ["front", "Depan"],
+                    ["side", "Samp"],
+                    ["back", "Blkg"],
+                    ["foundation", "Dasar"],
+                  ] as [CameraPreset, string][]).map(([preset, lbl]) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => (preset === "foundation" ? handleFocusFoundation() : handleCameraPreset(preset))}
+                      title={`Preset kamera: ${lbl}`}
+                      className="rounded px-1 py-0.5 text-center font-mono text-[9.5px] font-medium text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Active Terrain / Section / Explode Pill when non-default */}
+              {(!view.showTerrain || view.explode > 0.05 || view.cutH < 9.15) && (
+                <div className="flex flex-wrap items-center justify-end gap-1 rounded-xl border border-amber-400/35 bg-[#1b1812]/90 px-2.5 py-1 text-[10.5px] text-amber-200 backdrop-blur-md">
+                  {!view.showTerrain && (
+                    <button
+                      type="button"
+                      onClick={() => patchView({ showTerrain: true })}
+                      className="font-semibold underline decoration-amber-400/60 underline-offset-2 hover:text-white"
+                    >
+                      Tanah Tersembunyi (Tampilkan)
+                    </button>
                   )}
-                >
-                  <WallModeIcon mode={wm.id} />
-                  <span className="hidden sm:inline">{wm.label}</span>
-                </button>
-              ))}
-            </div>
-
-            {/* Roof Visibility + Camera Orbit (desktop & tablet) */}
-            <div className="hidden items-center justify-between gap-2 pt-0.5 sm:flex">
-              <div className="flex items-center gap-0.5">
-                {(["auto", "show", "hide"] as RoofVisibilityMode[]).map((rm) => (
-                  <button
-                    key={rm}
-                    type="button"
-                    onClick={() => setRoofVisibility(rm)}
-                    className={cn(
-                      "rounded-md px-1.5 py-0.5 text-[10px] font-medium transition",
-                      roofVisibility === rm
-                        ? "bg-primary/20 text-[#f6ba86] ring-1 ring-primary/40"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {rm === "auto" ? "Atap Auto" : rm === "show" ? "On" : "Off"}
-                  </button>
-                ))}
-              </div>
-              <div className="flex items-center gap-0.5">
-                <button
-                  type="button"
-                  title="Putar Kamera 90° Kiri (Q)"
-                  aria-label="Putar Kamera 90° Kiri"
-                  onClick={() => sceneRef.current?.cameraCtrl.rotateQuarter(-1)}
-                  className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
-                >
-                  <RotateCcw className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  title="Putar Kamera 90° Kanan (E)"
-                  aria-label="Putar Kamera 90° Kanan"
-                  onClick={() => sceneRef.current?.cameraCtrl.rotateQuarter(1)}
-                  className="flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.06] text-foreground hover:bg-white/[0.14]"
-                >
-                  <RotateCw className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  title="Reset Sudut Kamera"
-                  onClick={() => sceneRef.current?.cameraCtrl.resetOverview()}
-                  className="flex h-7 items-center justify-center rounded-md bg-white/[0.06] px-2 text-[10.5px] font-medium text-foreground hover:bg-white/[0.14]"
-                >
-                  Reset
-                </button>
-              </div>
-            </div>
-          </div>
+                  {view.explode > 0.05 && (
+                    <button
+                      type="button"
+                      onClick={() => patchView({ explode: 0 })}
+                      className="font-mono hover:text-white"
+                    >
+                      · Bongkar {Math.round(view.explode * 100)}% (Reset)
+                    </button>
+                  )}
+                  {view.cutH < 9.15 && (
+                    <button
+                      type="button"
+                      onClick={() => patchView({ cutH: 9.2 })}
+                      className="font-mono hover:text-white"
+                    >
+                      · Potong {view.cutH.toFixed(1)}m (Reset)
+                    </button>
+                  )}
+                </div>
+              )}
 
           {/* Contextual Selected Object Card OR Live Hover Coordinates */}
           {(selectedDetails || (hover && hover.inBounds) || activeTool === "select") && (
@@ -1107,7 +1425,38 @@ export function BuildWorkspace({
               </span>
             )}
           </div>
+
+          {/* Material legend (restored from Struktur Mode) with contextual MEP rows */}
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-white/[0.07] pt-2 text-[10px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#efede6]" /> Plester</span>
+            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#8f9295]" /> Beton SNI</span>
+            <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#363b40]" /> Atap</span>
+            {view.showAir && <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#3ea2f4]" /> Air</span>}
+            {view.showListrik && <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#f5c442]" /> Listrik</span>}
+            {view.xrayRebar && <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#f97316]" /> Besi</span>}
+            {view.showLuxHeatmap && <span className="inline-flex items-center gap-1"><i className="h-2 w-2 rounded-full bg-[#fbbf24]" /> Lux</span>}
+          </div>
         </div>
+
+        {/* Before/After compare info bar (restored from Struktur Mode) */}
+        {view.beforeAfterEnabled && (
+          <div className="studio-glass pointer-events-auto absolute bottom-2.5 left-1/2 z-20 flex max-w-[94%] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-xl border-primary/40 px-3 py-1.5 text-[11px] lg:bottom-auto lg:top-16">
+            <span>
+              Baseline: <b className="font-mono">{baselineProject.systems.brick.name.split("(")[0]}</b>
+            </span>
+            <span className="text-muted-foreground">→</span>
+            <span>
+              Sekarang: <b className="font-mono text-primary">Rp {Math.round(rab.grandTotal).toLocaleString("id-ID")}</b> ({derived.masonry.totalBuyBricks.toLocaleString("id-ID")} bata)
+            </span>
+            <button
+              type="button"
+              onClick={lockBaseline}
+              className="min-h-7 rounded-lg bg-primary/20 px-2.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/30"
+            >
+              Kunci Baseline
+            </button>
+          </div>
+        )}
 
         {/* Bottom-Right Interactive Build Catalog Dock */}
         <div className="studio-glass pointer-events-auto flex min-w-0 flex-1 flex-col rounded-2xl">
@@ -1377,6 +1726,16 @@ export function BuildWorkspace({
         </div>
       </div>
 
+      {/* FLOATING PART INSPECTION CARD (Structural / MEP element clicked in 3D) */}
+      {selected?.kind === "part" && (
+        <PartInfoPanel
+          derived={derived}
+          struct={struct}
+          rab={rab}
+          className={catalogCollapsed ? "bottom-16 right-3" : "bottom-[178px] right-3 sm:bottom-[162px]"}
+        />
+      )}
+
       {/* RESET / PRESET CONFIRMATION MODAL */}
       {resetModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
@@ -1420,6 +1779,19 @@ export function BuildWorkspace({
           </div>
         </div>
       )}
+        </div>
+
+        {(stageTimelineOpen || view.stage > 0) && <StageTimelineBar />}
+      </div>
+
+      <StudioSidePanel
+        derived={derived}
+        struct={struct}
+        lighting={lighting}
+        airflow={airflow}
+        flood={flood}
+        onFocusFoundation={handleFocusFoundation}
+      />
     </div>
   );
 }
@@ -1435,7 +1807,7 @@ function OverlayBtn({
   active: boolean;
   onClick: () => void;
   title: string;
-  tone?: "primary" | "amber" | "teal";
+  tone?: "primary" | "amber" | "teal" | "cyan";
   className?: string;
   children: React.ReactNode;
 }) {
@@ -1444,7 +1816,9 @@ function OverlayBtn({
       ? "bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/45"
       : tone === "teal"
         ? "bg-teal-500/20 text-teal-200 ring-1 ring-teal-400/45"
-        : "bg-primary/20 text-[#f6ba86] ring-1 ring-primary/45";
+        : tone === "cyan"
+          ? "bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-400/45"
+          : "bg-primary/20 text-[#f6ba86] ring-1 ring-primary/45";
 
   return (
     <button

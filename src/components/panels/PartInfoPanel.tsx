@@ -6,15 +6,17 @@ import type { RabSummary } from "@/lib/quantities/rabEngine";
 import { getPartInfo } from "@/lib/house/parts";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
+import { cn } from "@/lib/utils";
 import { Eye, EyeOff, Wallet, X } from "lucide-react";
 
 interface Props {
   derived: DerivedProjectModel;
   struct: StructuralReport;
   rab: RabSummary;
+  className?: string;
 }
 
-export function PartInfoPanel({ derived, struct, rab }: Props) {
+export function PartInfoPanel({ derived, struct, rab, className }: Props) {
   const selected = useStudioStore((s) => s.selected);
   const setSelected = useStudioStore((s) => s.setSelected);
   const view = useStudioStore((s) => s.view);
@@ -68,7 +70,7 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
     }
 
     return (
-      <div className="studio-glass pointer-events-auto absolute bottom-3 right-3 z-20 w-[300px] max-w-[calc(100%-1.5rem)] overflow-hidden rounded-2xl">
+      <div className={cn("studio-glass pointer-events-auto absolute z-20 w-[300px] max-w-[calc(100%-1.5rem)] overflow-hidden rounded-2xl", className ?? "bottom-3 right-3")}>
         <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
           <div className="min-w-0">
             <div className="truncate text-xs font-bold text-foreground">{title}</div>
@@ -95,7 +97,7 @@ export function PartInfoPanel({ derived, struct, rab }: Props) {
   const isHidden = view.hiddenParts.includes(info.id);
 
   return (
-    <div className="studio-glass pointer-events-auto absolute bottom-3 right-3 z-20 flex max-h-[82%] w-[345px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl">
+    <div className={cn("studio-glass pointer-events-auto absolute z-20 flex max-h-[72%] w-[345px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl", className ?? "bottom-3 right-3")}>
       <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
         <div className="min-w-0">
           <div className="truncate text-[13px] font-bold text-foreground">{info.label}</div>

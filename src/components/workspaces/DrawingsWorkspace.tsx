@@ -237,6 +237,8 @@ function DenahFloorSvg({
 
   const lv = derived.project.levels[levelIndex]!;
   const rooms = derived.floors[levelIndex]!.rooms;
+  const mepRoutes = derived.mepNetwork.routesByLevel[levelIndex];
+  const mepSymbols = derived.mepNetwork.symbolsByLevel[levelIndex];
 
   return (
     <svg viewBox={`0 0 ${VW} ${VH}`} className="h-auto w-full">
@@ -368,45 +370,131 @@ function DenahFloorSvg({
         });
       })}
 
-      {showMep &&
-        lv.mepRoutes.map((rt) => {
-          const ortho: { x: number; z: number }[] = [];
-          for (let i = 0; i < rt.pts.length; i++) {
-            const cur = rt.pts[i]!;
-            if (i > 0) {
-              const prev = rt.pts[i - 1]!;
-              if (Math.abs(cur.x - prev.x) > 0.08 && Math.abs(cur.z - prev.z) > 0.08) {
-                ortho.push({ x: prev.x, z: cur.z });
-              }
-            }
-            ortho.push(cur);
-          }
-          const pts = ortho.map((p) => `${px(p.z)},${py(p.x)}`).join(" ");
-          const col =
-            rt.kind === "air_bersih"
-              ? "#0284c7"
-              : rt.kind === "air_kotor"
-                ? "#059669"
+      {showMep && (
+        <g>
+          {mepRoutes.map((rt) => {
+            const pts = rt.pts.map((p) => `${px(p.z)},${py(p.x)}`).join(" ");
+            const col =
+              rt.kind === "air_bersih"
+                ? "#0284c7"
+                : rt.kind === "air_kotor"
+                  ? "#059669"
+                  : rt.kind === "air_hujan"
+                    ? "#475569"
+                    : rt.kind === "listrik_lampu"
+                      ? "#d97706"
+                      : rt.kind === "listrik_ac"
+                        ? "#9333ea"
+                        : "#dc2626";
+            const dash =
+              rt.kind === "air_kotor"
+                ? "5 3"
                 : rt.kind === "air_hujan"
-                  ? "#475569"
+                  ? "6 2 2 2"
                   : rt.kind === "listrik_lampu"
-                    ? "#d97706"
-                    : "#dc2626";
-          const last = ortho[ortho.length - 1];
-          return (
-            <g key={rt.id} opacity={0.78}>
-              <polyline
-                points={pts}
-                fill="none"
-                stroke={col}
-                strokeWidth={1.35}
-                strokeLinejoin="round"
-                strokeDasharray={rt.kind === "air_kotor" ? "5 3" : rt.kind === "listrik_lampu" ? "3 2" : undefined}
-              />
-              {last && <circle cx={px(last.z)} cy={py(last.x)} r={2.2} fill={col} />}
-            </g>
-          );
-        })}
+                    ? "3 2"
+                    : rt.kind === "listrik_ac"
+                      ? "6 2"
+                      : undefined;
+            const last = rt.pts[rt.pts.length - 1];
+            return (
+              <g key={rt.id} opacity={0.86}>
+                <polyline
+                  points={pts}
+                  fill="none"
+                  stroke={col}
+                  strokeWidth={rt.kind === "air_kotor" ? 1.7 : 1.45}
+                  strokeLinejoin="miter"
+                  strokeDasharray={dash}
+                />
+                {last && <circle cx={px(last.z)} cy={py(last.x)} r={2.0} fill={col} />}
+              </g>
+            );
+          })}
+
+          {mepSymbols.map((sym) => {
+            const cx = px(sym.z);
+            const cy = py(sym.x);
+            if (sym.kind === "panel_mcb") {
+              return (
+                <g key={sym.id}>
+                  <rect x={cx - 7} y={cy - 4.5} width={14} height={9} rx={1.5} fill="#fef3c7" stroke="#b45309" strokeWidth={1.1} />
+                  <text x={cx} y={cy + 2.2} textAnchor="middle" fontSize={5.5} fontWeight={800} fill="#92400e">MCB</text>
+                </g>
+              );
+            }
+            if (sym.kind === "meter_air") {
+              return (
+                <g key={sym.id}>
+                  <circle cx={cx} cy={cy} r={5.5} fill="#e0f2fe" stroke="#0284c7" strokeWidth={1.1} />
+                  <text x={cx} y={cy + 2} textAnchor="middle" fontSize={4.8} fontWeight={800} fill="#0369a1">PDAM</text>
+                </g>
+              );
+            }
+            if (sym.kind === "bio_septic") {
+              return (
+                <g key={sym.id}>
+                  <circle cx={cx} cy={cy} r={14} fill="#d1fae5" fillOpacity={0.55} stroke="#059669" strokeWidth={1.1} strokeDasharray="3 2" />
+                  <text x={cx} y={cy + 2} textAnchor="middle" fontSize={5.5} fontWeight={700} fill="#065f46">BIO SEPTIC</text>
+                </g>
+              );
+            }
+            if (sym.kind === "sumur_resapan") {
+              return (
+                <g key={sym.id}>
+                  <circle cx={cx} cy={cy} r={9} fill="#e2e8f0" fillOpacity={0.75} stroke="#475569" strokeWidth={1} strokeDasharray="2 2" />
+                  <text x={cx} y={cy + 1.8} textAnchor="middle" fontSize={4.8} fontWeight={700} fill="#334155">RESAPAN</text>
+                </g>
+              );
+            }
+            if (sym.kind === "lampu") {
+              return (
+                <g key={sym.id}>
+                  <circle cx={cx} cy={cy} r={4.2} fill="#fffbeb" stroke="#d97706" strokeWidth={1} />
+                  <line x1={cx - 2.6} y1={cy - 2.6} x2={cx + 2.6} y2={cy + 2.6} stroke="#d97706" strokeWidth={0.9} />
+                  <line x1={cx + 2.6} y1={cy - 2.6} x2={cx - 2.6} y2={cy + 2.6} stroke="#d97706" strokeWidth={0.9} />
+                </g>
+              );
+            }
+            if (sym.kind === "stopkontak") {
+              return (
+                <g key={sym.id}>
+                  <rect x={cx - 3.5} y={cy - 3.5} width={7} height={7} fill="#fee2e2" stroke="#dc2626" strokeWidth={1} />
+                  <circle cx={cx} cy={cy} r={1.4} fill="#dc2626" />
+                </g>
+              );
+            }
+            if (sym.kind === "ac_split") {
+              return (
+                <g key={sym.id}>
+                  <rect x={cx - 8} y={cy - 3.5} width={16} height={7} rx={1.2} fill="#f3e8ff" stroke="#9333ea" strokeWidth={1} />
+                  <text x={cx} y={cy + 2} textAnchor="middle" fontSize={5.2} fontWeight={700} fill="#6b21a8">AC</text>
+                </g>
+              );
+            }
+            return null;
+          })}
+
+          {/* MEP Legend Strip matching 3D colors 1:1 */}
+          <g transform={`translate(24, ${VH - 70})`}>
+            <rect x={0} y={0} width={660} height={24} rx={4} fill="#f1efe8" stroke={FADED} strokeWidth={0.8} />
+            {[
+              { x: 10, col: "#0284c7", dash: undefined, label: "Air Bersih" },
+              { x: 102, col: "#059669", dash: "5 3", label: "Air Kotor" },
+              { x: 192, col: "#475569", dash: "6 2 2 2", label: "Air Hujan" },
+              { x: 282, col: "#d97706", dash: "3 2", label: "Kabel Lampu" },
+              { x: 386, col: "#dc2626", dash: undefined, label: "Stop Kontak" },
+              { x: 492, col: "#9333ea", dash: "6 2", label: "Feeder AC" },
+              { x: 586, col: "#b45309", dash: undefined, label: "⊕ Lampu · MCB" },
+            ].map((item) => (
+              <g key={item.label} transform={`translate(${item.x}, 12)`}>
+                <line x1={0} y1={0} x2={16} y2={0} stroke={item.col} strokeWidth={1.8} strokeDasharray={item.dash} />
+                <text x={20} y={3} fontSize={7.2} fontWeight={600} fill={INK}>{item.label}</text>
+              </g>
+            ))}
+          </g>
+        </g>
+      )}
 
       <text x={px(8.5)} y={py(0) - 10} textAnchor="middle" fontSize={7.5} fontWeight={700} fill={SOFT}>
         BATAS TEMBOK TETANGGA SISI KIRI (TANPA JENDELA)

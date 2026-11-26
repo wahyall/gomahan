@@ -36,6 +36,7 @@ export function StatusBar({
   const selected = useStudioStore((s) => s.selected);
   const view = useStudioStore((s) => s.view);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
+  const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
   const criticalCount = derived.validation.filter((v) => v.severity === "critical").length;
   const warnCount = derived.validation.filter((v) => v.severity === "warning").length;
 
@@ -74,9 +75,9 @@ export function StatusBar({
       <div className="flex shrink-0 items-center gap-2 tabular-nums">
         <button
           type="button"
-          onClick={() => setWorkspace("lighting")}
+          onClick={() => openBuildPanel("lighting")}
           className="hidden items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-white/[0.06] hover:text-foreground sm:flex"
-          title="Buka analisis pencahayaan Surabaya"
+          title="Buka panel analisis pencahayaan Surabaya"
         >
           <Sun className="h-3 w-3 text-amber-300" />
           <span className="font-mono">{Math.round(lighting.avgHouseLux)} lx</span>
@@ -85,9 +86,9 @@ export function StatusBar({
 
         <button
           type="button"
-          onClick={() => setWorkspace("airflow")}
+          onClick={() => openBuildPanel("airflow")}
           className="hidden items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-white/[0.06] hover:text-foreground sm:flex"
-          title="Buka simulasi aliran udara & HVAC"
+          title="Buka panel simulasi aliran udara & HVAC"
         >
           <Wind className="h-3 w-3 text-teal-400" />
           <span className="font-mono">{fmtNum(airflow.avgAch, 1)} ACH</span>
@@ -95,7 +96,7 @@ export function StatusBar({
 
         <button
           type="button"
-          onClick={() => setWorkspace("flood")}
+          onClick={() => openBuildPanel("flood")}
           className={cn(
             "hidden items-center gap-1 rounded px-1.5 py-0.5 transition hover:text-foreground sm:flex",
             floodDanger ? "bg-rose-500/20 text-rose-200" : floodCaution ? "bg-amber-500/20 text-amber-200" : "hover:bg-white/[0.06]",
@@ -108,7 +109,7 @@ export function StatusBar({
 
         <button
           type="button"
-          onClick={() => setWorkspace("structure")}
+          onClick={() => openBuildPanel("structure")}
           className={cn(
             "flex items-center gap-1 rounded px-1.5 py-0.5 transition",
             struct.overallSafe && criticalCount === 0

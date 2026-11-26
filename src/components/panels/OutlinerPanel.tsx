@@ -28,9 +28,10 @@ export function OutlinerPanel({ derived, struct, onCloseDrawer }: Props) {
     indent: number;
     icon?: React.ElementType;
     partId?: string;
-    flagKey?: "showStructure" | "showBricks" | "showRangka" | "showRoof" | "showFinishing" | "showAir" | "showListrik" | "showLabels" | "showDims";
+    flagKey?: "showTerrain" | "showStructure" | "showBricks" | "showRangka" | "showRoof" | "showFinishing" | "showAir" | "showListrik" | "showLabels" | "showDims";
   }[] = [
     { id: "root", label: "Rumah 5×17 m (2 Lantai)", note: `${fmtNum(derived.totalNetFloorM2, 1)} m²`, indent: 0, icon: Home },
+    { id: "tanah", label: "Tanah, Urugan & Tapak (Terrain)", note: "Tapak 5×17", indent: 1, icon: Layers, flagKey: "showTerrain" },
     { id: "pondasi", label: `Pondasi (${derived.project.systems.foundation})`, note: `${struct.foundations.length} titik`, indent: 1, icon: Landmark, partId: "pondasi" },
     { id: "sloof", label: "Sloof, Kolom, Balok & Pelat LT2", note: `${struct.columns.length} kolom`, indent: 1, icon: Layers, partId: "kolom", flagKey: "showStructure" },
     { id: "tangga", label: "Tangga Beton (20 Anak Tangga)", note: "3,60 m", indent: 2, partId: "tangga" },

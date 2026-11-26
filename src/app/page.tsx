@@ -12,13 +12,11 @@ import { runFloodSimulation } from "@/lib/simulation/floodEngine";
 import { evaluateGamification } from "@/lib/gamification/simsEngine";
 import { parseVersionedProjectSave } from "@/lib/model/schema";
 import { loadLatestProject, saveAutosaveProject, saveProjectSnapshot } from "@/lib/store/db";
-import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
-import type { HouseScene } from "@/lib/scene/HouseScene";
+import { useStudioStore } from "@/lib/store/useStudioStore";
 import { TopBar } from "@/components/shell/TopBar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { CommandPalette } from "@/components/shell/CommandPalette";
 import { BuildWorkspace } from "@/components/build/BuildWorkspace";
-import { cn } from "@/lib/utils";
 
 function WorkspaceLoading({ label }: { label: string }) {
   return (
@@ -28,41 +26,9 @@ function WorkspaceLoading({ label }: { label: string }) {
   );
 }
 
-const Viewport3D = dynamic(
-  () => import("@/components/viewport/Viewport3D").then((m) => m.Viewport3D),
-  { ssr: false, loading: () => <WorkspaceLoading label="Viewport 3D" /> },
-);
-const OutlinerPanel = dynamic(
-  () => import("@/components/panels/OutlinerPanel").then((m) => m.OutlinerPanel),
-  { ssr: false },
-);
-const InspectorPanel = dynamic(
-  () => import("@/components/panels/InspectorPanel").then((m) => m.InspectorPanel),
-  { ssr: false },
-);
-const StageTimelineBar = dynamic(
-  () => import("@/components/panels/StageTimelineBar").then((m) => m.StageTimelineBar),
-  { ssr: false },
-);
 const WalkWorkspace = dynamic(
   () => import("@/components/walk/WalkWorkspace").then((m) => m.WalkWorkspace),
   { ssr: false, loading: () => <WorkspaceLoading label="Walk Mode 3D" /> },
-);
-const StructureWorkspace = dynamic(
-  () => import("@/components/workspaces/StructureWorkspace").then((m) => m.StructureWorkspace),
-  { ssr: false },
-);
-const LightingWorkspace = dynamic(
-  () => import("@/components/workspaces/LightingWorkspace").then((m) => m.LightingWorkspace),
-  { ssr: false },
-);
-const AirflowWorkspace = dynamic(
-  () => import("@/components/workspaces/AirflowWorkspace").then((m) => m.AirflowWorkspace),
-  { ssr: false },
-);
-const FloodWorkspace = dynamic(
-  () => import("@/components/workspaces/FloodWorkspace").then((m) => m.FloodWorkspace),
-  { ssr: false },
 );
 const DrawingsWorkspace = dynamic(
   () => import("@/components/workspaces/DrawingsWorkspace").then((m) => m.DrawingsWorkspace),
@@ -88,9 +54,7 @@ const GuideWorkspace = dynamic(
   () => import("@/components/workspaces/GuideWorkspace").then((m) => m.GuideWorkspace),
   { ssr: false, loading: () => <WorkspaceLoading label="Panduan Studio" /> },
 );
-import { Eye, SlidersHorizontal, X } from "lucide-react";
-
-const SIM_SPLIT_WORKSPACES: WorkspaceId[] = ["structure", "lighting", "airflow", "flood"];
+import { X } from "lucide-react";
 
 export default function HomePage() {
   const project = useStudioStore((s) => s.project);
@@ -100,15 +64,13 @@ export default function HomePage() {
   const setSelected = useStudioStore((s) => s.setSelected);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
 
-  const sceneRef = useRef<HouseScene | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSnapshotRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [hydrated, setHydrated] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [toast, setToast] = useState<string | null>(null);
-  const [mobileSimTab, setMobileSimTab] = useState<"panel" | "3d">("panel");
-  const [buildSniOpen, setBuildSniOpen] = useState(false);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -145,8 +107,8 @@ export default function HomePage() {
     };
   }, [loadProject, showToast]);
 
-  const handleSceneReady = useCallback((sc: HouseScene | null) => {
-    sceneRef.current = sc;
+  const handleCanvasReady = useCallback((cv: HTMLCanvasElement | null) => {
+    canvasRef.current = cv;
   }, []);
 
   // Debounced autosave to IndexedDB
@@ -165,7 +127,7 @@ export default function HomePage() {
   const captureSnapshot = useCallback((): string | null => {
     try {
       const cv =
-        sceneRef.current?.getCanvas() ??
+        canvasRef.current ??
         (document.querySelector("main canvas") as HTMLCanvasElement | null);
       if (cv && cv.width > 0 && cv.height > 0) {
         const url = cv.toDataURL("image/jpeg", 0.92);
@@ -295,7 +257,6 @@ export default function HomePage() {
 
   const isBuildStub = workspace === "build";
   const isWalkStub = workspace === "walk";
-  const isSimSplit = SIM_SPLIT_WORKSPACES.includes(workspace);
 
   return (
     <div className="flex h-dvh min-h-[100dvh] w-screen flex-col overflow-hidden bg-background text-foreground">
@@ -315,42 +276,17 @@ export default function HomePage() {
         onSaveSnapshot={handleSaveSnapshot}
       />
 
-      {/* Mobile switcher inside split simulation workspaces */}
-      {isSimSplit && (
-        <div className="no-print flex shrink-0 items-center gap-1.5 border-b border-border bg-[#15181e] px-3 py-1.5 lg:hidden">
-          <button
-            type="button"
-            onClick={() => setMobileSimTab("panel")}
-            className={cn(
-              "flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition",
-              mobileSimTab === "panel" ? "bg-[#f2efe8] text-[#14171c]" : "bg-card text-muted-foreground",
-            )}
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5" /> Panel Analisis
-          </button>
-          <button
-            type="button"
-            onClick={() => setMobileSimTab("3d")}
-            className={cn(
-              "flex min-h-8 flex-1 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition",
-              mobileSimTab === "3d" ? "bg-[#f2efe8] text-[#14171c]" : "bg-card text-muted-foreground",
-            )}
-          >
-            <Eye className="h-3.5 w-3.5" /> Tampilan 3D Live
-          </button>
-        </div>
-      )}
-
       {/* Main Studio Shell */}
       <main className="relative flex min-h-0 flex-1 overflow-hidden">
         {isBuildStub && (
           <BuildWorkspace
             derived={derived}
             struct={struct}
+            rab={rab}
             lighting={lighting}
             airflow={airflow}
-            buildSniOpen={buildSniOpen}
-            onToggleBuildSni={() => setBuildSniOpen((v) => !v)}
+            flood={flood}
+            onCanvasReady={handleCanvasReady}
             onSnapshotCapture={handleSnapshotCapture}
           />
         )}
@@ -362,56 +298,6 @@ export default function HomePage() {
           />
         )}
 
-        {/* Analytical 3D Viewport + Timeline */}
-        {isSimSplit && (
-          <section
-            className={cn(
-              "min-h-0 flex-1 flex-col overflow-hidden",
-              mobileSimTab === "panel" ? "hidden lg:flex" : "flex",
-            )}
-          >
-            <Viewport3D
-              derived={derived}
-              struct={struct}
-              rab={rab}
-              lighting={lighting}
-              airflow={airflow}
-              flood={flood}
-              gamification={gamification}
-              onSceneReady={handleSceneReady}
-              onSnapshotCapture={handleSnapshotCapture}
-            />
-            <StageTimelineBar />
-          </section>
-        )}
-
-        {/* Right Dock: Outliner + Inspector when opened in Build Mode */}
-        {isBuildStub && buildSniOpen && (
-          <aside className="no-print absolute bottom-0 right-0 top-0 z-30 flex w-[310px] shrink-0 flex-col border-l border-border bg-[#14181f]/98 shadow-2xl backdrop-blur-xl lg:static lg:z-auto lg:w-[332px] lg:shadow-none xl:w-[356px]">
-            <div className="flex h-[36%] min-h-[175px] flex-col">
-              <OutlinerPanel derived={derived} struct={struct} onCloseDrawer={() => setBuildSniOpen(false)} />
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col">
-              <InspectorPanel derived={derived} />
-            </div>
-          </aside>
-        )}
-
-        {/* Analytical Split Panel (container-queried so controls never squeeze into narrow cols!) */}
-        {isSimSplit && (
-          <aside
-            className={cn(
-              "@container min-h-0 w-full shrink-0 flex-col border-l border-border bg-background lg:flex lg:w-[500px] xl:w-[570px] 2xl:w-[630px]",
-              mobileSimTab === "panel" ? "flex" : "hidden lg:flex",
-            )}
-          >
-            {workspace === "structure" && <StructureWorkspace derived={derived} struct={struct} />}
-            {workspace === "lighting" && <LightingWorkspace lighting={lighting} />}
-            {workspace === "airflow" && <AirflowWorkspace derived={derived} airflow={airflow} />}
-            {workspace === "flood" && <FloodWorkspace derived={derived} flood={flood} />}
-          </aside>
-        )}
-
         {/* Full-Width Workspaces */}
         {workspace === "drawings" && <DrawingsWorkspace derived={derived} struct={struct} />}
         {workspace === "rab" && <RabWorkspace derived={derived} rab={rab} />}
@@ -420,7 +306,7 @@ export default function HomePage() {
           <DeliverWorkspace
             bundleBase={{ derived, struct, rab, schedule, lighting, airflow, flood }}
             getSnapshotDataUrl={captureSnapshot}
-            getCanvas={() => sceneRef.current?.getCanvas() ?? null}
+            getCanvas={() => canvasRef.current ?? (document.querySelector("main canvas") as HTMLCanvasElement | null)}
           />
         )}
         {workspace === "site" && <SiteModeWorkspace derived={derived} struct={struct} schedule={schedule} />}

@@ -286,4 +286,60 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     expect(tamuAfter.effectiveTempC).toBeLessThan(tamuBase.effectiveTempC);
     expect(afterAir.totalHvacPowerW).toBe(baseAir.totalHvacPowerW + 50);
   });
+
+  it("generates strictly orthogonal canonical MEP routes shared by 3D, 2D Denah, and RAB", () => {
+    const p = createDefaultProject();
+    const baseDerived = buildDerivedModel(p);
+
+    // Every segment in every LT1 & LT2 route must be axis-aligned (differs on at most 1 coordinate axis)
+    for (const routes of baseDerived.mepNetwork.routesByLevel) {
+      expect(routes.length).toBeGreaterThan(0);
+      for (const route of routes) {
+        expect(route.pts.length).toBeGreaterThanOrEqual(2);
+        for (let i = 1; i < route.pts.length; i++) {
+          const a = route.pts[i - 1]!;
+          const b = route.pts[i]!;
+          const changedAxes =
+            (Math.abs(a.x - b.x) > 0.005 ? 1 : 0) +
+            (Math.abs(a.y - b.y) > 0.005 ? 1 : 0) +
+            (Math.abs(a.z - b.z) > 0.005 ? 1 : 0);
+          expect(changedAxes).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+
+    // Adding a light and split AC on LT2 dynamically updates canonical routes, 2D/3D symbols, and takeoff length
+    p.levels[1]!.lights.push({
+      id: "l-mep-sync",
+      name: "Lampu Sinkron MEP",
+      type: "ceiling",
+      position: { x: 1.5, y: 3.1, z: 7.2 },
+      lumens: 1200,
+      colorTempK: 4000,
+      beamAngleDeg: 110,
+      dimmer: 1,
+      on: true,
+    });
+    p.levels[1]!.hvac.push({
+      id: "hv-ac-sync",
+      name: "AC Split Sinkron",
+      type: "ac_split",
+      position: { x: 4.85, y: 2.4, z: 8.6 },
+      rotationY: -Math.PI / 2,
+      flowRateM3h: 520,
+      coolingCapacityW: 2600,
+      powerW: 720,
+      setpointC: 24,
+      speedLevel: 2,
+      on: true,
+    });
+
+    const afterDerived = buildDerivedModel(p);
+    const lt2Symbols = afterDerived.mepNetwork.symbolsByLevel[1];
+    expect(lt2Symbols.some((s) => s.kind === "lampu" && Math.abs(s.x - 1.5) < 0.02 && Math.abs(s.z - 7.2) < 0.02)).toBe(true);
+    expect(lt2Symbols.some((s) => s.kind === "ac_split" && Math.abs(s.x - 4.85) < 0.02 && Math.abs(s.z - 8.6) < 0.02)).toBe(true);
+    expect(afterDerived.mep.kabelLampuM).toBeGreaterThan(baseDerived.mep.kabelLampuM);
+    expect(afterDerived.mep.conduitM).toBeGreaterThan(baseDerived.mep.conduitM);
+    expect(afterDerived.mep.kabelAcM).toBeGreaterThan(baseDerived.mep.kabelAcM);
+  });
 });

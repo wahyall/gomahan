@@ -6,14 +6,13 @@ import { HVAC_CATALOG } from "@/lib/model/catalog";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { KpiMetric, SectionHeader, StudioCard, StudioRange } from "@/components/ui/StudioPrimitives";
-import { Eye, Fan, Hammer, Move, Plus, Power, RotateCw, Trash2, Wind, Zap } from "lucide-react";
+import { Eye, Fan, Move, Plus, Power, RotateCw, Trash2, Wind, Zap } from "lucide-react";
 
 export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProjectModel; airflow: AirflowSimulationResult }) {
   const project = useStudioStore((s) => s.project);
   const view = useStudioStore((s) => s.view);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
   const patchView = useStudioStore((s) => s.patchView);
-  const setWorkspace = useStudioStore((s) => s.setWorkspace);
   const updateHvac = useStudioStore((s) => s.updateHvac);
   const addHvac = useStudioStore((s) => s.addHvac);
   const deleteHvac = useStudioStore((s) => s.deleteHvac);
@@ -29,7 +28,7 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
             title="Simulasi Sirkulasi Udara, Kipas & AC"
             subtitle={airflow.methodologyNote}
           />
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => patchView({ showAirParticles: !view.showAirParticles })}
@@ -43,16 +42,9 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
               <Eye className="h-3.5 w-3.5" />
               {view.showAirParticles ? "Partikel Angin 3D Aktif" : "Tampilkan Aliran Angin 3D"}
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                patchView({ showAirParticles: true });
-                setWorkspace("build");
-              }}
-              className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-black/25 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
-            >
-              <Hammer className="h-3.5 w-3.5" /> Pasang Kipas / AC di Build
-            </button>
+            <span className="rounded-lg border border-white/10 bg-black/25 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+              Pilih unit di tab <b className="text-foreground">Utilitas</b> pada dock bawah untuk tambah AC/kipas di 3D.
+            </span>
           </div>
         </StudioCard>
 

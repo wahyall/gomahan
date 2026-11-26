@@ -13,15 +13,22 @@ import {
   StudioSelect,
   StudioSwitch,
 } from "@/components/ui/StudioPrimitives";
-import { AlertTriangle, Boxes, CheckCircle2, Eye, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye, Layers, ShieldCheck } from "lucide-react";
 
-export function StructureWorkspace({ derived: _derived, struct }: { derived: DerivedProjectModel; struct: StructuralReport }) {
+export function StructureWorkspace({
+  derived: _derived,
+  struct,
+  onFocusFoundation,
+}: {
+  derived: DerivedProjectModel;
+  struct: StructuralReport;
+  onFocusFoundation?: () => void;
+}) {
   const project = useStudioStore((s) => s.project);
   const view = useStudioStore((s) => s.view);
   const patchStructuralParams = useStudioStore((s) => s.patchStructuralParams);
   const patchSoil = useStudioStore((s) => s.patchSoil);
   const patchView = useStudioStore((s) => s.patchView);
-  const setWorkspace = useStudioStore((s) => s.setWorkspace);
 
   const sp = project.structuralParams;
   const soil = project.site.soil;
@@ -65,12 +72,21 @@ export function StructureWorkspace({ derived: _derived, struct }: { derived: Der
             <button
               type="button"
               onClick={() => {
-                patchView({ xrayRebar: true, showStructure: true });
-                setWorkspace("build");
+                if (onFocusFoundation) {
+                  onFocusFoundation();
+                } else {
+                  patchView({ showTerrain: !view.showTerrain, showStructure: true });
+                }
               }}
-              className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-black/25 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
+              className={cn(
+                "flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition",
+                !view.showTerrain
+                  ? "border-amber-400/60 bg-amber-500/20 text-amber-100"
+                  : "border-border bg-black/25 text-muted-foreground hover:border-white/25 hover:text-foreground",
+              )}
             >
-              <Boxes className="h-3.5 w-3.5" /> Edit di Build Mode
+              <Layers className="h-3.5 w-3.5" />
+              {view.showTerrain ? "Sembunyikan Tanah & Lihat Pondasi" : "Tampilkan Tanah Kembali"}
             </button>
           </div>
         </StudioCard>

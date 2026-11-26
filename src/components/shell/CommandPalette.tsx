@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useStudioStore, type WorkspaceId } from "@/lib/store/useStudioStore";
+import { useStudioStore, type StudioPanelId, type WorkspaceId } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { CornerDownLeft, Search, X } from "lucide-react";
 
@@ -17,6 +17,7 @@ export function CommandPalette() {
   const open = useStudioStore((s) => s.commandPaletteOpen);
   const setOpen = useStudioStore((s) => s.setCommandPaletteOpen);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
+  const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
   const setBrickPreset = useStudioStore((s) => s.setBrickPreset);
   const patchView = useStudioStore((s) => s.patchView);
   const patchSimulation = useStudioStore((s) => s.patchSimulation);
@@ -67,18 +68,22 @@ export function CommandPalette() {
 
   const actions = useMemo<ActionItem[]>(() => {
     const ws: [WorkspaceId, string, string?][] = [
-      ["build", "Buka Build Mode 3D", "Shift+B"],
+      ["build", "Buka Build Studio 3D", "Shift+B"],
       ["walk", "Buka Walk Mode Realistis", "Shift+V"],
-      ["structure", "Buka Analisis Struktur SNI & Besi BBS"],
-      ["lighting", "Buka Simulasi Pencahayaan & Matahari"],
-      ["airflow", "Buka Simulasi Sirkulasi Udara & AC"],
-      ["flood", "Buka Simulasi Hujan Deras & Banjir"],
       ["drawings", "Buka Gambar Kerja 2D (Denah / Potongan / MEP)"],
       ["rab", "Buka RAB & Harga Satuan Surabaya"],
       ["timeline", "Buka Jadwal Gantt & S-Curve Cash Flow"],
       ["site", "Buka Mode Lapangan Mandor (Site Mode)"],
       ["deliver", "Buka Ekspor Paket Kontraktor (PDF / Excel / ZIP)"],
       ["guide", "Buka Panduan Standar Arsitektur Indonesia"],
+    ];
+
+    const panels: [StudioPanelId, string][] = [
+      ["structure", "Buka Panel Analisis Struktur SNI & Besi BBS"],
+      ["lighting", "Buka Panel Simulasi Pencahayaan & Matahari"],
+      ["airflow", "Buka Panel Simulasi Sirkulasi Udara & AC"],
+      ["flood", "Buka Panel Simulasi Hujan Deras & Banjir"],
+      ["inspection", "Buka Panel Outliner, Validasi & Pengaturan Proyek"],
     ];
 
     return [
@@ -89,9 +94,25 @@ export function CommandPalette() {
         shortcut,
         run: () => setWorkspace(id),
       })),
+      ...panels.map(([panelId, label]) => ({
+        id: `panel-${panelId}`,
+        label,
+        category: "Panel Analisis Studio",
+        run: () => openBuildPanel(panelId),
+      })),
       { id: "brick-hebel", label: "Ganti Dinding ke Bata Putih / Hebel AAC", category: "Material", run: () => setBrickPreset("hebel") },
       { id: "brick-merah", label: "Ganti Dinding ke Bata Merah SNI", category: "Material", run: () => setBrickPreset("merah") },
       { id: "brick-custom", label: "Gunakan Ukuran Bata Custom", category: "Material", run: () => setBrickPreset("custom") },
+      {
+        id: "toggle-terrain",
+        label: "Sembunyikan / Tampilkan Tanah (Lihat Pondasi Bawah Tanah)",
+        category: "Viewport",
+        run: () =>
+          patchView({
+            showTerrain: !useStudioStore.getState().view.showTerrain,
+            showStructure: true,
+          }),
+      },
       {
         id: "explode",
         label: "Toggle Exploded View (Bongkar Granular)",
@@ -109,14 +130,15 @@ export function CommandPalette() {
         label: "Uji Simulasi Banjir 60 cm + Hujan Lebat",
         category: "Simulasi",
         run: () => {
-          setWorkspace("flood");
+          openBuildPanel("flood");
+          patchView({ showFloodWater: true, showRain: true });
           patchSimulation({ floodDepthCm: 60, rainIntensityMmH: 85 });
         },
       },
       { id: "night-lights", label: "Pratinjau Suasana Malam Hari (19:30 WIB)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 19.5 }) },
       { id: "noon-sun", label: "Pratinjau Matahari Siang Hari (12:00 WIB)", category: "Simulasi", run: () => patchSimulation({ hourOfDay: 12 }) },
     ];
-  }, [patchSimulation, patchView, setBrickPreset, setWorkspace]);
+  }, [openBuildPanel, patchSimulation, patchView, setBrickPreset, setWorkspace]);
 
   const filtered = useMemo(
     () =>

@@ -31,10 +31,6 @@ import { simsAudio } from "@/lib/audio/simsAudio";
 export type WorkspaceId =
   | "build"
   | "walk"
-  | "structure"
-  | "lighting"
-  | "airflow"
-  | "flood"
   | "drawings"
   | "rab"
   | "timeline"
@@ -42,7 +38,9 @@ export type WorkspaceId =
   | "guide"
   | "site";
 
-export type CameraPreset = "3d" | "front" | "back" | "side" | "top";
+export type StudioPanelId = "none" | "structure" | "lighting" | "airflow" | "flood" | "inspection";
+
+export type CameraPreset = "3d" | "front" | "back" | "side" | "top" | "foundation";
 
 export type SelectionTarget =
   | { kind: "part"; id: string }
@@ -64,6 +62,7 @@ export interface ViewState {
   stage: number; // 0 = complete model, 1..10 = construction sequence
   showBricks: boolean;
   showStructure: boolean;
+  showTerrain: boolean;
   showRoof: boolean;
   showRangka: boolean;
   showFinishing: boolean;
@@ -93,6 +92,7 @@ export const DEFAULT_VIEW_STATE: ViewState = {
   stage: 0,
   showBricks: true,
   showStructure: true,
+  showTerrain: true,
   showRoof: true,
   showRangka: true,
   showFinishing: true,
@@ -115,6 +115,8 @@ export interface StudioStore {
   project: Project;
   baselineProject: Project;
   workspace: WorkspaceId;
+  studioPanel: StudioPanelId;
+  stageTimelineOpen: boolean;
   activeLevelIndex: 0 | 1;
   selected: SelectionTarget;
   view: ViewState;
@@ -123,6 +125,9 @@ export interface StudioStore {
   commandPaletteOpen: boolean;
 
   setWorkspace: (w: WorkspaceId) => void;
+  setStudioPanel: (panel: StudioPanelId) => void;
+  openBuildPanel: (panel: StudioPanelId) => void;
+  setStageTimelineOpen: (open: boolean) => void;
   setActiveLevelIndex: (idx: 0 | 1) => void;
   setSelected: (sel: SelectionTarget) => void;
   patchView: (patch: Partial<ViewState>) => void;
@@ -148,7 +153,6 @@ export interface StudioStore {
   updatePriceItem: (priceId: string, field: "materialPrice" | "laborPrice", value: number) => void;
   resetPriceBook: () => void;
   patchStageProgress: (stageId: string, patch: Partial<StageProgress>) => void;
-  setGamificationMode: (mode: "simple" | "pro") => void;
   setBudgetCap: (capIdr: number) => void;
   setSoundEnabled: (enabled: boolean) => void;
   toggleSiteChecklist: (key: string) => void;
@@ -189,6 +193,8 @@ export const useStudioStore = create<StudioStore>()(
       project: initialProject,
       baselineProject: structuredClone(initialProject),
       workspace: "build",
+      studioPanel: "none",
+      stageTimelineOpen: false,
       activeLevelIndex: 0,
       selected: null,
       view: DEFAULT_VIEW_STATE,
@@ -199,13 +205,17 @@ export const useStudioStore = create<StudioStore>()(
       setWorkspace: (w) =>
         set((state) => {
           state.workspace = w;
-          if (w === "lighting") {
+        }),
+      setStudioPanel: (panel) =>
+        set((state) => {
+          state.studioPanel = panel;
+          if (panel === "lighting") {
             state.view.showLuxHeatmap = true;
             state.view.showAirParticles = false;
-          } else if (w === "airflow") {
+          } else if (panel === "airflow") {
             state.view.showAirParticles = true;
             state.view.showLuxHeatmap = false;
-          } else if (w === "flood") {
+          } else if (panel === "flood") {
             state.view.showFloodWater = true;
             state.view.showRain = true;
             if (state.project.simulation.rainIntensityMmH === 0) {
@@ -214,11 +224,34 @@ export const useStudioStore = create<StudioStore>()(
             if (state.project.simulation.floodDepthCm === 0) {
               state.project.simulation.floodDepthCm = 45;
             }
-          } else if (w === "structure") {
+          } else if (panel === "structure") {
             state.view.showStructure = true;
-            state.view.xrayRebar = true;
           }
         }),
+      openBuildPanel: (panel) =>
+        set((state) => {
+          state.workspace = "build";
+          state.studioPanel = panel;
+          if (panel === "lighting") {
+            state.view.showLuxHeatmap = true;
+            state.view.showAirParticles = false;
+          } else if (panel === "airflow") {
+            state.view.showAirParticles = true;
+            state.view.showLuxHeatmap = false;
+          } else if (panel === "flood") {
+            state.view.showFloodWater = true;
+            state.view.showRain = true;
+            if (state.project.simulation.rainIntensityMmH === 0) {
+              state.project.simulation.rainIntensityMmH = 65;
+            }
+            if (state.project.simulation.floodDepthCm === 0) {
+              state.project.simulation.floodDepthCm = 45;
+            }
+          } else if (panel === "structure") {
+            state.view.showStructure = true;
+          }
+        }),
+      setStageTimelineOpen: (open) => set((state) => { state.stageTimelineOpen = open; }),
       setActiveLevelIndex: (idx) =>
         set((state) => {
           state.activeLevelIndex = idx;
@@ -245,7 +278,7 @@ export const useStudioStore = create<StudioStore>()(
 
       loadProject: (p) =>
         set((state) => {
-          state.project = p;
+          state.project = { ...p, gamification: { ...p.gamification, mode: "pro" } };
           state.selected = null;
         }),
       resetProject: () =>
@@ -364,10 +397,6 @@ export const useStudioStore = create<StudioStore>()(
         set((state) => {
           const curr = state.project.stageProgress[stageId] ?? { progressPct: 0, actualCost: 0 };
           state.project.stageProgress[stageId] = { ...curr, ...patch };
-        }),
-      setGamificationMode: (mode) =>
-        set((state) => {
-          state.project.gamification.mode = mode;
         }),
       setBudgetCap: (capIdr) =>
         set((state) => {
@@ -638,6 +667,8 @@ export const useStudioStore = create<StudioStore>()(
             lv.furniture = [];
             lv.lights = [];
             lv.hvac = [];
+            lv.mepPoints = [];
+            lv.mepRoutes = [];
           }
           state.project.buildExtras = { floorTiles: [], pools: [], terrainHeights: [] };
           state.selected = null;

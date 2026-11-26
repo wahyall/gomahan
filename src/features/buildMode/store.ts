@@ -24,6 +24,7 @@ export interface BuildPreviewHud {
 
 export type FloorBrushMode = "tile" | "rect" | "fill";
 export type TerrainBrushMode = "raise" | "lower" | "flatten";
+export type BuildRenderTier = "auto" | "high" | "medium" | "low";
 
 interface BuildModeViewState {
   activeLevel: 0 | 1 | 2;
@@ -43,6 +44,12 @@ interface BuildModeViewState {
   hover: BuildHoverState | null;
   previewHud: BuildPreviewHud | null;
   savedCameraSnapshot: BuildCameraSnapshot | null;
+  /** Cinematic ray-traced-look post stack (GTAO + sun shafts + bloom + MSAA HDR). */
+  rtLook: boolean;
+  renderTier: BuildRenderTier;
+
+  setRtLook: (enabled: boolean) => void;
+  setRenderTier: (tier: BuildRenderTier) => void;
 
   setActiveLevel: (level: 0 | 1 | 2) => void;
   stepLevel: (delta: -1 | 1) => void;
@@ -66,8 +73,8 @@ interface BuildModeViewState {
 }
 
 export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
-  activeLevel: 0,
-  wallVisibility: "cutaway",
+  activeLevel: 2,
+  wallVisibility: "up",
   roofVisibility: "auto",
   gridVisible: true,
   snap90Enabled: false,
@@ -83,6 +90,11 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
   hover: null,
   previewHud: null,
   savedCameraSnapshot: null,
+  rtLook: true,
+  renderTier: "auto",
+
+  setRtLook: (rtLook) => set({ rtLook }),
+  setRenderTier: (renderTier) => set({ renderTier }),
 
   setActiveLevel: (activeLevel) => set({ activeLevel }),
   stepLevel: (delta) => {

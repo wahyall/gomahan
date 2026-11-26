@@ -1,5 +1,11 @@
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { BuildCameraController } from "@/features/buildMode/BuildCameraController";
+import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import {
   applyTerrainBrushToHeights,
   computeProjectRoomFloodCells,
@@ -24,15 +30,20 @@ import { simsAudio } from "@/lib/audio/simsAudio";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { FurnitureItem, HvacType, HvacUnit, LightFixture, LightType, Room, Stair, Wall } from "@/lib/model/types";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
+import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
-import { createContactShadowTexture, mergeGeometryBatch } from "@/lib/scene/geometryHelpers";
-import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, type MaterialPalette } from "@/lib/scene/materials";
+import { createChamferBox, createContactShadowTexture, mergeGeometryBatch } from "@/lib/scene/geometryHelpers";
+import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, makeSunSpriteTexture, type MaterialPalette } from "@/lib/scene/materials";
 import { buildProjectHouse, buildStaticNeighborhood, type WallCutawayRecord } from "@/lib/scene/projectHouseBuilder";
 import type { SelectionTarget, ViewState } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 
+export type BuildQualityTier = "auto" | "high" | "medium" | "low";
+
 export interface BuildSceneStats {
   fps: number;
+  tier: "high" | "medium" | "low";
+  dpr: number;
   calls: number;
   triangles: number;
   geometries: number;
@@ -42,6 +53,7 @@ export interface BuildSceneStats {
 export interface BuildSceneActions {
   onSelect: (sel: SelectionTarget) => void;
   onHoverCell: (gx: number, gz: number, worldX: number, worldZ: number, inBounds: boolean) => void;
+  onHoverPart?: (label: string | null, x: number, y: number) => void;
   onPreviewHud: (hud: { label: string; valid: boolean } | null) => void;
   onEyedropCatalog: (catalogId: string) => void;
   onStats?: (stats: BuildSceneStats) => void;
@@ -108,12 +120,14 @@ export class BuildScene {
   private readonly contactShadowMat: THREE.MeshBasicMaterial;
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly sunLight: THREE.DirectionalLight;
+  private readonly fillLight: THREE.DirectionalLight;
   private readonly lightningLight: THREE.DirectionalLight;
 
   private readonly envGroup = new THREE.Group();
   private readonly neighborsGroup = new THREE.Group();
   private readonly houseContainer = new THREE.Group();
   private readonly simGroup = new THREE.Group();
+  private readonly dimsGroup = new THREE.Group();
   private readonly overlayGroup = new THREE.Group();
   private readonly previewGroup = new THREE.Group();
   private readonly selectedRing: THREE.Mesh;
@@ -129,6 +143,21 @@ export class BuildScene {
   private airParticlesMesh: THREE.InstancedMesh | null = null;
   private airParticleStates: { x: number; y: number; z: number; lv: 0 | 1; life: number }[] = [];
 
+  private clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
+  private explodePieces: { obj: THREE.Object3D; base: THREE.Vector3; off: THREE.Vector3 }[] = [];
+  private explodeInstanced: { im: THREE.InstancedMesh; n: number; pos: Float32Array; off: Float32Array; quat: Float32Array; scl: Float32Array }[] = [];
+  private explodeCurrent = 0;
+  private explodeTarget = 0;
+
+  private rainPoints: THREE.Points | null = null;
+  private rainTex: THREE.CanvasTexture | null = null;
+  private rainArray: Float32Array | null = null;
+  private rainActiveCount = 0;
+  private lightningTimer = 0;
+  private lightningEnergy = 0;
+  private simElapsedS = 0;
+  private lastRainMmH = 0;
+
   private gridMesh: THREE.LineSegments | null = null;
   private hoverTileMesh: THREE.Mesh | null = null;
 
@@ -136,6 +165,7 @@ export class BuildScene {
   private struct: StructuralReport | null = null;
   private lighting: LightingSimulationResult | null = null;
   private airflow: AirflowSimulationResult | null = null;
+  private flood: FloodSimulationResult | null = null;
   private studioView: ViewState | null = null;
   private selected: SelectionTarget = null;
   private envKey = "";
@@ -157,8 +187,8 @@ export class BuildScene {
   private hoverHighlightMesh: THREE.Mesh;
 
   private viewOpts: BuildViewOptions = {
-    activeLevel: 0,
-    wallVisibility: "cutaway",
+    activeLevel: 2,
+    wallVisibility: "up",
     roofVisibility: "auto",
     gridVisible: true,
     snap90Enabled: false,
@@ -193,9 +223,28 @@ export class BuildScene {
     origMeshRotY: number;
     yRenderOffset: number;
   } | null = null;
+  private qualityOverride: BuildQualityTier = "auto";
+  private activeTier: "high" | "medium" | "low" = "high";
+  private readonly mobileViewport: boolean;
+  /** True when the WebGL renderer is a software rasterizer (SwiftShader/llvmpipe): cinematic stack stays off. */
+  private readonly softwareGpu: boolean;
   private baseDpr = 1;
   private currentDpr = 1;
   private lastDprCheckMs = 0;
+  private composer: EffectComposer | null = null;
+  private renderPass: RenderPass | null = null;
+  private gtaoPass: GTAOPass | null = null;
+  private atmospherePass: AtmospherePass | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private outputPass: OutputPass | null = null;
+  private postActive = false;
+  /** Cinematic "ray-traced look" stack: HDR MSAA → GTAO → sun shafts → bloom → ACES. */
+  private rayTracingEnabled = true;
+  private godRayStrength = 0;
+  private sunCore: THREE.Sprite | null = null;
+  private sunHalo: THREE.Sprite | null = null;
+  private readonly sunDir = new THREE.Vector3(0.45, 0.78, -0.42);
+  private lastHoverMs = 0;
   private contextLost = false;
   private readonly reducedMotion =
     typeof window !== "undefined" && Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
@@ -223,6 +272,12 @@ export class BuildScene {
   private readonly onPointerMoveBound = (e: PointerEvent) => this.handlePointerMove(e);
   private readonly onPointerDownBound = (e: PointerEvent) => this.handlePointerDown(e);
   private readonly onPointerUpBound = (e: PointerEvent) => this.handlePointerUp(e);
+  private readonly onPointerLeaveBound = () => {
+    this.hoverHighlightMesh.visible = false;
+    if (this.hoverTileMesh) this.hoverTileMesh.visible = false;
+    this.actions.onHoverPart?.(null, 0, 0);
+    this.actions.onHoverCell(0, 0, 0, 0, false);
+  };
   private readonly onContextLostBound = (e: Event) => {
     e.preventDefault();
     this.contextLost = true;
@@ -244,40 +299,68 @@ export class BuildScene {
     this.actions = actions;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
-    this.baseDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
+    this.mobileViewport = mobileViewport;
+    // Software rasterizers (SwiftShader / llvmpipe) must never receive the cinematic stack:
+    // detect them once so CI containers and VMs stay responsive instead of wedging on frame one.
+    let softwareGpu = false;
+    try {
+      const gl = this.renderer.getContext();
+      const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      const gpuName = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : "";
+      softwareGpu = /swiftshader|llvmpipe|softpipe|software|basic render|angle \(google/i.test(gpuName);
+    } catch {
+      softwareGpu = false;
+    }
+    this.softwareGpu = softwareGpu;
+    this.activeTier = softwareGpu ? "low" : mobileViewport ? "medium" : "high";
+    const rawDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    this.baseDpr = softwareGpu ? Math.min(1, rawDpr) : mobileViewport ? Math.min(1.5, rawDpr) : Math.min(2, Math.max(1.5, rawDpr));
     this.currentDpr = this.baseDpr;
     this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.shadowMap.enabled = true;
+    // three r187 removed PCFSoftShadowMap — PCF now carries the soft kernel itself.
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.04;
+    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.localClippingEnabled = true;
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.FogExp2(0xd2e1ec, 0.0055);
+    this.scene.fog = new THREE.FogExp2(0xd9e8f4, 0.0046);
 
     const aspect = Math.max(1, canvas.clientWidth) / Math.max(1, canvas.clientHeight);
     this.cameraCtrl = new BuildCameraController(canvas, aspect);
 
-    this.palette = createMaterialPalette();
+    // Hero PBR maps render at 1024² on desktop, 512² on mobile (`3d-high-resolution-textures`)
+    this.palette = createMaterialPalette(mobileViewport ? 1 : 2);
     this.palette.setAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
+    this.setupClippingMaterials();
+    this.setupRainSystem();
 
-    this.hemiLight = new THREE.HemisphereLight(0xd9ecff, 0x6f6859, 0.76);
+    this.hemiLight = new THREE.HemisphereLight(0xd9ecff, 0x6f6859, 0.68);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff5e0, 2.35);
+    this.sunLight = new THREE.DirectionalLight(0xfff4de, 2.45);
     this.sunLight.position.set(14, 22, -10);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(1024, 1024);
+    // 4096² shadow map on desktop high tier: eaves, rebar and brick courses keep crisp contact shadows
+    this.sunLight.shadow.mapSize.set(mobileViewport ? 1024 : 4096, mobileViewport ? 1024 : 4096);
     this.sunLight.shadow.camera.near = 1.5;
     this.sunLight.shadow.camera.far = 56;
     this.sunLight.shadow.camera.left = -10.5;
     this.sunLight.shadow.camera.right = 10.5;
     this.sunLight.shadow.camera.top = 14.5;
     this.sunLight.shadow.camera.bottom = -14.5;
-    this.sunLight.shadow.bias = -0.0003;
-    this.sunLight.shadow.normalBias = 0.006;
+    // normalBias scaled to the map resolution (`3d-wood-lighting-scorecard`: 0.0045 @4096, 0.0085 @2048)
+    this.sunLight.shadow.bias = mobileViewport ? -0.00035 : -0.00018;
+    this.sunLight.shadow.normalBias = mobileViewport ? 0.012 : 0.0048;
     this.sunLight.target.position.set(2.5, 2.4, 8.5);
     this.scene.add(this.sunLight, this.sunLight.target);
+
+    // Cool sky shadow-side fill light keeps unlit brickwork crisp without flat ambient (`3d-wood-lighting-scorecard`)
+    this.fillLight = new THREE.DirectionalLight(0xb2cff0, 0.45);
+    this.fillLight.position.set(-14, 12, 20);
+    this.scene.add(this.fillLight);
 
     this.lightningLight = new THREE.DirectionalLight(0xdce8ff, 0);
     this.lightningLight.position.set(-10, 24, -12);
@@ -287,6 +370,28 @@ export class BuildScene {
     this.skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false, fog: false });
     this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(140, 32, 20), this.skyMat);
     this.scene.add(this.skyMesh);
+
+    // HDR sun billboards: a hot core that blooms and feeds the god-ray march, plus a wide soft halo
+    const sunCoreTex = makeSunSpriteTexture(0.5, 0.86);
+    const sunHaloTex = makeSunSpriteTexture(0.14, 0.3);
+    this.sunCore = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: sunCoreTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }),
+    );
+    this.sunCore.scale.set(11, 11, 1);
+    this.sunHalo = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: sunHaloTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }),
+    );
+    this.sunHalo.scale.set(42, 42, 1);
+    this.sunCore.material.color.setRGB(5.6, 5.0, 4.3);
+    this.sunHalo.material.color.setRGB(1.05, 1.0, 0.92);
+    this.scene.add(this.sunCore, this.sunHalo);
+    this.staticDisposables.push(sunCoreTex, sunHaloTex, this.sunCore.material, this.sunHalo.material);
+
+    const initEnv = createEnvironmentMap(this.renderer, 10, 0);
+    this.envTex = initEnv;
+    this.scene.environment = initEnv;
+    this.scene.environmentIntensity = 0.72;
+    this.palette.bindEnvMap(initEnv);
 
     this.contactShadowTex = createContactShadowTexture();
     this.contactShadowMat = new THREE.MeshBasicMaterial({
@@ -333,9 +438,11 @@ export class BuildScene {
     this.overlayGroup.add(this.hoverTileMesh);
     this.staticDisposables.push(hoverGeo, hoverMat);
 
-    this.scene.add(this.envGroup, this.neighborsGroup, this.houseContainer, this.simGroup, this.overlayGroup, this.previewGroup, this.selectedRing);
+    this.scene.add(this.envGroup, this.neighborsGroup, this.houseContainer, this.simGroup, this.dimsGroup, this.overlayGroup, this.previewGroup, this.selectedRing);
 
     this.handleResize();
+    this.setupPostPipeline();
+    this.configurePostPipeline();
     window.addEventListener("resize", this.onResizeBound);
     if (canvas.parentElement && typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -347,6 +454,7 @@ export class BuildScene {
     canvas.addEventListener("pointermove", this.onPointerMoveBound);
     canvas.addEventListener("pointerdown", this.onPointerDownBound);
     canvas.addEventListener("pointerup", this.onPointerUpBound);
+    canvas.addEventListener("pointerleave", this.onPointerLeaveBound);
     canvas.addEventListener("webglcontextlost", this.onContextLostBound);
     canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
 
@@ -368,20 +476,262 @@ export class BuildScene {
     this.canvas.removeEventListener("webglcontextrestored", this.onContextRestoredBound);
     this.cameraCtrl.dispose();
 
+    this.postActive = false;
+    this.gtaoPass?.dispose();
+    this.atmospherePass?.dispose();
+    this.bloomPass?.dispose();
+    this.outputPass?.dispose();
+    this.composer?.dispose();
+    this.composer = null;
+    this.renderPass = null;
+    this.gtaoPass = null;
+    this.atmospherePass = null;
+    this.bloomPass = null;
+    this.outputPass = null;
+
     this.scene.remove(this.hoverHighlightMesh);
     this.hoverBoxGeo.dispose();
     this.envGroup.clear();
     this.neighborsGroup.clear();
     this.houseContainer.clear();
+    this.dimsGroup.clear();
     for (const r of this.dynResources) r.dispose();
     for (const r of this.simResources) r.dispose();
     for (const r of this.staticDisposables) r.dispose();
+    this.rainPoints?.geometry.dispose();
+    (this.rainPoints?.material as THREE.Material | undefined)?.dispose();
+    this.rainTex?.dispose();
     this.validMat.dispose();
     this.invalidMat.dispose();
     this.cyanMat.dispose();
     this.envTex?.dispose();
     this.palette.dispose();
     this.renderer.dispose();
+  }
+
+  public getCanvas(): HTMLCanvasElement {
+    return this.canvas;
+  }
+
+  public setQualityOverride(tier: BuildQualityTier): void {
+    this.qualityOverride = tier;
+    const effective: "high" | "medium" | "low" =
+      tier === "auto"
+        ? this.softwareGpu
+          ? "low"
+          : typeof window !== "undefined" && window.innerWidth < 768
+            ? "medium"
+            : "high"
+        : tier;
+    this.applyQualityTier(effective, tier === "high");
+  }
+
+  /** Toggle the cinematic ray-traced-look stack (GTAO + sun shafts + bloom + MSAA HDR). */
+  public setRayTracingLook(enabled: boolean): void {
+    this.rayTracingEnabled = enabled;
+    this.configurePostPipeline();
+  }
+
+  /**
+   * Cinematic "ray-tracing like" real-time pipeline (`3d-sky-rays` + GTAO + HDR bloom):
+   * linear HDR MSAA buffer → GTAO ambient occlusion → screen-space sun shafts with
+   * vignette/dither → UnrealBloom → single ACES tone-map + sRGB in OutputPass.
+   */
+  private setupPostPipeline(): void {
+    if (this.composer || this.disposed) return;
+    const parent = this.canvas.parentElement;
+    const w = Math.max(1, parent?.clientWidth ?? this.canvas.clientWidth);
+    const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
+    const target = new THREE.WebGLRenderTarget(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr), {
+      type: THREE.HalfFloatType,
+      // MSAA resolve on HalfFloat targets wedges software rasterizers (SwiftShader) into
+      // ghost-white frames — real GPUs keep 4x AA, software falls back to a clean resolve.
+      samples: this.softwareGpu ? 0 : 4,
+    });
+    this.composer = new EffectComposer(this.renderer, target);
+    this.renderPass = new RenderPass(this.scene, this.cameraCtrl.activeCamera);
+    this.gtaoPass = new GTAOPass(this.scene, this.cameraCtrl.activeCamera, w, h);
+    // OUTPUT.Default = scene + denoised AO blended on top. (Denoise would REPLACE the
+    // frame with the raw AO buffer — a near-white ghost screen on every "Tinggi" tier.)
+    this.gtaoPass.output = GTAOPass.OUTPUT.Default;
+    this.gtaoPass.updateGtaoMaterial({
+      radius: 1.15,
+      distanceExponent: 1.4,
+      thickness: 1.4,
+      scale: 1.0,
+      samples: 14,
+      distanceFallOff: 0.7,
+      screenSpaceRadius: false,
+    });
+    this.gtaoPass.blendIntensity = 1.1;
+    this.atmospherePass = new AtmospherePass();
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.7, 1.45);
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.renderPass);
+    this.composer.addPass(this.gtaoPass);
+    this.composer.addPass(this.atmospherePass);
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(this.outputPass);
+    this.composer.setPixelRatio(this.currentDpr);
+    this.composer.setSize(w, h);
+    this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+      (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__ = {
+        composer: this.composer,
+        gtao: this.gtaoPass,
+        atmo: this.atmospherePass,
+        bloom: this.bloomPass,
+      };
+    }
+  }
+
+  /** Enable / disable passes per quality tier; low tier falls back to the direct render. */
+  private configurePostPipeline(): void {
+    if (!this.composer) {
+      this.postActive = false;
+      return;
+    }
+    if (!this.rayTracingEnabled || this.activeTier === "low") {
+      this.postActive = false;
+      return;
+    }
+    this.postActive = true;
+    // GTAO's depth/normal gbuffer wedges software rasterizers into empty frames — hardware only.
+    if (this.gtaoPass) this.gtaoPass.enabled = this.activeTier === "high" && !this.softwareGpu;
+    if (this.atmospherePass) {
+      this.atmospherePass.atmosphereUniforms.uSamples.value = this.activeTier === "high" ? 40 : 22;
+    }
+  }
+
+  /** Project the sun into screen space and drive the god-ray uniforms every frame. */
+  private updateAtmosphere(cam: THREE.Camera): void {
+    const ap = this.atmospherePass;
+    if (!ap) return;
+    cam.updateMatrixWorld();
+    this._v1.copy(this.sunLight.position).applyMatrix4(cam.matrixWorldInverse);
+    if (this._v1.z > -1) {
+      // Sun sits behind the camera: no shafts, no mirrored source flash.
+      ap.atmosphereUniforms.uSunFade.value = 0;
+      return;
+    }
+    this._v1.copy(this.sunLight.position).project(cam);
+    const ux = this._v1.x * 0.5 + 0.5;
+    const uy = this._v1.y * 0.5 + 0.5;
+    ap.atmosphereUniforms.uSunUv.value.set(ux, uy);
+    const aspect = ap.atmosphereUniforms.uAspect.value;
+    // Overscan margin: keep a little energy while the sun is just outside the frame
+    const d = Math.hypot((ux - 0.5) * aspect, uy - 0.5);
+    ap.atmosphereUniforms.uSunFade.value = THREE.MathUtils.clamp(1 - (d - 0.85) / 0.95, 0, 1);
+    ap.atmosphereUniforms.uIntensity.value = this.godRayStrength;
+    ap.atmosphereUniforms.uSunColor.value.copy(this.sunLight.color);
+    ap.atmosphereUniforms.uTime.value = this.simElapsedS;
+  }
+
+  private applyQualityTier(tier: "high" | "medium" | "low", explicitHigh = false): void {
+    this.activeTier = tier;
+    const rawDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    // High deliberately supersamples on standard 1x displays (`3d-retina-resolution`): the
+    // house silhouette, rebar and window mullions stay crisp instead of looking like a game preview.
+    const targetDpr =
+      tier === "high"
+        ? this.softwareGpu
+          ? 1
+          : Math.min(2, Math.max(1.5, rawDpr))
+        : tier === "medium"
+          ? Math.min(rawDpr, 1.35)
+          : 1;
+    if (Math.abs(targetDpr - this.currentDpr) > 0.04) {
+      this.currentDpr = targetDpr;
+      this.renderer.setPixelRatio(this.currentDpr);
+      if (this.composer) {
+        this.composer.setPixelRatio(this.currentDpr);
+        this.handleResize();
+      } else {
+        this.handleResize();
+      }
+    }
+    const wantShadow = tier === "high" ? (this.mobileViewport ? 2048 : 4096) : tier === "medium" ? 1024 : 512;
+    this.renderer.shadowMap.enabled = tier !== "low";
+    if (this.sunLight.shadow.mapSize.x !== wantShadow) {
+      this.sunLight.shadow.mapSize.set(wantShadow, wantShadow);
+      this.sunLight.shadow.map?.dispose();
+      this.sunLight.shadow.map = null;
+      this.sunLight.shadow.bias = wantShadow >= 4096 ? -0.00018 : wantShadow >= 2048 ? -0.00025 : -0.00035;
+      this.sunLight.shadow.normalBias = wantShadow >= 4096 ? 0.0048 : wantShadow >= 2048 ? 0.0085 : 0.012;
+    }
+    this.configurePostPipeline();
+    if (explicitHigh) this.lastDprCheckMs = performance.now();
+  }
+
+  private setupClippingMaterials(): void {
+    const clippable = [
+      this.palette.brickOuter,
+      this.palette.brickInner,
+      this.palette.mortar,
+      this.palette.concrete,
+      this.palette.concreteXray,
+      this.palette.rebar,
+      this.palette.steelWf,
+      this.palette.steelLight,
+      this.palette.woodTeak,
+      this.palette.woodDeck,
+      this.palette.plasterExt,
+      this.palette.plasterInt,
+      this.palette.tileFloor,
+      this.palette.tileWet,
+      this.palette.tileWood,
+      this.palette.carport,
+      this.palette.glass,
+      this.palette.aluDark,
+      this.palette.roofCover,
+      this.palette.lisplank,
+      this.palette.ceiling,
+    ];
+    for (const m of clippable) m.clippingPlanes = [this.clipPlane];
+  }
+
+  private setupRainSystem(): void {
+    const count = 1800;
+    const pos = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      pos[i * 3] = (Math.random() - 0.5) * 18 + 2.5;
+      pos[i * 3 + 1] = Math.random() * 14;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 26 + 8.5;
+    }
+    const geo = new THREE.BufferGeometry();
+    const attr = new THREE.Float32BufferAttribute(pos, 3);
+    attr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("position", attr);
+    this.rainArray = attr.array as Float32Array;
+
+    const rCan = document.createElement("canvas");
+    rCan.width = 16;
+    rCan.height = 64;
+    const rCtx = rCan.getContext("2d");
+    if (rCtx) {
+      const grad = rCtx.createLinearGradient(0, 0, 0, 64);
+      grad.addColorStop(0, "rgba(210, 234, 252, 0)");
+      grad.addColorStop(0.25, "rgba(218, 238, 255, 0.72)");
+      grad.addColorStop(0.7, "rgba(232, 244, 255, 0.92)");
+      grad.addColorStop(1, "rgba(232, 244, 255, 0)");
+      rCtx.fillStyle = grad;
+      rCtx.fillRect(6, 2, 3, 60);
+    }
+    this.rainTex = new THREE.CanvasTexture(rCan);
+
+    const mat = new THREE.PointsMaterial({
+      color: 0xd9ecfb,
+      map: this.rainTex,
+      size: 0.24,
+      transparent: true,
+      opacity: 0.62,
+      depthWrite: false,
+      alphaTest: 0.02,
+    });
+    this.rainPoints = new THREE.Points(geo, mat);
+    this.rainPoints.frustumCulled = false;
+    this.rainPoints.visible = false;
+    this.scene.add(this.rainPoints);
   }
 
   public cancelActivePreview(): void {
@@ -416,6 +766,7 @@ export class BuildScene {
     studioView?: ViewState,
     lighting?: LightingSimulationResult,
     airflow?: AirflowSimulationResult,
+    flood?: FloodSimulationResult,
   ): void {
     this.derived = derived;
     this.struct = struct;
@@ -423,9 +774,26 @@ export class BuildScene {
     if (studioView) this.studioView = studioView;
     if (lighting) this.lighting = lighting;
     if (airflow) this.airflow = airflow;
+    if (flood) this.flood = flood;
 
     const { project } = derived;
     const sim = project.simulation;
+    this.lastRainMmH = sim.rainIntensityMmH;
+
+    // Sync Structural & Terrain viewport flags
+    const wasExploded = this.explodeTarget > 0.05;
+    const showTerrain = this.studioView?.showTerrain ?? true;
+    for (const ch of this.envGroup.children) {
+      if (ch.userData?.isTerrain) ch.visible = showTerrain;
+    }
+    this.neighborsGroup.visible = this.viewOpts.neighborsVisible && (this.studioView?.showNeighbors ?? true);
+    this.cameraCtrl.setAllowUnderground(!showTerrain);
+    this.cameraCtrl.setOrtho(this.studioView?.ortho ?? false);
+    this.explodeTarget = this.studioView?.explode ?? 0;
+    this.clipPlane.constant = this.studioView?.cutH ?? 100;
+    if (wasExploded !== (this.explodeTarget > 0.05)) {
+      this.applyLevelAndWallVisibility();
+    }
 
     // Sync PBR materials cleanly to Project Settings
     this.palette.plasterExt.color.set(sim.paintExtHex);
@@ -433,7 +801,7 @@ export class BuildScene {
     this.palette.roofCover.color.set(sim.roofColorHex);
     this.palette.setTileSize(project.systems.tileSizeCm);
 
-    const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}`;
+    const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}|${project.site.orientationDeg}`;
     if (nextEnvKey !== this.envKey) {
       this.envKey = nextEnvKey;
       const newSky = createSkyGradientTexture(sim.hourOfDay, sim.season, sim.rainIntensityMmH);
@@ -446,31 +814,78 @@ export class BuildScene {
       this.envTex = env;
       this.scene.environment = env;
       const isNight = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
-      this.scene.environmentIntensity = isNight ? 0.35 : 0.72;
+      const isStorm = sim.rainIntensityMmH > 20;
+      this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.82 : 0.62;
       this.palette.bindEnvMap(env);
 
-      // Sun angle by hour
-      const sunElev = Math.max(0.15, Math.sin(((sim.hourOfDay - 5.5) / 13) * Math.PI));
-      const sunAz = ((sim.hourOfDay - 12) / 6) * 0.9;
-      this.sunLight.position.set(2.5 + Math.sin(sunAz) * 24, Math.max(3, sunElev * 24), 8.5 - Math.cos(sunAz) * 14);
-      this.sunLight.intensity = isNight ? 0.25 : 2.35;
-      this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff5e0);
-      this.hemiLight.intensity = isNight ? 0.32 : 0.76;
-      if (this.scene.fog instanceof THREE.FogExp2) {
-        this.scene.fog.color.set(isNight ? 0x0e1628 : 0xd2e1ec);
+      // Sun angle + cool opposite sky fill (`3d-wood-lighting-scorecard`)
+      let sx = 0.45;
+      let sy = 0.78;
+      let sz = -0.42;
+      if (lighting) {
+        [sx, sy, sz] = lighting.solar.sunDir;
+        this.sunLight.position.set(2.5 + sx * 24, Math.max(2.5, sy * 24), 8.5 + sz * 24);
+      } else {
+        const sunElev = Math.max(0.15, Math.sin(((sim.hourOfDay - 5.5) / 13) * Math.PI));
+        const sunAz = ((sim.hourOfDay - 12) / 6) * 0.9;
+        sx = Math.sin(sunAz);
+        sy = sunElev;
+        sz = -Math.cos(sunAz) * 0.6;
+        this.sunLight.position.set(2.5 + sx * 24, Math.max(3, sy * 24), 8.5 + sz * 24);
       }
+      this.fillLight.position.set(2.5 - sx * 18, 12, 8.5 - sz * 18);
+      this.fillLight.intensity = isNight ? 0.14 : isStorm ? 0.35 : 0.4;
+      this.sunLight.intensity = isNight ? 0.18 : isStorm ? 1.15 : 2.75;
+      this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff4de);
+      this.hemiLight.intensity = isNight ? 0.26 : isStorm ? 0.7 : 0.5;
+
+      // HDR sun billboards ride the true solar direction; halo warms up at golden hour
+      this.sunDir.set(sx, sy, sz).normalize();
+      const isGolden =
+        !isNight && ((sim.hourOfDay >= 5.2 && sim.hourOfDay <= 7.5) || (sim.hourOfDay >= 16.5 && sim.hourOfDay <= 18.8));
+      const sunUp = sy > 0.03;
+      if (this.sunCore) {
+        this.sunCore.visible = !isNight && sunUp;
+        this.sunCore.position.set(2.5 + sx * 132, sy * 132, 8.5 + sz * 132);
+        this.sunCore.material.color.setRGB(isGolden ? 6.0 : 5.6, isGolden ? 3.6 : 5.0, isGolden ? 2.0 : 4.3);
+      }
+      if (this.sunHalo) {
+        this.sunHalo.visible = !isNight && sunUp && !isStorm;
+        this.sunHalo.position.set(2.5 + sx * 132, sy * 132, 8.5 + sz * 132);
+        this.sunHalo.material.color.setRGB(isGolden ? 1.2 : 0.9, isGolden ? 0.75 : 0.86, isGolden ? 0.46 : 0.78);
+      }
+
+      // Screen-space sun shaft strength (`3d-sky-rays`): strongest at a low golden sun, subtle at noon
+      this.godRayStrength = isNight ? 0 : isStorm ? 0.12 : isGolden ? 0.95 : 0.5;
+      this.godRayStrength *= THREE.MathUtils.lerp(1.3, 0.75, THREE.MathUtils.clamp(this.sunDir.y, 0, 1));
+
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
+        this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
+      }
+    }
+
+    if (this.rainPoints) {
+      this.rainPoints.visible = Boolean(this.studioView?.showRain) && sim.rainIntensityMmH > 0;
+      const density = Math.min(1, sim.rainIntensityMmH / 120);
+      this.rainActiveCount = Math.round(1800 * density);
+      this.rainPoints.geometry.setDrawRange(0, this.rainActiveCount);
     }
 
     const vFlags = this.studioView
       ? {
+          stg: this.studioView.stage,
           sb: this.studioView.showBricks,
           ss: this.studioView.showStructure,
+          st: this.studioView.showTerrain,
           sr: this.studioView.showRoof,
           srk: this.studioView.showRangka,
           sf: this.studioView.showFinishing,
           xr: this.studioView.xrayRebar,
           sa: this.studioView.showAir,
           sl: this.studioView.showListrik,
+          lb: this.studioView.showLabels,
+          dm: this.studioView.showDims,
           hp: this.studioView.hiddenParts,
         }
       : null;
@@ -498,7 +913,14 @@ export class BuildScene {
       al: this.viewOpts.activeLevel,
       lux: this.studioView?.showLuxHeatmap ?? false,
       air: this.studioView?.showAirParticles ?? false,
+      fldW: this.studioView?.showFloodWater ?? false,
+      stFld: this.flood?.streetFloodCm ?? 0,
+      cpFld: this.flood?.carportFloodCm ?? 0,
+      inFld: this.flood?.lt1FloorFloodCm ?? 0,
+      bar: project.floodMitigation.doorFloodBarrier,
+      barH: project.floodMitigation.barrierHeightCm,
       hr: Math.round(sim.hourOfDay * 4),
+      rn: Math.round(sim.rainIntensityMmH),
       ws: Math.round(sim.windSpeedMs * 10),
       wd: Math.round(sim.windDirectionDeg),
       at: Math.round(sim.ambientTempC * 2),
@@ -510,6 +932,7 @@ export class BuildScene {
       this.rebuildSimOverlays();
     }
 
+    this.applyWireframe(this.studioView?.wireframe ?? false);
     this.updateSelectionRing(derived, selected);
   }
 
@@ -552,20 +975,23 @@ export class BuildScene {
 
   private rebuildFromProject(derived: DerivedProjectModel, struct: StructuralReport): void {
     this.houseContainer.clear();
+    this.dimsGroup.clear();
     for (const r of this.dynResources) r.dispose();
     this.dynResources = [];
     this.animatedFans = [];
+    this.explodePieces = [];
+    this.explodeInstanced = [];
 
     const showBricksOverlay = this.viewOpts.showBricksOverlay;
     const sv = this.studioView;
     const showFinishing = showBricksOverlay ? false : (sv?.showFinishing ?? true);
-    // Only render 3D brick InstancedMesh in Build Mode when Bata overlay is active or plaster is hidden,
-    // so full-height bricks never block Sims-style wall cutaway when rotating the camera!
-    const showBricks = showBricksOverlay || (sv ? sv.showBricks && !showFinishing : false);
+    // Keep brick InstancedMesh decoupled from showFinishing (like Struktur Mode) so Exploded View bursts individual bricks cleanly out!
+    const showBricks = showBricksOverlay || (sv?.showBricks ?? true);
     const built = buildProjectHouse(derived, struct, this.palette, this.contactShadowMat, {
-      stage: 0,
+      stage: sv?.stage ?? 0,
       showBricks,
       showStructure: sv?.showStructure ?? true,
+      showTerrain: sv?.showTerrain ?? true,
       showRoof: sv?.showRoof ?? true,
       showRangka: sv?.showRangka ?? true,
       showFinishing,
@@ -575,6 +1001,12 @@ export class BuildScene {
       hiddenParts: new Set(sv?.hiddenParts ?? []),
       activeLevelView: "all",
       supportWallCutaway: true,
+      onExplodePiece: (obj, off) => {
+        this.explodePieces.push({ obj, base: obj.position.clone(), off });
+      },
+      onExplodeInstanced: (im, off) => {
+        this.registerExplodeInstanced(im, off);
+      },
     });
 
     this.houseContainer.add(built.houseRoot);
@@ -586,6 +1018,25 @@ export class BuildScene {
     this.animatedFans = built.animatedFans;
     this.lastCutawayYaw = Number.NaN;
 
+    const { project, roof } = derived;
+    const lt1Y = project.site.peil.floor1PeilM;
+    const lt2Y = lt1Y + (project.levels[0]?.height ?? 3.6);
+    if (sv?.showLabels) {
+      for (const fl of derived.floors) {
+        if (fl.levelIndex === 1 && this.viewOpts.activeLevel === 0) continue;
+        const ly = fl.levelIndex === 0 ? lt1Y + 1.4 : lt2Y + 1.4;
+        for (const r of fl.rooms) {
+          const sp = this.makeLabelSprite(r.room.name, `${r.netAreaM2.toFixed(1)} m²`);
+          sp.position.set(r.centroid.x, ly, r.centroid.z);
+          this.dimsGroup.add(sp);
+        }
+      }
+    }
+    if (sv?.showDims) {
+      this.build3dDimensions(project.site.width, project.site.depth, roof.ridgeElevationM + lt1Y);
+    }
+
+    this.applyExplode(this.explodeCurrent);
     this.cameraCtrl.setBounds({
       minX: -4.5,
       maxX: derived.project.site.width + 4.5,
@@ -594,6 +1045,108 @@ export class BuildScene {
     });
     this.rebuildGridOverlay();
     this.applyLevelAndWallVisibility();
+  }
+
+  private build3dDimensions(width: number, depth: number, topY: number): void {
+    const mat = new THREE.LineBasicMaterial({ color: 0xf59e0b, depthTest: false, transparent: true, opacity: 0.9 });
+    this.dynResources.push(mat);
+    const addLine = (a: [number, number, number], b: [number, number, number], label: string) => {
+      const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]);
+      const line = new THREE.Line(geo, mat);
+      line.renderOrder = 999;
+      this.dimsGroup.add(line);
+      this.dynResources.push(geo);
+      const sp = this.makeLabelSprite(label, "");
+      sp.position.set((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5 + 0.25, (a[2] + b[2]) * 0.5);
+      sp.scale.set(1.3, 0.45, 1);
+      this.dimsGroup.add(sp);
+    };
+    addLine([0, 0.1, -0.8], [width, 0.1, -0.8], `${width.toFixed(2)} m`);
+    addLine([-0.8, 0.1, 0], [-0.8, 0.1, depth], `${depth.toFixed(2)} m`);
+    addLine([width + 0.6, 0, depth], [width + 0.6, topY, depth], `${topY.toFixed(2)} m`);
+  }
+
+  private makeLabelSprite(line1: string, line2: string): THREE.Sprite {
+    const cv = document.createElement("canvas");
+    cv.width = 420;
+    cv.height = line2 ? 140 : 88;
+    const ctx = cv.getContext("2d")!;
+    ctx.fillStyle = "rgba(22, 25, 30, 0.88)";
+    ctx.strokeStyle = "rgba(234, 152, 74, 0.9)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.roundRect(4, 4, cv.width - 8, cv.height - 8, 16);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#f4f1ea";
+    ctx.textAlign = "center";
+    ctx.font = "700 32px sans-serif";
+    ctx.fillText(line1, cv.width / 2, line2 ? 56 : 54);
+    if (line2) {
+      ctx.fillStyle = "#fbbf24";
+      ctx.font = "600 28px monospace";
+      ctx.fillText(line2, cv.width / 2, 108);
+    }
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+    this.dynResources.push(tex, mat);
+    const sp = new THREE.Sprite(mat);
+    sp.scale.set(1.65, line2 ? 0.55 : 0.36, 1);
+    sp.renderOrder = 999;
+    return sp;
+  }
+
+  private registerExplodeInstanced(im: THREE.InstancedMesh, off: Float32Array): void {
+    const n = im.count;
+    const pos = new Float32Array(n * 3);
+    const quat = new Float32Array(n * 4);
+    const scl = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      im.getMatrixAt(i, this._m4);
+      this._m4.decompose(this._v1, this._q, this._s1);
+      pos[i * 3] = this._v1.x;
+      pos[i * 3 + 1] = this._v1.y;
+      pos[i * 3 + 2] = this._v1.z;
+      quat[i * 4] = this._q.x;
+      quat[i * 4 + 1] = this._q.y;
+      quat[i * 4 + 2] = this._q.z;
+      quat[i * 4 + 3] = this._q.w;
+      scl[i * 3] = this._s1.x;
+      scl[i * 3 + 1] = this._s1.y;
+      scl[i * 3 + 2] = this._s1.z;
+    }
+    this.explodeInstanced.push({ im, n, pos, off, quat, scl });
+  }
+
+  private applyExplode(k: number): void {
+    const e = THREE.MathUtils.clamp(k, 0, 1);
+    for (const p of this.explodePieces) {
+      p.obj.position.copy(p.base).addScaledVector(p.off, e);
+    }
+    for (const im of this.explodeInstanced) {
+      for (let i = 0; i < im.n; i++) {
+        this._q.set(im.quat[i * 4]!, im.quat[i * 4 + 1]!, im.quat[i * 4 + 2]!, im.quat[i * 4 + 3]!);
+        this._v1.set(
+          im.pos[i * 3]! + im.off[i * 3]! * e,
+          im.pos[i * 3 + 1]! + im.off[i * 3 + 1]! * e,
+          im.pos[i * 3 + 2]! + im.off[i * 3 + 2]! * e,
+        );
+        this._s1.set(im.scl[i * 3]!, im.scl[i * 3 + 1]!, im.scl[i * 3 + 2]!);
+        this._m4.compose(this._v1, this._q, this._s1);
+        im.im.setMatrixAt(i, this._m4);
+      }
+      im.im.instanceMatrix.needsUpdate = true;
+    }
+    this._s1.set(1, 1, 1);
+  }
+
+  private applyWireframe(wf: boolean): void {
+    this.houseContainer.traverse((o) => {
+      if (o instanceof THREE.Mesh && (o.material instanceof THREE.MeshStandardMaterial || o.material instanceof THREE.MeshPhysicalMaterial)) {
+        o.material.wireframe = wf;
+      }
+    });
   }
 
   private rebuildGridOverlay(): void {
@@ -638,7 +1191,8 @@ export class BuildScene {
   }
 
   private applyLevelAndWallVisibility(): void {
-    const lv = this.viewOpts.activeLevel;
+    const exploded = this.explodeTarget > 0.05;
+    const lv = exploded ? 2 : this.viewOpts.activeLevel;
     if (this.levelRoots) {
       this.levelRoots[0].visible = true;
       this.levelRoots[1].visible = lv >= 1;
@@ -647,7 +1201,7 @@ export class BuildScene {
       this.lt2StructuralGroup.visible = lv >= 1;
     }
     if (this.roofGroup) {
-      if (this.viewOpts.roofVisibility === "show") this.roofGroup.visible = true;
+      if (exploded || this.viewOpts.roofVisibility === "show") this.roofGroup.visible = true;
       else if (this.viewOpts.roofVisibility === "hide") this.roofGroup.visible = false;
       else this.roofGroup.visible = lv >= 2;
     }
@@ -655,7 +1209,7 @@ export class BuildScene {
   }
 
   private updateWallCutawayVisibility(force = false): void {
-    const camPos = this.cameraCtrl.camera.position;
+    const camPos = this.cameraCtrl.activeCamera.position;
     const lotCX = (this.derived?.project.site.width ?? 5) * 0.5;
     const lotCZ = (this.derived?.project.site.depth ?? 17) * 0.5;
     const dx = camPos.x - lotCX;
@@ -667,10 +1221,10 @@ export class BuildScene {
     if (!force && Math.abs(viewAngle - this.lastCutawayYaw) < 0.04) return;
     this.lastCutawayYaw = viewAngle;
 
-    const active = Math.min(1, this.viewOpts.activeLevel);
+    const exploded = this.explodeTarget > 0.05;
 
     for (const ch of this.neighborsGroup.children) {
-      if (this.viewOpts.activeLevel >= 2) {
+      if (exploded || this.viewOpts.activeLevel >= 2 || this.viewOpts.wallVisibility === "up") {
         ch.visible = true;
       } else if (ch.name === "neighbor-left") {
         ch.visible = camPos.x >= 1.2;
@@ -679,14 +1233,11 @@ export class BuildScene {
       }
     }
 
+    // Wall visibility must obey the user's Penuh/Cutaway/Rendah choice on EVERY level:
+    // the merged viewport defaults to "Atap" (activeLevel 2), and the old
+    // `activeLevel >= 2` / `levelIndex < active` gates made Cutaway & Rendah dead buttons there.
     for (const rec of this.wallCutawayRecords) {
-      if (this.viewOpts.activeLevel >= 2 || rec.levelIndex < active) {
-        rec.fullGroup.visible = true;
-        rec.cutawayGroup.visible = false;
-        rec.downGroup.visible = false;
-        continue;
-      }
-      if (this.viewOpts.wallVisibility === "up") {
+      if (exploded || this.viewOpts.wallVisibility === "up") {
         rec.fullGroup.visible = true;
         rec.cutawayGroup.visible = false;
         rec.downGroup.visible = false;
@@ -813,13 +1364,48 @@ export class BuildScene {
       this.simGroup.add(im);
       this.simResources.push(geo, mat);
     }
+
+    if (this.studioView.showFloodWater && this.flood && this.flood.streetFloodCm > 0) {
+      const streetWaterY = this.flood.streetFloodCm / 100;
+      const extW = Math.max(24, project.site.width + 18);
+      const extGeo = new THREE.PlaneGeometry(extW, 11.4, 36, 24);
+      extGeo.rotateX(-Math.PI / 2);
+      const extMesh = new THREE.Mesh(extGeo, this.palette.floodWater);
+      extMesh.position.set(project.site.width * 0.5, streetWaterY, -1.0);
+      extMesh.renderOrder = 600;
+      this.simGroup.add(extMesh);
+      this.simResources.push(extGeo);
+
+      if (this.flood.lt1FloorFloodCm > 0) {
+        const insideWaterY = lt1Y + this.flood.lt1FloorFloodCm / 100;
+        const inW = Math.max(2, project.site.width - 0.1);
+        const inD = Math.max(4, project.site.depth - 4.0);
+        const inGeo = new THREE.PlaneGeometry(inW, inD, 16, 28);
+        inGeo.rotateX(-Math.PI / 2);
+        const inMesh = new THREE.Mesh(inGeo, this.palette.floodWater);
+        inMesh.position.set(project.site.width * 0.5, insideWaterY, 4.0 + inD * 0.5);
+        inMesh.renderOrder = 601;
+        this.simGroup.add(inMesh);
+        this.simResources.push(inGeo);
+      }
+
+      if (project.floodMitigation.doorFloodBarrier) {
+        const bh = project.floodMitigation.barrierHeightCm / 100;
+        const barMat = new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.35, metalness: 0.65 });
+        const barGeo = createChamferBox(1.05, bh, 0.06, 0.008, 1);
+        const b1 = new THREE.Mesh(barGeo, barMat);
+        b1.position.set(Math.min(project.site.width - 0.6, 1.58), lt1Y + bh * 0.5, 4.0);
+        this.simGroup.add(b1);
+        this.simResources.push(barGeo, barMat);
+      }
+    }
   }
 
   private raycastHit(e: PointerEvent, ignoreParts = true): { sel: NonNullable<SelectionTarget>; label: string; obj: THREE.Object3D } | null {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.camera);
+    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
     const hits = this.raycaster.intersectObjects(this.houseContainer.children, true);
     for (const h of hits) {
       let cur: THREE.Object3D | null = h.object;
@@ -881,7 +1467,7 @@ export class BuildScene {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
-      this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.camera);
+      this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
     }
 
     const targets: THREE.Object3D[] = [];
@@ -919,8 +1505,9 @@ export class BuildScene {
           nx /= nLen;
           nz /= nLen;
           // Ensure normal points toward camera side of wall
-          const toCamX = this.cameraCtrl.camera.position.x - h.point.x;
-          const toCamZ = this.cameraCtrl.camera.position.z - h.point.z;
+          const camPos = this.cameraCtrl.activeCamera.position;
+          const toCamX = camPos.x - h.point.x;
+          const toCamZ = camPos.z - h.point.z;
           if (nx * toCamX + nz * toCamZ < 0) {
             nx = -nx;
             nz = -nz;
@@ -944,8 +1531,9 @@ export class BuildScene {
         const wLen = Math.max(0.01, Math.hypot(wdx, wdz));
         let nx = -wdz / wLen;
         let nz = wdx / wLen;
-        const toCamX = this.cameraCtrl.camera.position.x - wallSnap.worldX;
-        const toCamZ = this.cameraCtrl.camera.position.z - wallSnap.worldZ;
+        const camPos = this.cameraCtrl.activeCamera.position;
+        const toCamX = camPos.x - wallSnap.worldX;
+        const toCamZ = camPos.z - wallSnap.worldZ;
         if (nx * toCamX + nz * toCamZ < 0) {
           nx = -nx;
           nz = -nz;
@@ -1219,7 +1807,7 @@ export class BuildScene {
     if (rect.width <= 0 || rect.height <= 0) return;
 
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.camera);
+    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
     const hit = this.raycaster.ray.intersectPlane(this.activeFloorPlane, this.hitPoint);
     if (!hit) {
       this.hoverTileMesh.visible = false;
@@ -1317,6 +1905,16 @@ export class BuildScene {
     }
 
     this.actions.onHoverCell(gx, gz, hit.x, hit.z, inBounds);
+    if (this.viewOpts.activeTool === "select" && !this.dragPendingCommit && this.actions.onHoverPart) {
+      const nowMs = performance.now();
+      if (nowMs - this.lastHoverMs > 70) {
+        this.lastHoverMs = nowMs;
+        const hPart = this.raycastHit(e, false);
+        this.actions.onHoverPart(hPart ? hPart.label : null, e.clientX - rect.left, e.clientY - rect.top);
+      }
+    } else {
+      this.actions.onHoverPart?.(null, 0, 0);
+    }
     this.updateToolPreview(e);
   }
 
@@ -1375,7 +1973,8 @@ export class BuildScene {
         }
         this.actions.onSelect(sel);
       } else {
-        this.actions.onSelect(hitRes ? hitRes.sel : null);
+        const fallback = hitRes ?? this.raycastHit(e, false);
+        this.actions.onSelect(fallback ? fallback.sel : null);
       }
       return;
     }
@@ -1704,7 +2303,8 @@ export class BuildScene {
       return;
     }
 
-    this.actions.onSelect(hitRes ? hitRes.sel : null);
+    const finalHit = hitRes ?? (tool === "select" ? this.raycastHit(e, false) : null);
+    this.actions.onSelect(finalHit ? finalHit.sel : null);
   }
 
   private handleResize(): void {
@@ -1713,6 +2313,11 @@ export class BuildScene {
     const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
     this.renderer.setSize(w, h, false);
     this.cameraCtrl.setAspect(w / h);
+    if (this.composer) {
+      this.composer.setPixelRatio(this.currentDpr);
+      this.composer.setSize(w, h);
+    }
+    if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
   }
 
   private handleVisibility(): void {
@@ -1736,12 +2341,52 @@ export class BuildScene {
 
       const dt = (now - this.lastFrameMs) / 1000;
       this.lastFrameMs = now;
+      const clampedDt = Math.min(0.05, Math.max(0.001, dt));
+      this.simElapsedS += clampedDt;
+
+      if (Math.abs(this.explodeCurrent - this.explodeTarget) > 0.001) {
+        this.explodeCurrent += (this.explodeTarget - this.explodeCurrent) * (this.reducedMotion ? 1 : Math.min(1, dt * 10));
+        this.applyExplode(this.explodeCurrent);
+      }
 
       if (!this.reducedMotion) {
         for (const fan of this.animatedFans) {
           fan.rotation.y += dt * 7.5;
         }
       }
+
+      if (this.rainPoints && this.rainPoints.visible && this.rainArray && !this.reducedMotion) {
+        const speed = 13.5 * clampedDt;
+        const slant = 2.6 * clampedDt;
+        for (let i = 0; i < this.rainActiveCount; i++) {
+          let y = this.rainArray[i * 3 + 1]! - speed;
+          let z = this.rainArray[i * 3 + 2]! + slant;
+          if (y < 0) {
+            y = 13.5;
+            z = (Math.random() - 0.5) * 26 + 8.5;
+          }
+          this.rainArray[i * 3 + 1] = y;
+          this.rainArray[i * 3 + 2] = z;
+        }
+        (this.rainPoints.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+
+        if (this.rainActiveCount > 1200) {
+          this.lightningTimer -= clampedDt;
+          if (this.lightningTimer <= 0) {
+            this.lightningTimer = 4 + Math.random() * 7;
+            this.lightningEnergy = 2.8;
+          }
+        }
+      }
+      if (this.lightningEnergy > 0.01 && !this.reducedMotion) {
+        this.lightningEnergy *= Math.exp(-clampedDt * 10);
+        this.lightningLight.intensity = this.lightningEnergy;
+      } else {
+        this.lightningLight.intensity = 0;
+      }
+
+      this.palette.floodUniforms.uTime.value = this.reducedMotion ? 0 : this.simElapsedS;
+      this.palette.floodUniforms.uRain.value = Math.min(1, this.lastRainMmH / 100);
 
       if (this.airParticlesMesh && this.airflow && this.airParticleStates.length > 0 && this.derived) {
         const af = this.airflow;
@@ -1782,28 +2427,42 @@ export class BuildScene {
 
       this.cameraCtrl.update(dt);
       this.updateWallCutawayVisibility(false);
-      this.renderer.render(this.scene, this.cameraCtrl.camera);
+      // Lock sky dome center to camera (`3d-sky-background`) so orbiting never introduces dome translation parallax
+      this.skyMesh.position.copy(this.cameraCtrl.activeCamera.position);
+      const cam = this.cameraCtrl.activeCamera;
+      if (this.postActive && this.composer) {
+        if (this.renderPass) this.renderPass.camera = cam;
+        if (this.gtaoPass && this.gtaoPass.camera !== cam) this.gtaoPass.camera = cam;
+        // Skip GTAO while the section cut or rain streaks would write ghosts into the AO gbuffer
+        if (this.gtaoPass) {
+          const cutActive = (this.studioView?.cutH ?? 100) < 9.15;
+          const rainActive = Boolean(this.studioView?.showRain) && this.lastRainMmH > 0;
+          this.gtaoPass.enabled = this.activeTier === "high" && !this.softwareGpu && !cutActive && !rainActive;
+        }
+        this.updateAtmosphere(cam);
+        this.composer.render();
+      } else {
+        this.renderer.render(this.scene, cam);
+      }
 
       if (dt > 0 && dt < 0.25) {
         this.fpsSamples.push(1 / dt);
         if (this.fpsSamples.length >= 24) {
           const avg = Math.round(this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length);
           this.fpsSamples = [];
-          if (now - this.lastDprCheckMs > 2000) {
+          if (this.qualityOverride === "auto" && now - this.lastDprCheckMs > 2000) {
             this.lastDprCheckMs = now;
-            if (avg < 36 && this.currentDpr > 1) {
-              this.currentDpr = 1;
-              this.renderer.setPixelRatio(1);
-              this.handleResize();
-            } else if (avg > 54 && this.currentDpr < this.baseDpr) {
-              this.currentDpr = this.baseDpr;
-              this.renderer.setPixelRatio(this.currentDpr);
-              this.handleResize();
+            if (avg < 34 && this.activeTier === "high") {
+              this.applyQualityTier("medium");
+            } else if (avg > 54 && this.activeTier === "medium") {
+              this.applyQualityTier("high");
             }
           }
           const info = this.renderer.info;
           const snap: BuildSceneStats = {
             fps: avg,
+            tier: this.activeTier,
+            dpr: Number(this.currentDpr.toFixed(2)),
             calls: info.render.calls,
             triangles: info.render.triangles,
             geometries: info.memory.geometries,

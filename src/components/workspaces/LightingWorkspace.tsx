@@ -4,7 +4,7 @@ import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { KpiMetric, SectionHeader, StudioCard, StudioRange } from "@/components/ui/StudioPrimitives";
-import { Eye, Hammer, Lightbulb, Sun } from "lucide-react";
+import { Eye, Lightbulb, Sun } from "lucide-react";
 
 export function LightingWorkspace({ lighting }: { lighting: LightingSimulationResult }) {
   const project = useStudioStore((s) => s.project);
@@ -13,7 +13,6 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
   const patchSiteOrientation = useStudioStore((s) => s.patchSiteOrientation);
   const updateLight = useStudioStore((s) => s.updateLight);
   const patchView = useStudioStore((s) => s.patchView);
-  const setWorkspace = useStudioStore((s) => s.setWorkspace);
 
   const sim = project.simulation;
 
@@ -26,7 +25,7 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
             title={`Simulasi Pencahayaan Surabaya (${project.site.latitude.toFixed(2)}, ${project.site.longitude.toFixed(2)})`}
             subtitle={lighting.methodologyNote}
           />
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => patchView({ showLuxHeatmap: !view.showLuxHeatmap })}
@@ -40,16 +39,9 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
               <Eye className="h-3.5 w-3.5" />
               {view.showLuxHeatmap ? "Heatmap Lux 3D Aktif" : "Tampilkan Heatmap Lux 3D"}
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                patchView({ showLuxHeatmap: true });
-                setWorkspace("build");
-              }}
-              className="flex h-8 items-center gap-1.5 rounded-lg border border-border bg-black/25 px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
-            >
-              <Hammer className="h-3.5 w-3.5" /> Tambah/Geser Lampu di Build
-            </button>
+            <span className="rounded-lg border border-white/10 bg-black/25 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+              Gunakan tab <b className="text-foreground">Utilitas</b> di dock bawah untuk pasang/geser lampu di 3D.
+            </span>
           </div>
         </StudioCard>
 

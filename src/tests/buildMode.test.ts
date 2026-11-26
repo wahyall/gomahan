@@ -10,6 +10,7 @@ import {
   validateProjectStairPlacement,
 } from "@/features/buildMode";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
+import { parseVersionedProjectSave } from "@/lib/model/schema";
 import { buildRabSummary } from "@/lib/quantities/rabEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { computeStructuralReport } from "@/lib/structure/sniEngine";
@@ -152,5 +153,39 @@ describe("Unified Single-Source Build Mode (Project + Zundo Undo/Redo)", () => {
     expect(useStudioStore.getState().project.structuralParams.concreteFcMpa).toBe(25.0);
     expect(useStudioStore.getState().project.updatedAt).not.toBe("");
     expect(prevUpdatedAt).toBeDefined();
+  });
+
+  it("supports unified Build panels, terrain visibility toggle for foundations, and Pro-only normalization", () => {
+    const store = useStudioStore.getState();
+
+    // Terrain visibility toggle for foundation inspection
+    expect(useStudioStore.getState().view.showTerrain).toBe(true);
+    store.patchView({ showTerrain: false, showStructure: true });
+    expect(useStudioStore.getState().view.showTerrain).toBe(false);
+    expect(useStudioStore.getState().view.showStructure).toBe(true);
+    store.patchView({ showTerrain: true });
+
+    // Unified Build Studio panel navigation across structure/lighting/airflow/flood/inspection
+    store.setWorkspace("rab");
+    store.openBuildPanel("flood");
+    expect(useStudioStore.getState().workspace).toBe("build");
+    expect(useStudioStore.getState().studioPanel).toBe("flood");
+    store.openBuildPanel("structure");
+    expect(useStudioStore.getState().studioPanel).toBe("structure");
+    store.setStudioPanel("none");
+    expect(useStudioStore.getState().studioPanel).toBe("none");
+
+    // Legacy "simple" save mode is coerced cleanly into always-on "pro"
+    const legacySimple = {
+      ...useStudioStore.getState().project,
+      gamification: { ...useStudioStore.getState().project.gamification, mode: "simple" },
+    };
+    const parsed = parseVersionedProjectSave(legacySimple);
+    expect(parsed.status).toBe("ok");
+    if (parsed.status === "ok") {
+      expect(parsed.data.gamification.mode).toBe("pro");
+      store.loadProject(parsed.data);
+      expect(useStudioStore.getState().project.gamification.mode).toBe("pro");
+    }
   });
 });
