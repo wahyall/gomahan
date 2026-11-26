@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
@@ -13,7 +12,7 @@ import { WALK_CONFIG, type WalkCameraMode } from "@/features/walkMode/walkConfig
 import { simsAudio } from "@/lib/audio/simsAudio";
 import { AdaptiveRenderGovernor } from "@/lib/scene/adaptiveQuality";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
-import { createContactShadowTexture } from "@/lib/scene/geometryHelpers";
+import { createContactShadowTexture, disposeResource } from "@/lib/scene/geometryHelpers";
 import {
   createEnvironmentMap,
   createMaterialPalette,
@@ -54,17 +53,17 @@ export class WalkScene {
   private readonly palette: MaterialPalette;
   private readonly skyMat: THREE.MeshBasicMaterial;
   private readonly skyMesh: THREE.Mesh;
-  private envTex: THREE.Texture | null = null;
+  private pmremCache = new Map<"day" | "night" | "storm", THREE.Texture>();
+  private skyKey = "";
   private readonly contactShadowTex: THREE.CanvasTexture;
   private readonly contactShadowMat: THREE.MeshBasicMaterial;
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly sunLight: THREE.DirectionalLight;
   private readonly fillLight: THREE.DirectionalLight;
 
-  /** Cinematic ray-traced-look post stack, mirroring BuildScene (`GTAO + sun shafts + bloom + MSAA HDR`). */
+  /** Cinematic ray-traced-look post stack, mirroring BuildScene (`Baked AO + sun shafts + bloom + MSAA HDR`). */
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
-  private gtaoPass: GTAOPass | null = null;
   private atmospherePass: AtmospherePass | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private outputPass: OutputPass | null = null;
@@ -125,8 +124,15 @@ export class WalkScene {
 
   private derived: DerivedProjectModel;
   private struct: StructuralReport;
-  private buildSignature = "";
+  private prevBuildRefs: {
+    systems: unknown;
+    peil: unknown;
+    buildExtras: unknown;
+    levels: { walls: unknown; rooms: unknown; slabs: unknown; stairs: unknown; furniture: unknown; lights: unknown; hvac: unknown }[];
+  } | null = null;
   private envKey = "";
+  private needsRender = true;
+  private lastWalkActive = true;
   private sessionDoorOverrides = new Map<string, number>();
 
   // Camera & Input State
@@ -156,7 +162,10 @@ export class WalkScene {
   private resizeObserver: ResizeObserver | null = null;
   private rafId: number | null = null;
   private lastFrameMs = performance.now();
-  private fpsSamples: number[] = [];
+  private readonly fpsRing = new Float32Array(24);
+  private fpsRingIdx = 0;
+  private fpsRingCount = 0;
+  private fpsRingSum = 0;
   private disposed = false;
 
   private readonly onResizeBound = () => this.handleResize();
@@ -220,6 +229,8 @@ export class WalkScene {
     this.currentDpr = this.baseDpr;
     this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
@@ -257,8 +268,7 @@ export class WalkScene {
     this.fillLight.position.set(-14, 12, 20);
     this.scene.add(this.fillLight);
 
-    const skyTex = createSkyGradientTexture(derived.project.simulation.hourOfDay, derived.project.simulation.season, derived.project.simulation.rainIntensityMmH);
-    this.skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false, fog: false });
+    this.skyMat = new THREE.MeshBasicMaterial({ color: 0x87b8de, side: THREE.BackSide, depthWrite: false, fog: false });
     this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(140, 32, 20), this.skyMat);
     this.scene.add(this.skyMesh);
 
@@ -282,12 +292,12 @@ export class WalkScene {
     this.contactShadowMat = new THREE.MeshBasicMaterial({
       map: this.contactShadowTex,
       transparent: true,
-      opacity: 0.68,
+      opacity: 0.86,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
     });
-    this.staticDisposables.push(skyTex, this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
+    this.staticDisposables.push(this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
 
     buildStaticNeighborhood(this.envGroup, this.neighborsGroup, this.palette, this.contactShadowTex, this.staticDisposables);
 
@@ -335,10 +345,20 @@ export class WalkScene {
     this.startLoop();
   }
 
+  public requestRender(): void {
+    this.needsRender = true;
+  }
+
+  private markShadowDirty(): void {
+    this.renderer.shadowMap.needsUpdate = true;
+    this.needsRender = true;
+  }
+
   /** Toggle the cinematic ray-traced-look stack (same setting as the Build viewport). */
   public setRayTracingLook(enabled: boolean): void {
     this.rayTracingEnabled = enabled;
     this.configurePostPipeline();
+    this.requestRender();
   }
 
   /** Apply the shared render-quality tier (Auto / Tinggi / Sedang / Hemat). */
@@ -355,11 +375,12 @@ export class WalkScene {
             : "high"
         : tier;
     this.applyQualityTier(effective);
+    this.requestRender();
   }
 
   /**
    * Cinematic "ray-traced like" real-time pipeline, mirrored from BuildScene:
-   * linear HDR MSAA buffer → GTAO ambient occlusion → screen-space sun shafts with
+   * linear HDR MSAA buffer → Baked AO → screen-space sun shafts with
    * vignette/dither → UnrealBloom → single ACES tone-map + sRGB in OutputPass.
    */
   private setupPostPipeline(): void {
@@ -374,24 +395,10 @@ export class WalkScene {
     });
     this.composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, this.camera);
-    this.gtaoPass = new GTAOPass(this.scene, this.camera, w, h);
-    // OUTPUT.Default = scene + denoised AO blended on top (Denoise would show the raw white AO buffer).
-    this.gtaoPass.output = GTAOPass.OUTPUT.Default;
-    this.gtaoPass.updateGtaoMaterial({
-      radius: 1.15,
-      distanceExponent: 1.4,
-      thickness: 1.4,
-      scale: 1.0,
-      samples: 14,
-      distanceFallOff: 0.7,
-      screenSpaceRadius: false,
-    });
-    this.gtaoPass.blendIntensity = 1.1;
     this.atmospherePass = new AtmospherePass();
     this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.7, 1.45);
     this.outputPass = new OutputPass();
     this.composer.addPass(this.renderPass);
-    this.composer.addPass(this.gtaoPass);
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(this.outputPass);
@@ -410,8 +417,6 @@ export class WalkScene {
       return;
     }
     this.postActive = true;
-    // GTAO's depth/normal gbuffer wedges software rasterizers into empty frames — hardware only.
-    if (this.gtaoPass) this.gtaoPass.enabled = this.activeTier === "high" && !this.softwareGpu;
     if (this.atmospherePass) {
       this.atmospherePass.atmosphereUniforms.uSamples.value = this.activeTier === "high" ? 40 : 22;
     }
@@ -444,8 +449,10 @@ export class WalkScene {
       this.sunLight.shadow.map = null;
       this.sunLight.shadow.bias = wantShadow >= 2048 ? -0.00025 : wantShadow >= 1024 ? -0.0003 : -0.00035;
       this.sunLight.shadow.normalBias = wantShadow >= 2048 ? 0.0085 : wantShadow >= 1024 ? 0.01 : 0.012;
+      this.markShadowDirty();
     }
     this.configurePostPipeline();
+    this.requestRender();
   }
 
   /** Project the sun into screen space and drive the god-ray uniforms every frame (BuildScene parity). */
@@ -485,20 +492,30 @@ export class WalkScene {
     const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}|${project.site.orientationDeg}`;
     if (nextEnvKey !== this.envKey) {
       this.envKey = nextEnvKey;
-      const newSky = createSkyGradientTexture(sim.hourOfDay, sim.season, sim.rainIntensityMmH);
-      this.skyMat.map?.dispose();
-      this.skyMat.map = newSky;
-      this.skyMat.needsUpdate = true;
+      const nextSkyKey = `${Math.round(sim.hourOfDay * 4)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}`;
+      if (nextSkyKey !== this.skyKey) {
+        this.skyKey = nextSkyKey;
+        const newSky = createSkyGradientTexture(sim.hourOfDay, sim.season, sim.rainIntensityMmH);
+        this.skyMat.map?.dispose();
+        this.skyMat.map = newSky;
+        this.skyMat.color.setHex(0xffffff);
+        this.skyMat.needsUpdate = true;
+      }
 
-      const env = createEnvironmentMap(this.renderer, sim.hourOfDay, sim.rainIntensityMmH);
-      this.envTex?.dispose();
-      this.envTex = env;
-      this.scene.environment = env;
       const solar = computeSolarPosition(sim.hourOfDay, project.site.latitude, sim.season, project.site.orientationDeg);
       const isNight = !solar.isDaylight;
       const isStorm = sim.rainIntensityMmH > 20;
+      const pmremKey: "day" | "night" | "storm" = isNight ? "night" : isStorm ? "storm" : "day";
+      let env = this.pmremCache.get(pmremKey);
+      if (!env) {
+        env = createEnvironmentMap(this.renderer, sim.hourOfDay, sim.rainIntensityMmH);
+        this.pmremCache.set(pmremKey, env);
+      }
+      if (this.scene.environment !== env) {
+        this.scene.environment = env;
+        this.palette.bindEnvMap(env);
+      }
       this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.82 : 0.62;
-      this.palette.bindEnvMap(env);
 
       const [sx, sy, sz] = solar.sunDir;
       this.sunLight.position.set(2.5 + sx * 24, Math.max(3, sy * 24), 8.5 + sz * 24);
@@ -528,20 +545,50 @@ export class WalkScene {
         this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
         this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
       }
+      this.markShadowDirty();
     }
 
-    const sig = JSON.stringify({
-      u: project.updatedAt,
-      sys: project.systems,
-      peil: project.site.peil,
-      lv: project.levels.map((l) => [l.walls, l.rooms, l.slabs, l.stairs, l.furniture, l.lights, l.hvac]),
-      ext: project.buildExtras,
-    });
+    const pb = this.prevBuildRefs;
+    const levelsChanged =
+      !pb ||
+      pb.levels.length !== project.levels.length ||
+      project.levels.some((l, i) => {
+        const pl = pb.levels[i]!;
+        return (
+          pl.walls !== l.walls ||
+          pl.rooms !== l.rooms ||
+          pl.slabs !== l.slabs ||
+          pl.stairs !== l.stairs ||
+          pl.furniture !== l.furniture ||
+          pl.lights !== l.lights ||
+          pl.hvac !== l.hvac
+        );
+      });
+    const buildChanged =
+      !pb ||
+      pb.systems !== project.systems ||
+      pb.peil !== project.site.peil ||
+      pb.buildExtras !== project.buildExtras ||
+      levelsChanged;
 
-    if (sig !== this.buildSignature) {
-      this.buildSignature = sig;
+    if (buildChanged) {
+      this.prevBuildRefs = {
+        systems: project.systems,
+        peil: project.site.peil,
+        buildExtras: project.buildExtras,
+        levels: project.levels.map((l) => ({
+          walls: l.walls,
+          rooms: l.rooms,
+          slabs: l.slabs,
+          stairs: l.stairs,
+          furniture: l.furniture,
+          lights: l.lights,
+          hvac: l.hvac,
+        })),
+      };
       this.refreshWalkWorldAndHouse();
     }
+    this.requestRender();
   }
 
   private getEffectiveDerived(): DerivedProjectModel {
@@ -569,7 +616,7 @@ export class WalkScene {
   }
 
   private rebuildHouseAndLights(derived: DerivedProjectModel, struct: StructuralReport): void {
-    for (const r of this.dynResources) r.dispose();
+    for (const r of this.dynResources) disposeResource(r);
     this.dynResources = [];
     this.houseContainer.clear();
 
@@ -595,6 +642,7 @@ export class WalkScene {
     this.animatedFans = built.animatedFans;
 
     this.updatePooledLights(true);
+    this.markShadowDirty();
   }
 
   private updatePooledLights(force: boolean): void {
@@ -671,6 +719,7 @@ export class WalkScene {
     this.camera.updateProjectionMatrix();
     this.camInitialized = false;
     simsAudio.play("select");
+    this.requestRender();
     this.emitTelemetry(true);
   }
 
@@ -680,6 +729,7 @@ export class WalkScene {
 
   public toggleDebugOverlay(): void {
     this.debugOverlay.setVisible(!this.debugOverlay.isVisible());
+    this.requestRender();
     this.emitTelemetry(true);
   }
 
@@ -687,6 +737,7 @@ export class WalkScene {
     this.ctrl.teleportToSafeSpawn();
     this.pitchRad = this.cameraMode === "third_person" ? THREE.MathUtils.degToRad(-WALK_CONFIG.thirdPerson.pitchDefaultDeg) : 0;
     this.camInitialized = false;
+    this.requestRender();
     this.emitTelemetry(true);
   }
 
@@ -704,6 +755,7 @@ export class WalkScene {
 
   public setVirtualInput(forward: number, strafe: number, sprint: boolean): void {
     this.virtualMove = { forward, strafe, sprint };
+    this.requestRender();
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
@@ -740,10 +792,12 @@ export class WalkScene {
       return;
     }
     this.keysDown.add(e.code);
+    this.requestRender();
   }
 
   private handleKeyUp(e: KeyboardEvent): void {
     this.keysDown.delete(e.code);
+    this.requestRender();
   }
 
   private handlePointerDown(e: PointerEvent): void {
@@ -803,6 +857,7 @@ export class WalkScene {
       this.cameraMode === "first_person" ? WALK_CONFIG.firstPerson.pitchMaxDeg : WALK_CONFIG.thirdPerson.pitchMaxDeg,
     );
     this.pitchRad = THREE.MathUtils.clamp(this.pitchRad, minP, maxP);
+    this.requestRender();
   }
 
   private handleWheel(e: WheelEvent): void {
@@ -813,6 +868,7 @@ export class WalkScene {
         WALK_CONFIG.thirdPerson.minDist,
         WALK_CONFIG.thirdPerson.maxDist,
       );
+      this.requestRender();
     }
   }
 
@@ -843,6 +899,7 @@ export class WalkScene {
         this.renderer.render(this.scene, this.camera);
       }
     }
+    this.requestRender();
   }
 
   private handleVisibility(): void {
@@ -855,6 +912,7 @@ export class WalkScene {
       }
     } else {
       this.lastFrameMs = performance.now();
+      this.requestRender();
       this.startLoop();
     }
   }
@@ -889,17 +947,32 @@ export class WalkScene {
       }
       const dt = Math.min(0.1, Math.max(0.001, (now - this.lastFrameMs) / 1000));
       this.lastFrameMs = now;
+
+      const move = this.readMoveInput(dt);
+      const fansActive = this.animatedFans.length > 0 && !this.reducedMotion;
+      const moveInputActive =
+        move.forward !== 0 || move.strafe !== 0 || this.keysDown.has("KeyQ");
+      const camSettling =
+        !this.camInitialized ||
+        (this.cameraMode === "third_person" && Math.abs(this.smoothCamDist - this.thirdPersonDist) > 1e-3);
+      const shouldStepAndRender =
+        this.needsRender || moveInputActive || camSettling || fansActive || this.lastWalkActive;
+
+      if (!shouldStepAndRender) {
+        this.rafId = requestAnimationFrame(tick);
+        return;
+      }
+      this.needsRender = false;
       this.simElapsedS += dt;
 
       // Spin ceiling/stand fans gently (skipped if user prefers reduced motion)
-      if (!this.reducedMotion) {
+      if (fansActive) {
         for (const fan of this.animatedFans) {
           fan.rotation.y += dt * 4.5;
         }
       }
 
       // Advance kinematic capsule controller
-      const move = this.readMoveInput(dt);
       const prevDist = this.ctrl.distanceTraveledM;
       const snap = this.ctrl.step(dt, {
         forward: move.forward,
@@ -907,6 +980,7 @@ export class WalkScene {
         sprint: move.sprint,
         yaw: this.ctrl.yaw,
       });
+      this.lastWalkActive = snap.speed > 0.01 || !snap.grounded || moveInputActive;
 
       // Footsteps SFX cadence
       const stepDelta = snap.distanceTraveledM - prevDist;
@@ -957,13 +1031,20 @@ export class WalkScene {
       }
       this.hasRenderedOnce = true;
 
-      // FPS, Adaptive DPR Governor & Stats Telemetry
+      // FPS, Adaptive DPR Governor & Stats Telemetry (O(1) circular ring buffer, zero-GC)
       const fpsInst = 1 / Math.max(0.001, dt);
-      this.fpsSamples.push(fpsInst);
-      if (this.fpsSamples.length > 24) this.fpsSamples.shift();
-      if (this.qualityOverride === "auto" && this.fpsSamples.length >= 20 && now - this.lastDprCheckMs > 2000) {
+      if (this.fpsRingCount === 24) {
+        this.fpsRingSum -= this.fpsRing[this.fpsRingIdx]!;
+      } else {
+        this.fpsRingCount += 1;
+      }
+      this.fpsRing[this.fpsRingIdx] = fpsInst;
+      this.fpsRingSum += fpsInst;
+      this.fpsRingIdx = (this.fpsRingIdx + 1) % 24;
+
+      if (this.qualityOverride === "auto" && this.fpsRingCount >= 20 && now - this.lastDprCheckMs > 2000) {
         this.lastDprCheckMs = now;
-        const avg = this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length;
+        const avg = this.fpsRingSum / this.fpsRingCount;
         const decision = this.dprGovernor.sample(avg, now);
         if (decision === "downgrade" && this.currentDpr > 1) {
           this.currentDpr = 1;
@@ -1051,9 +1132,7 @@ export class WalkScene {
   private emitTelemetry(force: boolean): void {
     const now = performance.now();
     const avgFps =
-      this.fpsSamples.length > 0
-        ? Math.round(this.fpsSamples.reduce((a, b) => a + b, 0) / this.fpsSamples.length)
-        : 60;
+      this.fpsRingCount > 0 ? Math.round(this.fpsRingSum / this.fpsRingCount) : 60;
     const snap = this.ctrl.getSnapshot();
     const stateSig = `${snap.x.toFixed(2)}|${snap.y.toFixed(2)}|${snap.z.toFixed(2)}|${snap.yaw.toFixed(2)}|${snap.currentLevel}|${snap.roomName}|${snap.nearestDoor?.opId ?? ""}|${snap.nearestDoor?.openPct ?? -1}|${snap.collidedLastTick}|${this.cameraMode}|${this.pointerLocked}|${this.debugOverlay.isVisible()}|${Math.round(avgFps / 5)}`;
     const minGap = stateSig !== this.lastEmittedState ? 90 : 450;
@@ -1104,20 +1183,26 @@ export class WalkScene {
     this.houseContainer.clear();
     this.avatar.dispose();
     this.debugOverlay.dispose();
-    for (const r of this.dynResources) r.dispose();
-    for (const r of this.staticDisposables) r.dispose();
-    this.envTex?.dispose();
+    for (const r of this.dynResources) disposeResource(r);
+    for (const r of this.staticDisposables) disposeResource(r);
+    this.dynResources = [];
+    this.staticDisposables = [];
+    if (this.sunLight.shadow.map) {
+      this.sunLight.shadow.map.dispose();
+      this.sunLight.shadow.map = null;
+    }
+    this.skyMat.map?.dispose();
+    for (const env of this.pmremCache.values()) env.dispose();
+    this.pmremCache.clear();
     this.palette.dispose();
 
     this.postActive = false;
-    this.gtaoPass?.dispose();
     this.atmospherePass?.dispose();
     this.bloomPass?.dispose();
     this.outputPass?.dispose();
     this.composer?.dispose();
     this.composer = null;
     this.renderPass = null;
-    this.gtaoPass = null;
     this.atmospherePass = null;
     this.bloomPass = null;
     this.outputPass = null;

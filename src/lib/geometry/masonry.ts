@@ -116,6 +116,10 @@ function subtractIntervals(base: Interval, cuts: Interval[]): Interval[] {
   return pieces.filter((p) => p.hi - p.lo > 0.015);
 }
 
+export interface MasonryTakeoffOptions {
+  includeBricks?: boolean;
+}
+
 /**
  * Analytic brick-by-brick masonry and mortar/adhesive takeoff engine.
  * Supports ANY custom brick dimensions (L × H × T in mm), mortar joint (mm),
@@ -125,7 +129,9 @@ export function computeMasonryTakeoff(
   levels: Level[],
   brickSpec: BrickSpec,
   extraTopHeightAt?: (levelIndex: number, x: number, z: number) => number,
+  options?: MasonryTakeoffOptions,
 ): MasonryTakeoff {
+  const includeBricks = options?.includeBricks ?? true;
   const bL = Math.max(0.05, brickSpec.lengthMm / 1000);
   const bH = Math.max(0.02, brickSpec.heightMm / 1000);
   const j = Math.max(0.001, brickSpec.mortarMm / 1000);
@@ -135,6 +141,8 @@ export function computeMasonryTakeoff(
 
   const bricks: BrickInstance[] = [];
   const perWall: WallMasonrySummary[] = [];
+
+  let totalPiecesPlaced = 0;
 
   let outerPiecesEquivalent = 0;
   let innerPiecesEquivalent = 0;
@@ -250,24 +258,27 @@ export function computeMasonryTakeoff(
               wallFull++;
             }
             wallPieces++;
+            totalPiecesPlaced++;
 
             const bv = segLen * hgt * wallThick;
             wallBrickVol += bv;
             totalBrickVol += bv;
 
-            bricks.push({
-              levelIndex: level.index,
-              wallId: w.id,
-              outer: w.exterior,
-              x: wx,
-              y: yCourse,
-              z: wz,
-              len: segLen,
-              hgt,
-              thick: wallThick,
-              rotY,
-              isCut,
-            });
+            if (includeBricks) {
+              bricks.push({
+                levelIndex: level.index,
+                wallId: w.id,
+                outer: w.exterior,
+                x: wx,
+                y: yCourse,
+                z: wz,
+                len: segLen,
+                hgt,
+                thick: wallThick,
+                rotY,
+                isCut,
+              });
+            }
           }
         }
       }
@@ -323,7 +334,7 @@ export function computeMasonryTakeoff(
     perWall,
     outerPiecesEquivalent,
     innerPiecesEquivalent,
-    totalPiecesPlaced: bricks.length,
+    totalPiecesPlaced,
     cutPiecesCount,
     buyOuterBricks,
     buyInnerBricks,
@@ -342,4 +353,12 @@ export function computeMasonryTakeoff(
     sandM3,
     bricksPerM2Nominal,
   };
+}
+
+export function generateBrickInstances(
+  levels: Level[],
+  brickSpec: BrickSpec,
+  extraTopHeightAt?: (levelIndex: number, x: number, z: number) => number,
+): BrickInstance[] {
+  return computeMasonryTakeoff(levels, brickSpec, extraTopHeightAt, { includeBricks: true }).bricks;
 }

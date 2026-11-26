@@ -100,25 +100,32 @@ export function buildFurnitureMesh(
 ): THREE.Object3D {
   const isCloth = item.category === "seating" || item.category === "bed";
   const isVehicle = item.category === "vehicle";
-  const bodyMat = new THREE.MeshPhysicalMaterial({
-    color: new THREE.Color(item.colorHex),
-    roughness: isCloth ? 0.86 : isVehicle ? 0.24 : 0.44,
-    metalness: isVehicle ? 0.58 : item.category === "kitchen" ? 0.14 : 0.02,
-    sheen: isCloth ? 0.65 : 0,
-    sheenRoughness: 0.68,
-    clearcoat: isVehicle ? 0.92 : 0.05,
-    clearcoatRoughness: isVehicle ? 0.12 : 0.4,
-    envMap: palette.aluDark.envMap,
-    envMapIntensity: isVehicle ? 1.15 : 0.45,
-  });
-  const accentMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(item.accentHex ?? "#5a6354"),
-    roughness: isCloth ? 0.8 : 0.58,
-    metalness: 0.04,
-    envMap: palette.aluDark.envMap,
-    envMapIntensity: 0.4,
-  });
-  disposables.push(bodyMat, accentMat);
+  const bodyKey = `body|${item.colorHex.toLowerCase()}|${isCloth ? "c" : isVehicle ? "v" : item.category === "kitchen" ? "k" : "d"}`;
+  const bodyMat = palette.getPropMaterial(
+    bodyKey,
+    () =>
+      new THREE.MeshPhysicalMaterial({
+        color: new THREE.Color(item.colorHex),
+        roughness: isCloth ? 0.86 : isVehicle ? 0.24 : 0.44,
+        metalness: isVehicle ? 0.58 : item.category === "kitchen" ? 0.14 : 0.02,
+        sheen: isCloth ? 0.65 : 0,
+        sheenRoughness: 0.68,
+        clearcoat: isVehicle ? 0.92 : 0.05,
+        clearcoatRoughness: isVehicle ? 0.12 : 0.4,
+        envMapIntensity: isVehicle ? 1.15 : 0.45,
+      }),
+  );
+  const accentHex = (item.accentHex ?? "#5a6354").toLowerCase();
+  const accentMat = palette.getPropMaterial(
+    `accent|${accentHex}|${isCloth ? "c" : "d"}`,
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(accentHex),
+        roughness: isCloth ? 0.8 : 0.58,
+        metalness: 0.04,
+        envMapIntensity: 0.4,
+      }),
+  );
 
   const { x: w, y: h, z: d } = item.size;
   let rootObj: THREE.Object3D;
@@ -520,12 +527,15 @@ export function buildFurnitureMesh(
     }
 
     case "motorbike": {
-      const headMat = new THREE.MeshStandardMaterial({
-        color: 0xfff8d6,
-        emissive: 0xfff3b0,
-        emissiveIntensity: 1.4,
-      });
-      disposables.push(headMat);
+      const headMat = palette.getPropMaterial(
+        "bike:headlight",
+        () =>
+          new THREE.MeshStandardMaterial({
+            color: 0xfff8d6,
+            emissive: 0xfff3b0,
+            emissiveIntensity: 1.4,
+          }),
+      );
       const buildBike = (detail: 0 | 1 | 2) => {
         const b = new PropBatcher();
         if (detail === 2) {
@@ -566,8 +576,10 @@ export function buildFurnitureMesh(
     }
 
     case "tropical_plant": {
-      const soilMat = new THREE.MeshStandardMaterial({ color: 0x3b2c20, roughness: 0.96 });
-      disposables.push(soilMat);
+      const soilMat = palette.getPropMaterial(
+        "plant:soil",
+        () => new THREE.MeshStandardMaterial({ color: 0x3b2c20, roughness: 0.96 }),
+      );
       const buildPlant = (detail: 0 | 1 | 2) => {
         const b = new PropBatcher();
         if (detail === 2) {
@@ -679,16 +691,23 @@ export function buildHvacMesh(
   animatedFanBlades: THREE.Object3D[],
 ): THREE.Group {
   const g = new THREE.Group();
-  const whitePlastic = new THREE.MeshStandardMaterial({
-    color: unit.on ? 0xf7f8fa : 0xc2c6cc,
-    roughness: 0.34,
-    metalness: 0.05,
-    envMap: palette.aluDark.envMap,
-  });
-  const indicatorMat = new THREE.MeshBasicMaterial({
-    color: unit.on ? (unit.type === "ac_split" ? 0x38bdf8 : 0x34d399) : 0x6b7280,
-  });
-  disposables.push(whitePlastic, indicatorMat);
+  const whitePlastic = palette.getPropMaterial(
+    `hvac:plastic:${unit.on ? "on" : "off"}`,
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: unit.on ? 0xf7f8fa : 0xc2c6cc,
+        roughness: 0.34,
+        metalness: 0.05,
+      }),
+  );
+  const indKey = unit.on ? (unit.type === "ac_split" ? "ac_on" : "fan_on") : "off";
+  const indicatorMat = palette.getPropMaterial(
+    `hvac:ind:${indKey}`,
+    () =>
+      new THREE.MeshBasicMaterial({
+        color: unit.on ? (unit.type === "ac_split" ? 0x38bdf8 : 0x34d399) : 0x6b7280,
+      }),
+  );
 
   const b = new PropBatcher();
   if (unit.type === "ac_split") {
@@ -765,9 +784,12 @@ export function buildLightFixtureMesh(
   disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[],
 ): THREE.Group {
   const g = new THREE.Group();
-  const warmCol = light.colorTempK <= 3200 ? 0xffcf87 : light.colorTempK <= 4200 ? 0xfff0d4 : 0xeaf4ff;
-  const bulbMat = new THREE.MeshBasicMaterial({ color: light.on ? warmCol : 0x6b6f75 });
-  disposables.push(bulbMat);
+  const tempBucket = light.colorTempK <= 3200 ? "warm" : light.colorTempK <= 4200 ? "neutral" : "cool";
+  const warmCol = tempBucket === "warm" ? 0xffcf87 : tempBucket === "neutral" ? 0xfff0d4 : 0xeaf4ff;
+  const bulbMat = palette.getPropMaterial(
+    `light:bulb:${light.on ? tempBucket : "off"}`,
+    () => new THREE.MeshBasicMaterial({ color: light.on ? warmCol : 0x6b6f75 }),
+  );
 
   const b = new PropBatcher();
   if (light.type === "pendant") {

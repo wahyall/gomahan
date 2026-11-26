@@ -29,19 +29,14 @@ export function CommandPalette() {
   const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    const onFocusIn = (e: FocusEvent) => {
-      if (useStudioStore.getState().commandPaletteOpen) return;
-      const target = e.target;
-      if (target instanceof HTMLElement && !target.closest('[role="dialog"]')) {
-        previousFocusRef.current = target;
+    if (open && !wasOpenRef.current) {
+      if (!previousFocusRef.current) {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && !active.closest('[role="dialog"]')) {
+          previousFocusRef.current = active;
+        }
       }
-    };
-    document.addEventListener("focusin", onFocusIn);
-    return () => document.removeEventListener("focusin", onFocusIn);
-  }, []);
-
-  useEffect(() => {
-    if (!open && wasOpenRef.current) {
+    } else if (!open && wasOpenRef.current) {
       const toRestore = previousFocusRef.current;
       previousFocusRef.current = null;
       queueMicrotask(() => toRestore?.focus?.());
@@ -54,11 +49,15 @@ export function CommandPalette() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         const nextOpen = !useStudioStore.getState().commandPaletteOpen;
-        setOpen(nextOpen);
         if (nextOpen) {
+          const active = document.activeElement;
+          if (active instanceof HTMLElement && !active.closest('[role="dialog"]')) {
+            previousFocusRef.current = active;
+          }
           setQuery("");
           setSelectedIndex(0);
         }
+        setOpen(nextOpen);
       } else if (e.key === "Escape" && useStudioStore.getState().commandPaletteOpen) {
         setOpen(false);
       }

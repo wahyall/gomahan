@@ -25,6 +25,7 @@ export class BuildCameraController {
   private useOrtho = false;
   private allowUnderground = false;
   private domElement: HTMLElement;
+  private domRect: DOMRect | null = null;
   private bounds: BuildCameraBounds;
   private aspect = 16 / 9;
 
@@ -147,7 +148,15 @@ export class BuildCameraController {
     this.aspect = Math.max(0.1, aspect);
     this.camera.aspect = this.aspect;
     this.camera.updateProjectionMatrix();
+    this.domRect = this.domElement.getBoundingClientRect();
     this.updateCameraTransform();
+  }
+
+  private getRect(): DOMRect {
+    if (!this.domRect || this.domRect.width <= 0) {
+      this.domRect = this.domElement.getBoundingClientRect();
+    }
+    return this.domRect;
   }
 
   public setBounds(bounds: BuildCameraBounds): void {
@@ -345,7 +354,7 @@ export class BuildCameraController {
       return;
     }
 
-    const rect = this.domElement.getBoundingClientRect();
+    const rect = this.getRect();
     if (rect.width > 0 && rect.height > 0) {
       this.cursorNdc.set(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -399,7 +408,7 @@ export class BuildCameraController {
 
   private handleWheel(e: WheelEvent): void {
     e.preventDefault();
-    const rect = this.domElement.getBoundingClientRect();
+    const rect = this.getRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -441,13 +450,12 @@ export class BuildCameraController {
 
   /**
    * Advances keyboard/edge pan + smooth camera damping using frame delta seconds.
+   * Returns `true` if the camera moved or is still damping toward its goal.
    */
-  public update(dt: number): void {
+  public update(dt: number): boolean {
     const clampedDt = Math.min(0.05, Math.max(0.001, dt));
     const panSpeed = Math.max(4.5, this.currDistance * 0.72);
     const orbitSpeed = 1.65;
-
-    this.computeHorizontalBasis();
 
     let moveForward = 0;
     let moveRight = 0;
@@ -465,6 +473,7 @@ export class BuildCameraController {
     }
 
     if (moveForward !== 0 || moveRight !== 0) {
+      this.computeHorizontalBasis();
       const len = Math.hypot(moveForward, moveRight) || 1;
       this.goalTarget.addScaledVector(this._fwd, (moveForward / len) * panSpeed * clampedDt);
       this.goalTarget.addScaledVector(this._right, (moveRight / len) * panSpeed * clampedDt);
@@ -476,13 +485,32 @@ export class BuildCameraController {
       if (this.keys.has("e")) this.goalYaw += orbitSpeed * clampedDt;
     }
 
+    const dx = this.goalTarget.x - this.currTarget.x;
+    const dy = this.goalTarget.y - this.currTarget.y;
+    const dz = this.goalTarget.z - this.currTarget.z;
+    const dYaw = this.goalYaw - this.currYaw;
+    const dPitch = this.goalPitch - this.currPitch;
+    const dDist = this.goalDistance - this.currDistance;
+
+    if (
+      Math.abs(dx) < 1e-4 &&
+      Math.abs(dy) < 1e-4 &&
+      Math.abs(dz) < 1e-4 &&
+      Math.abs(dYaw) < 1e-4 &&
+      Math.abs(dPitch) < 1e-4 &&
+      Math.abs(dDist) < 1e-4
+    ) {
+      return false;
+    }
+
     const alpha = 1 - Math.exp(-10.5 * clampedDt);
     this.currTarget.lerp(this.goalTarget, alpha);
-    this.currYaw += (this.goalYaw - this.currYaw) * alpha;
-    this.currPitch += (this.goalPitch - this.currPitch) * alpha;
-    this.currDistance += (this.goalDistance - this.currDistance) * alpha;
+    this.currYaw += dYaw * alpha;
+    this.currPitch += dPitch * alpha;
+    this.currDistance += dDist * alpha;
 
     this.updateCameraTransform();
+    return true;
   }
 
   private updateCameraTransform(): void {
@@ -503,13 +531,15 @@ export class BuildCameraController {
     this.camera.position.set(camX, camY, camZ);
     this.camera.lookAt(this.currTarget);
 
-    const halfH = this.currDistance * 0.42;
-    this.orthoCamera.left = -halfH * this.aspect;
-    this.orthoCamera.right = halfH * this.aspect;
-    this.orthoCamera.top = halfH;
-    this.orthoCamera.bottom = -halfH;
-    this.orthoCamera.position.set(camX, camY, camZ);
-    this.orthoCamera.lookAt(this.currTarget);
-    this.orthoCamera.updateProjectionMatrix();
+    if (this.useOrtho) {
+      const halfH = this.currDistance * 0.42;
+      this.orthoCamera.left = -halfH * this.aspect;
+      this.orthoCamera.right = halfH * this.aspect;
+      this.orthoCamera.top = halfH;
+      this.orthoCamera.bottom = -halfH;
+      this.orthoCamera.position.set(camX, camY, camZ);
+      this.orthoCamera.lookAt(this.currTarget);
+      this.orthoCamera.updateProjectionMatrix();
+    }
   }
 }

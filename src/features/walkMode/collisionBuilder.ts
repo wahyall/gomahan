@@ -78,14 +78,14 @@ export interface WalkSurfaceSample {
 
 export class SpatialHashGrid {
   public readonly cellSize: number;
-  private readonly cells = new Map<string, number[]>();
+  private readonly cells = new Map<number, number[]>();
 
   constructor(cellSize = WALK_CONFIG.spatialCellSize) {
     this.cellSize = cellSize;
   }
 
-  private key(gx: number, gz: number): string {
-    return `${gx},${gz}`;
+  private key(gx: number, gz: number): number {
+    return ((gx + 32768) << 16) | ((gz + 32768) & 0xffff);
   }
 
   public insertBox(index: number, minX: number, maxX: number, minZ: number, maxZ: number): void {

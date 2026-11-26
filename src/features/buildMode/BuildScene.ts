@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
@@ -50,7 +49,8 @@ import type {
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import type { FloodSimulationResult } from "@/lib/simulation/floodEngine";
 import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
-import { createChamferBox, createContactShadowTexture, mergeGeometryBatch } from "@/lib/scene/geometryHelpers";
+import { createChamferBox, createContactShadowTexture, disposeGeometry, disposeResource } from "@/lib/scene/geometryHelpers";
+import { buildInstancedContactDecals, type ContactDecalSpec } from "@/lib/scene/bakedAo";
 import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, makeSunSpriteTexture, type MaterialPalette } from "@/lib/scene/materials";
 import {
   buildProjectFurnitureObject,
@@ -170,6 +170,12 @@ export class BuildScene {
   private readonly houseContainer = new THREE.Group();
   private readonly propsContainer = new THREE.Group();
   private readonly propLevelRoots: [THREE.Group, THREE.Group] = [new THREE.Group(), new THREE.Group()];
+  private readonly lightPoolLevelRoots: [THREE.Group, THREE.Group] = [new THREE.Group(), new THREE.Group()];
+  private spotLightPools: [THREE.SpotLight[], THREE.SpotLight[]] = [[], []];
+  private pointLightPools: [THREE.PointLight[], THREE.PointLight[]] = [[], []];
+  private housePickables: THREE.Object3D[] = [];
+  private readonly _pickTargets: THREE.Object3D[] = [];
+  private canvasRect: DOMRect | null = null;
   private readonly simGroup = new THREE.Group();
   private readonly dimsGroup = new THREE.Group();
   private readonly overlayGroup = new THREE.Group();
@@ -233,10 +239,58 @@ export class BuildScene {
   private flood: FloodSimulationResult | null = null;
   private studioView: ViewState | null = null;
   private selected: SelectionTarget = null;
+  private skyKey = "";
+  private envStateKey: "day" | "night" | "storm" | "" = "";
+  private readonly pmremCache = new Map<"day" | "night" | "storm", THREE.Texture>();
   private envKey = "";
-  private buildSignature = "";
-  private propsSignature = "";
-  private simSignature = "";
+  private prevBuildRefs: {
+    systems: unknown;
+    peil: unknown;
+    structuralParams: unknown;
+    soil: unknown;
+    floodMitigation: unknown;
+    buildExtras: unknown;
+    levelsMeta: { id: string; index: number; name: string; height: number; walls: unknown; rooms: unknown; slabs: unknown; stairs: unknown }[];
+    showBricksOverlay: boolean;
+    previewRoofType: RoofType | null;
+    stage: number;
+    showBricks: boolean;
+    showStructure: boolean;
+    showTerrain: boolean;
+    showRoof: boolean;
+    showRangka: boolean;
+    showFinishing: boolean;
+    xrayRebar: boolean;
+    showAir: boolean;
+    showListrik: boolean;
+    hiddenParts: string[];
+  } | null = null;
+  private prevPropsRefs: {
+    peil: unknown;
+    stage: number;
+    levels: { index: number; height: number; furniture: unknown; lights: unknown; hvac: unknown }[];
+  } | null = null;
+  private prevSimRefs: {
+    activeLevel: number;
+    showLuxHeatmap: boolean;
+    showAirParticles: boolean;
+    showFloodWater: boolean;
+    flood: unknown;
+    doorFloodBarrier: boolean;
+    barrierHeightCm: number;
+    hr: number;
+    rn: number;
+    ws: number;
+    wd: number;
+    at: number;
+    lights: unknown[];
+    hvac: unknown[];
+  } | null = null;
+  private lastWireframe: boolean | null = null;
+  private needsRender = true;
+  private contactDecalMeshes: [THREE.InstancedMesh | null, THREE.InstancedMesh | null] = [null, null];
+  private contactDecalResources: [THREE.BufferGeometry[], THREE.BufferGeometry[]] = [[], []];
+  private contactDecalIndexMap = new Map<string, { lvIdx: 0 | 1; index: number; w: number; d: number; yRenderOffset: number }>();
   private lastCutawayYaw = Number.NaN;
   private lastCutawayKey = "";
 
@@ -337,12 +391,11 @@ export class BuildScene {
   private lastDprCheckMs = 0;
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
-  private gtaoPass: GTAOPass | null = null;
   private atmospherePass: AtmospherePass | null = null;
   private bloomPass: UnrealBloomPass | null = null;
   private outputPass: OutputPass | null = null;
   private postActive = false;
-  /** Cinematic "ray-traced look" stack: HDR MSAA → GTAO → sun shafts → bloom → ACES. */
+  /** Cinematic "ray-traced look" stack: HDR MSAA → Baked AO → sun shafts → bloom → ACES. */
   private rayTracingEnabled = true;
   /**
    * Hysteresis governor for the auto quality tier. The naive threshold logic
@@ -400,6 +453,11 @@ export class BuildScene {
   private readonly pointerNdc = new THREE.Vector2();
   private readonly hitPoint = new THREE.Vector3();
   private readonly activeFloorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.5);
+  private readonly floorPreviewGeo = new THREE.BoxGeometry(0.5, 0.03, 0.5);
+  private readonly floorPreviewPool = new THREE.InstancedMesh(this.floorPreviewGeo, this.validMat, 500);
+  private previewRafId: number | null = null;
+  private pendingPreviewEvent: PointerEvent | null = null;
+  private pendingPreviewHits: THREE.Intersection[] | undefined = undefined;
 
   private resizeObserver: ResizeObserver | null = null;
   private rafId: number | null = null;
@@ -417,6 +475,7 @@ export class BuildScene {
     if (this.hoverTileMesh) this.hoverTileMesh.visible = false;
     this.actions.onHoverPart?.(null, 0, 0);
     this.actions.onHoverCell(0, 0, 0, 0, false);
+    this.requestRender();
   };
   private readonly onContextLostBound = (e: Event) => {
     e.preventDefault();
@@ -459,6 +518,8 @@ export class BuildScene {
     this.currentDpr = this.baseDpr;
     this.renderer.setPixelRatio(this.currentDpr);
     this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
     // three r187 removed PCFSoftShadowMap — PCF now carries the soft kernel itself.
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -506,8 +567,7 @@ export class BuildScene {
     this.lightningLight.position.set(-10, 24, -12);
     this.scene.add(this.lightningLight);
 
-    const skyTex = createSkyGradientTexture(10, "kemarau", 0);
-    this.skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false, fog: false });
+    this.skyMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide, depthWrite: false, fog: false });
     this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(140, 32, 20), this.skyMat);
     this.scene.add(this.skyMesh);
 
@@ -527,22 +587,34 @@ export class BuildScene {
     this.scene.add(this.sunCore, this.sunHalo);
     this.staticDisposables.push(sunCoreTex, sunHaloTex, this.sunCore.material, this.sunHalo.material);
 
-    const initEnv = createEnvironmentMap(this.renderer, 10, 0);
-    this.envTex = initEnv;
-    this.scene.environment = initEnv;
+    // Defer initial PMREM generation to first updateProjectData() so PMREMGenerator isn't run twice on boot
     this.scene.environmentIntensity = 0.72;
-    this.palette.bindEnvMap(initEnv);
 
     this.contactShadowTex = createContactShadowTexture();
     this.contactShadowMat = new THREE.MeshBasicMaterial({
       map: this.contactShadowTex,
       transparent: true,
-      opacity: 0.68,
+      opacity: 0.86,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
     });
-    this.staticDisposables.push(skyTex, this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
+    this.staticDisposables.push(this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
+
+    // Pre-allocate fixed hardware light pool per level (max 7 Spot + 7 Point slots, at most 7 active per level)
+    for (const lvIdx of [0, 1] as const) {
+      for (let i = 0; i < 7; i++) {
+        const spot = new THREE.SpotLight(0xfff3de, 0, 3.85, 0.7, 0.78, 1.4);
+        spot.visible = false;
+        this.lightPoolLevelRoots[lvIdx].add(spot, spot.target);
+        this.spotLightPools[lvIdx].push(spot);
+
+        const pt = new THREE.PointLight(0xffcb85, 0, 2.6, 1.6);
+        pt.visible = false;
+        this.lightPoolLevelRoots[lvIdx].add(pt);
+        this.pointLightPools[lvIdx].push(pt);
+      }
+    }
 
     buildStaticNeighborhood(this.envGroup, this.neighborsGroup, this.palette, this.contactShadowTex, this.staticDisposables);
 
@@ -603,7 +675,17 @@ export class BuildScene {
     this.overlayGroup.add(this.pushPullGizmoGroup);
     this.staticDisposables.push(shaftGeo, coneFwdGeo, coneBackGeo, hitSphereGeo, gizmoMat, hitGizmoMat);
 
-    this.propsContainer.add(this.propLevelRoots[0], this.propLevelRoots[1]);
+    this.propsContainer.add(
+      this.propLevelRoots[0],
+      this.propLevelRoots[1],
+      this.lightPoolLevelRoots[0],
+      this.lightPoolLevelRoots[1],
+    );
+    this.floorPreviewPool.userData.isPooledPreview = true;
+    this.floorPreviewPool.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.floorPreviewPool.visible = false;
+    this.floorPreviewPool.frustumCulled = false;
+    (this.raycaster as unknown as { firstHitOnly?: boolean }).firstHitOnly = true;
     this.scene.add(
       this.envGroup,
       this.neighborsGroup,
@@ -637,9 +719,24 @@ export class BuildScene {
     this.startLoop();
   }
 
+  public requestRender(): void {
+    this.needsRender = true;
+  }
+
+  private markShadowDirty(): void {
+    this.renderer.shadowMap.needsUpdate = true;
+    this.needsRender = true;
+  }
+
   public dispose(): void {
     this.disposed = true;
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    if (this.previewRafId !== null) {
+      cancelAnimationFrame(this.previewRafId);
+      this.previewRafId = null;
+    }
+    this.pendingPreviewEvent = null;
+    this.pendingPreviewHits = undefined;
     window.removeEventListener("resize", this.onResizeBound);
     this.resizeObserver?.disconnect();
     window.removeEventListener("keydown", this.onKeyDownBound);
@@ -654,46 +751,84 @@ export class BuildScene {
     this.cameraCtrl.dispose();
 
     this.postActive = false;
-    this.gtaoPass?.dispose();
     this.atmospherePass?.dispose();
     this.bloomPass?.dispose();
     this.outputPass?.dispose();
     this.composer?.dispose();
     this.composer = null;
     this.renderPass = null;
-    this.gtaoPass = null;
     this.atmospherePass = null;
     this.bloomPass = null;
     this.outputPass = null;
 
+    if (typeof window !== "undefined") {
+      delete (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__;
+    }
+
     this.scene.remove(this.hoverHighlightMesh);
-    this.hoverBoxGeo.dispose();
+    disposeGeometry(this.hoverBoxGeo);
+    this.clearPreviewMeshes();
+    this.clearSim();
+    if (this.gridMesh) {
+      this.overlayGroup.remove(this.gridMesh);
+      disposeGeometry(this.gridMesh.geometry);
+      (this.gridMesh.material as THREE.Material).dispose();
+      this.gridMesh = null;
+    }
+    this.overlayGroup.clear();
+    this.previewGroup.clear();
+    this.simGroup.clear();
     this.envGroup.clear();
     this.neighborsGroup.clear();
     this.houseContainer.clear();
     this.propsContainer.clear();
     this.dimsGroup.clear();
+
+    for (const batch of this.brickBatches) {
+      batch.im.dispose();
+    }
+    this.brickBatches = [];
+    for (const lvIdx of [0, 1] as const) {
+      const dm = this.contactDecalMeshes[lvIdx];
+      if (dm) {
+        this.propLevelRoots[lvIdx].remove(dm);
+        dm.dispose();
+        this.contactDecalMeshes[lvIdx] = null;
+      }
+      for (const g of this.contactDecalResources[lvIdx]) disposeGeometry(g);
+      this.contactDecalResources[lvIdx] = [];
+    }
+    this.contactDecalIndexMap.clear();
+
     for (const ent of this.propEntries.values()) {
-      for (const r of ent.resources) r.dispose();
+      for (const r of ent.resources) disposeResource(r);
     }
     this.propEntries.clear();
     for (const g of this.ghostCache.values()) {
-      for (const r of g.disposables) r.dispose();
+      for (const r of g.disposables) disposeResource(r);
     }
     this.ghostCache.clear();
     if (this.roomOutlineLoop) {
-      this.roomOutlineLoop.geometry.dispose();
+      disposeGeometry(this.roomOutlineLoop.geometry);
       (this.roomOutlineLoop.material as THREE.Material).dispose();
       this.roomOutlineLoop = null;
     }
     if (this.liveTerrainTempMesh) {
-      this.liveTerrainTempMesh.geometry.dispose();
+      disposeGeometry(this.liveTerrainTempMesh.geometry);
       this.liveTerrainTempMesh = null;
     }
-    for (const r of this.dynResources) r.dispose();
-    for (const r of this.simResources) r.dispose();
-    for (const r of this.staticDisposables) r.dispose();
-    this.rainPoints?.geometry.dispose();
+    for (const r of this.dynResources) disposeResource(r);
+    for (const r of this.simResources) disposeResource(r);
+    for (const r of this.staticDisposables) disposeResource(r);
+    this.dynResources = [];
+    this.simResources = [];
+    this.staticDisposables = [];
+
+    if (this.sunLight.shadow.map) {
+      this.sunLight.shadow.map.dispose();
+      this.sunLight.shadow.map = null;
+    }
+    disposeGeometry(this.rainPoints?.geometry);
     (this.rainPoints?.material as THREE.Material | undefined)?.dispose();
     this.rainTex?.dispose();
     this.validMat.dispose();
@@ -701,7 +836,21 @@ export class BuildScene {
     this.cyanMat.dispose();
     this.ghostValidMat.dispose();
     this.ghostInvalidMat.dispose();
-    this.envTex?.dispose();
+    this.floorPreviewPool.dispose();
+    disposeGeometry(this.floorPreviewGeo);
+    this.skyMat.map?.dispose();
+    this.skyMat.map = null;
+    for (const tex of this.pmremCache.values()) tex.dispose();
+    this.pmremCache.clear();
+    this.envTex = null;
+    for (const lvIdx of [0, 1] as const) {
+      for (const s of this.spotLightPools[lvIdx]) s.dispose();
+      for (const p of this.pointLightPools[lvIdx]) p.dispose();
+      this.spotLightPools[lvIdx] = [];
+      this.pointLightPools[lvIdx] = [];
+    }
+    this.housePickables = [];
+    this._pickTargets.length = 0;
     this.palette.dispose();
     this.renderer.dispose();
   }
@@ -725,15 +874,16 @@ export class BuildScene {
     this.applyQualityTier(effective, tier === "high");
   }
 
-  /** Toggle the cinematic ray-traced-look stack (GTAO + sun shafts + bloom + MSAA HDR). */
+  /** Toggle the cinematic ray-traced-look stack (Baked AO + sun shafts + bloom + MSAA HDR). */
   public setRayTracingLook(enabled: boolean): void {
     this.rayTracingEnabled = enabled;
     this.configurePostPipeline();
+    this.requestRender();
   }
 
   /**
-   * Cinematic "ray-tracing like" real-time pipeline (`3d-sky-rays` + GTAO + HDR bloom):
-   * linear HDR MSAA buffer → GTAO ambient occlusion → screen-space sun shafts with
+   * Cinematic "ray-tracing like" real-time pipeline (`3d-sky-rays` + Baked AO + HDR bloom):
+   * linear HDR MSAA buffer → screen-space sun shafts with
    * vignette/dither → UnrealBloom → single ACES tone-map + sRGB in OutputPass.
    */
   private setupPostPipeline(): void {
@@ -749,25 +899,10 @@ export class BuildScene {
     });
     this.composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, this.cameraCtrl.activeCamera);
-    this.gtaoPass = new GTAOPass(this.scene, this.cameraCtrl.activeCamera, w, h);
-    // OUTPUT.Default = scene + denoised AO blended on top. (Denoise would REPLACE the
-    // frame with the raw AO buffer — a near-white ghost screen on every "Tinggi" tier.)
-    this.gtaoPass.output = GTAOPass.OUTPUT.Default;
-    this.gtaoPass.updateGtaoMaterial({
-      radius: 1.15,
-      distanceExponent: 1.4,
-      thickness: 1.4,
-      scale: 1.0,
-      samples: 14,
-      distanceFallOff: 0.7,
-      screenSpaceRadius: false,
-    });
-    this.gtaoPass.blendIntensity = 1.1;
     this.atmospherePass = new AtmospherePass();
     this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.7, 1.45);
     this.outputPass = new OutputPass();
     this.composer.addPass(this.renderPass);
-    this.composer.addPass(this.gtaoPass);
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
     this.composer.addPass(this.outputPass);
@@ -780,7 +915,6 @@ export class BuildScene {
     if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
       (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__ = {
         composer: this.composer,
-        gtao: this.gtaoPass,
         atmo: this.atmospherePass,
         bloom: this.bloomPass,
       };
@@ -798,8 +932,6 @@ export class BuildScene {
       return;
     }
     this.postActive = true;
-    // GTAO's depth/normal gbuffer wedges software rasterizers into empty frames — hardware only.
-    if (this.gtaoPass) this.gtaoPass.enabled = this.activeTier === "high" && !this.softwareGpu;
     if (this.atmospherePass) {
       this.atmospherePass.atmosphereUniforms.uSamples.value = this.activeTier === "high" ? 40 : 22;
     }
@@ -856,8 +988,10 @@ export class BuildScene {
       this.sunLight.shadow.map = null;
       this.sunLight.shadow.bias = wantShadow >= 4096 ? -0.00018 : wantShadow >= 2048 ? -0.00025 : -0.00035;
       this.sunLight.shadow.normalBias = wantShadow >= 4096 ? 0.0048 : wantShadow >= 2048 ? 0.0085 : 0.012;
+      this.markShadowDirty();
     }
     this.configurePostPipeline();
+    this.requestRender();
     if (explicitHigh) this.lastDprCheckMs = performance.now();
   }
 
@@ -933,6 +1067,12 @@ export class BuildScene {
   }
 
   public cancelActivePreview(): void {
+    if (this.previewRafId !== null) {
+      cancelAnimationFrame(this.previewRafId);
+      this.previewRafId = null;
+    }
+    this.pendingPreviewEvent = null;
+    this.pendingPreviewHits = undefined;
     if (this.dragPendingCommit && this.draggingMesh) {
       this.draggingMesh.position.copy(this.dragPendingCommit.origMeshPos);
       this.draggingMesh.rotation.y = this.dragPendingCommit.origMeshRotY;
@@ -950,20 +1090,38 @@ export class BuildScene {
     this.terrainScratch = null;
     if (this.liveTerrainTempMesh) {
       this.overlayGroup.remove(this.liveTerrainTempMesh);
-      this.liveTerrainTempMesh.geometry.dispose();
+      disposeGeometry(this.liveTerrainTempMesh.geometry);
       this.liveTerrainTempMesh = null;
     }
     this.clearPreviewMeshes();
     this.actions.onPreviewHud(null);
+    this.requestRender();
   }
 
   private clearPreviewMeshes(): void {
     this.hoverHighlightMesh.visible = false;
+    this.floorPreviewPool.visible = false;
     for (const c of [...this.previewGroup.children]) {
       this.previewGroup.remove(c);
-      if (c.userData?.isCachedGhost) continue;
-      if (c instanceof THREE.Mesh || c instanceof THREE.LineSegments) c.geometry.dispose();
+      if (c.userData?.isCachedGhost || c.userData?.isPooledPreview) continue;
+      if (c instanceof THREE.Mesh || c instanceof THREE.LineSegments) disposeGeometry(c.geometry);
     }
+  }
+
+  private scheduleToolPreview(e: PointerEvent, precomputedHits?: THREE.Intersection[]): void {
+    this.pendingPreviewEvent = e;
+    this.pendingPreviewHits = precomputedHits;
+    if (this.previewRafId !== null) return;
+    this.previewRafId = requestAnimationFrame(() => {
+      this.previewRafId = null;
+      if (this.disposed || !this.pendingPreviewEvent) return;
+      const ev = this.pendingPreviewEvent;
+      const hits = this.pendingPreviewHits;
+      this.pendingPreviewEvent = null;
+      this.pendingPreviewHits = undefined;
+      this.updateToolPreview(ev, hits);
+      this.requestRender();
+    });
   }
 
   public setSelected(selected: SelectionTarget): void {
@@ -971,6 +1129,7 @@ export class BuildScene {
     if (this.derived) {
       this.updateSelectionRing(this.derived, selected);
     }
+    this.requestRender();
   }
 
   public rotateActiveDrag(deltaStep: -1 | 1): boolean {
@@ -979,6 +1138,7 @@ export class BuildScene {
     const nextRot = (this.dragPendingCommit.rotationY ?? this.dragPendingCommit.origMeshRotY) + stepRad;
     this.dragPendingCommit.rotationY = nextRot;
     this.draggingMesh.rotation.y = nextRot;
+    this.markShadowDirty();
     return true;
   }
 
@@ -1005,17 +1165,33 @@ export class BuildScene {
 
     // Sync Structural & Terrain viewport flags
     const wasExploded = this.explodeTarget > 0.05;
+    const prevCutActive = this.clipPlane.constant < 10;
     const showTerrain = this.studioView?.showTerrain ?? true;
+    let envVisChanged = false;
     for (const ch of this.envGroup.children) {
-      if (ch.userData?.isTerrain) ch.visible = showTerrain;
+      if (ch.userData?.isTerrain && ch.visible !== showTerrain) {
+        ch.visible = showTerrain;
+        envVisChanged = true;
+      }
     }
-    this.neighborsGroup.visible = this.viewOpts.neighborsVisible && (this.studioView?.showNeighbors ?? true);
+    const nextNeighborsVis = this.viewOpts.neighborsVisible && (this.studioView?.showNeighbors ?? true);
+    if (this.neighborsGroup.visible !== nextNeighborsVis) {
+      this.neighborsGroup.visible = nextNeighborsVis;
+      envVisChanged = true;
+    }
     this.cameraCtrl.setAllowUnderground(!showTerrain);
     this.cameraCtrl.setOrtho(this.studioView?.ortho ?? false);
     this.explodeTarget = this.studioView?.explode ?? 0;
-    this.clipPlane.constant = this.studioView?.cutH ?? 100;
+    const nextCutH = this.studioView?.cutH ?? 100;
+    const cutChanged = Math.abs(this.clipPlane.constant - nextCutH) > 1e-4;
+    this.clipPlane.constant = nextCutH;
     if (wasExploded !== (this.explodeTarget > 0.05)) {
       this.applyLevelAndWallVisibility();
+    } else if (prevCutActive !== (nextCutH < 10)) {
+      this.updateWallCutawayVisibility(true);
+    }
+    if (envVisChanged || cutChanged) {
+      this.markShadowDirty();
     }
 
     // Sync PBR materials cleanly to Project Settings
@@ -1024,22 +1200,37 @@ export class BuildScene {
     this.palette.roofCover.color.set(sim.roofColorHex);
     this.palette.setTileSize(project.systems.tileSizeCm);
 
-    const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}|${project.site.orientationDeg}`;
-    if (nextEnvKey !== this.envKey) {
-      this.envKey = nextEnvKey;
+    // Sky gradient updates continuously per time/season/rain, while PMREM env map caches 3 discrete states (day/night/storm)
+    const isNight = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
+    const isStorm = sim.rainIntensityMmH > 20;
+    const nextSkyKey = `${Math.round(sim.hourOfDay * 4)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}`;
+    if (nextSkyKey !== this.skyKey) {
+      this.skyKey = nextSkyKey;
       const newSky = createSkyGradientTexture(sim.hourOfDay, sim.season, sim.rainIntensityMmH);
       this.skyMat.map?.dispose();
       this.skyMat.map = newSky;
       this.skyMat.needsUpdate = true;
+    }
 
-      const env = createEnvironmentMap(this.renderer, sim.hourOfDay, sim.rainIntensityMmH);
-      this.envTex?.dispose();
+    const nextEnvState: "day" | "night" | "storm" = isStorm ? "storm" : isNight ? "night" : "day";
+    if (nextEnvState !== this.envStateKey) {
+      this.envStateKey = nextEnvState;
+      let env = this.pmremCache.get(nextEnvState);
+      if (!env) {
+        const repHour = nextEnvState === "night" ? 22 : 10;
+        const repRain = nextEnvState === "storm" ? 45 : 0;
+        env = createEnvironmentMap(this.renderer, repHour, repRain);
+        this.pmremCache.set(nextEnvState, env);
+      }
       this.envTex = env;
       this.scene.environment = env;
-      const isNight = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
-      const isStorm = sim.rainIntensityMmH > 20;
       this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.82 : 0.62;
       this.palette.bindEnvMap(env);
+    }
+
+    const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}|${project.site.orientationDeg}`;
+    if (nextEnvKey !== this.envKey) {
+      this.envKey = nextEnvKey;
 
       // Sun angle + cool opposite sky fill (`3d-wood-lighting-scorecard`)
       let sx = 0.45;
@@ -1086,6 +1277,7 @@ export class BuildScene {
         this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
         this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
       }
+      this.markShadowDirty();
     }
 
     if (this.rainPoints) {
@@ -1095,44 +1287,106 @@ export class BuildScene {
       this.rainPoints.geometry.setDrawRange(0, this.rainActiveCount);
     }
 
-    const vFlags = this.studioView
-      ? {
-          stg: this.studioView.stage,
-          sb: this.studioView.showBricks,
-          ss: this.studioView.showStructure,
-          st: this.studioView.showTerrain,
-          sr: this.studioView.showRoof,
-          srk: this.studioView.showRangka,
-          sf: this.studioView.showFinishing,
-          xr: this.studioView.xrayRebar,
-          sa: this.studioView.showAir,
-          sl: this.studioView.showListrik,
-          lb: this.studioView.showLabels,
-          dm: this.studioView.showDims,
-          hp: this.studioView.hiddenParts,
-        }
-      : null;
-
     const previewRoofType =
       this.viewOpts.pendingRoofType && this.viewOpts.pendingRoofType !== project.systems.roofType
         ? this.viewOpts.pendingRoofType
         : null;
 
-    const sig = JSON.stringify({
-      sys: previewRoofType ? { ...project.systems, roofType: previewRoofType } : project.systems,
-      peil: project.site.peil,
-      sp: project.structuralParams,
-      soil: project.site.soil,
-      fm: project.floodMitigation,
-      lv: project.levels.map((l) => [l.id, l.index, l.name, l.height, l.walls, l.rooms, l.slabs, l.stairs]),
-      ext: project.buildExtras,
-      brk: this.viewOpts.showBricksOverlay,
-      vf: vFlags,
-      pr: previewRoofType,
-    });
+    const svStage = this.studioView?.stage ?? 0;
+    const svBricks = this.studioView?.showBricks ?? true;
+    const svStruct = this.studioView?.showStructure ?? true;
+    const svTerrain = this.studioView?.showTerrain ?? true;
+    const svRoof = this.studioView?.showRoof ?? true;
+    const svRangka = this.studioView?.showRangka ?? true;
+    const svFinish = this.studioView?.showFinishing ?? true;
+    const svXray = this.studioView?.xrayRebar ?? false;
+    const svAir = this.studioView?.showAir ?? false;
+    const svListrik = this.studioView?.showListrik ?? false;
+    const svLabels = this.studioView?.showLabels ?? false;
+    const svDims = this.studioView?.showDims ?? false;
+    const svHidden = this.studioView?.hiddenParts ?? [];
 
-    if (sig !== this.buildSignature) {
-      this.buildSignature = sig;
+    const pb = this.prevBuildRefs;
+    const levelsChanged =
+      !pb ||
+      pb.levelsMeta.length !== project.levels.length ||
+      project.levels.some((l, i) => {
+        const prevL = pb.levelsMeta[i]!;
+        return (
+          prevL.id !== l.id ||
+          prevL.index !== l.index ||
+          prevL.name !== l.name ||
+          prevL.height !== l.height ||
+          prevL.walls !== l.walls ||
+          prevL.rooms !== l.rooms ||
+          prevL.slabs !== l.slabs ||
+          prevL.stairs !== l.stairs
+        );
+      });
+    const hiddenChanged =
+      !pb ||
+      pb.hiddenParts.length !== svHidden.length ||
+      svHidden.some((h, i) => pb.hiddenParts[i] !== h);
+    const buildChanged =
+      !pb ||
+      pb.systems !== project.systems ||
+      pb.peil !== project.site.peil ||
+      pb.structuralParams !== project.structuralParams ||
+      pb.soil !== project.site.soil ||
+      pb.floodMitigation !== project.floodMitigation ||
+      pb.buildExtras !== project.buildExtras ||
+      levelsChanged ||
+      pb.showBricksOverlay !== this.viewOpts.showBricksOverlay ||
+      pb.previewRoofType !== previewRoofType ||
+      pb.stage !== svStage ||
+      pb.showBricks !== svBricks ||
+      pb.showStructure !== svStruct ||
+      pb.showTerrain !== svTerrain ||
+      pb.showRoof !== svRoof ||
+      pb.showRangka !== svRangka ||
+      pb.showFinishing !== svFinish ||
+      pb.xrayRebar !== svXray ||
+      pb.showAir !== svAir ||
+      pb.showListrik !== svListrik ||
+      (pb as { showLabels?: boolean }).showLabels !== svLabels ||
+      (pb as { showDims?: boolean }).showDims !== svDims ||
+      hiddenChanged;
+
+    if (buildChanged) {
+      this.prevBuildRefs = Object.assign(
+        {
+          systems: project.systems,
+          peil: project.site.peil,
+          structuralParams: project.structuralParams,
+          soil: project.site.soil,
+          floodMitigation: project.floodMitigation,
+          buildExtras: project.buildExtras,
+          levelsMeta: project.levels.map((l) => ({
+            id: l.id,
+            index: l.index,
+            name: l.name,
+            height: l.height,
+            walls: l.walls,
+            rooms: l.rooms,
+            slabs: l.slabs,
+            stairs: l.stairs,
+          })),
+          showBricksOverlay: this.viewOpts.showBricksOverlay,
+          previewRoofType,
+          stage: svStage,
+          showBricks: svBricks,
+          showStructure: svStruct,
+          showTerrain: svTerrain,
+          showRoof: svRoof,
+          showRangka: svRangka,
+          showFinishing: svFinish,
+          xrayRebar: svXray,
+          showAir: svAir,
+          showListrik: svListrik,
+          hiddenParts: svHidden,
+        },
+        { showLabels: svLabels, showDims: svDims },
+      );
       if (previewRoofType) {
         const previewProject = {
           ...project,
@@ -1143,43 +1397,93 @@ export class BuildScene {
       } else {
         this.rebuildFromProject(derived, struct);
       }
+      this.lastWireframe = null;
     }
 
-    const pSig = JSON.stringify({
-      lv: project.levels.map((l) => [l.index, l.height, l.furniture, l.lights, l.hvac]),
-      peil: project.site.peil,
-      stg: this.studioView?.stage ?? 0,
-    });
-    if (pSig !== this.propsSignature) {
-      this.propsSignature = pSig;
+    const pp = this.prevPropsRefs;
+    const propsChanged =
+      !pp ||
+      pp.peil !== project.site.peil ||
+      pp.stage !== svStage ||
+      pp.levels.length !== project.levels.length ||
+      project.levels.some((l, i) => {
+        const pl = pp.levels[i]!;
+        return (
+          pl.index !== l.index ||
+          pl.height !== l.height ||
+          pl.furniture !== l.furniture ||
+          pl.lights !== l.lights ||
+          pl.hvac !== l.hvac
+        );
+      });
+    if (propsChanged) {
+      this.prevPropsRefs = {
+        peil: project.site.peil,
+        stage: svStage,
+        levels: project.levels.map((l) => ({
+          index: l.index,
+          height: l.height,
+          furniture: l.furniture,
+          lights: l.lights,
+          hvac: l.hvac,
+        })),
+      };
       this.syncPropsIncremental(derived);
+      this.lastWireframe = null;
     }
 
-    const simSig = JSON.stringify({
-      al: this.viewOpts.activeLevel,
-      lux: this.studioView?.showLuxHeatmap ?? false,
-      air: this.studioView?.showAirParticles ?? false,
-      fldW: this.studioView?.showFloodWater ?? false,
-      stFld: this.flood?.streetFloodCm ?? 0,
-      cpFld: this.flood?.carportFloodCm ?? 0,
-      inFld: this.flood?.lt1FloorFloodCm ?? 0,
-      bar: project.floodMitigation.doorFloodBarrier,
-      barH: project.floodMitigation.barrierHeightCm,
-      hr: Math.round(sim.hourOfDay * 4),
-      rn: Math.round(sim.rainIntensityMmH),
-      ws: Math.round(sim.windSpeedMs * 10),
-      wd: Math.round(sim.windDirectionDeg),
-      at: Math.round(sim.ambientTempC * 2),
-      lg: project.levels.map((l) => l.lights.map((x) => `${x.id}:${x.on}:${x.lumens}:${x.position.x.toFixed(2)},${x.position.z.toFixed(2)}`)),
-      hv: project.levels.map((l) => l.hvac.map((x) => `${x.id}:${x.on}:${x.speedLevel}:${x.rotationY.toFixed(2)}:${x.position.x.toFixed(2)},${x.position.z.toFixed(2)}`)),
-    });
-    if (simSig !== this.simSignature) {
-      this.simSignature = simSig;
+    const ps = this.prevSimRefs;
+    const simLux = Boolean(this.studioView?.showLuxHeatmap);
+    const simAir = Boolean(this.studioView?.showAirParticles);
+    const simFlood = Boolean(this.studioView?.showFloodWater);
+    const simHr = Math.round(sim.hourOfDay * 4);
+    const simRn = Math.round(sim.rainIntensityMmH);
+    const simWs = Math.round(sim.windSpeedMs * 10);
+    const simWd = Math.round(sim.windDirectionDeg);
+    const simAt = Math.round(sim.ambientTempC * 2);
+    const simChanged =
+      !ps ||
+      ps.activeLevel !== this.viewOpts.activeLevel ||
+      ps.showLuxHeatmap !== simLux ||
+      ps.showAirParticles !== simAir ||
+      ps.showFloodWater !== simFlood ||
+      ps.flood !== this.flood ||
+      ps.doorFloodBarrier !== project.floodMitigation.doorFloodBarrier ||
+      ps.barrierHeightCm !== project.floodMitigation.barrierHeightCm ||
+      ps.hr !== simHr ||
+      ps.rn !== simRn ||
+      ps.ws !== simWs ||
+      ps.wd !== simWd ||
+      ps.at !== simAt ||
+      ps.lights.length !== project.levels.length ||
+      project.levels.some((l, i) => ps.lights[i] !== l.lights || ps.hvac[i] !== l.hvac);
+    if (simChanged) {
+      this.prevSimRefs = {
+        activeLevel: this.viewOpts.activeLevel,
+        showLuxHeatmap: simLux,
+        showAirParticles: simAir,
+        showFloodWater: simFlood,
+        flood: this.flood,
+        doorFloodBarrier: project.floodMitigation.doorFloodBarrier,
+        barrierHeightCm: project.floodMitigation.barrierHeightCm,
+        hr: simHr,
+        rn: simRn,
+        ws: simWs,
+        wd: simWd,
+        at: simAt,
+        lights: project.levels.map((l) => l.lights),
+        hvac: project.levels.map((l) => l.hvac),
+      };
       this.rebuildSimOverlays();
     }
 
-    this.applyWireframe(this.studioView?.wireframe ?? false);
+    const wf = this.studioView?.wireframe ?? false;
+    if (wf !== this.lastWireframe) {
+      this.lastWireframe = wf;
+      this.applyWireframe(wf);
+    }
     this.updateSelectionRing(derived, selected);
+    this.requestRender();
   }
 
   public setViewOptions(opts: BuildViewOptions): void {
@@ -1216,7 +1520,7 @@ export class BuildScene {
       } else {
         this.rebuildFromProject(this.derived, this.struct);
       }
-      this.buildSignature = "";
+      this.prevBuildRefs = null;
     }
 
     if (levelChanged) {
@@ -1227,6 +1531,7 @@ export class BuildScene {
       this.rebuildSimOverlays();
     }
     this.applyLevelAndWallVisibility();
+    this.requestRender();
   }
 
   private getActiveFloorY(): number {
@@ -1242,7 +1547,10 @@ export class BuildScene {
   private rebuildFromProject(derived: DerivedProjectModel, struct: StructuralReport): void {
     this.houseContainer.clear();
     this.dimsGroup.clear();
-    for (const r of this.dynResources) r.dispose();
+    for (const batch of this.brickBatches) {
+      batch.im.dispose();
+    }
+    for (const r of this.dynResources) disposeResource(r);
     this.dynResources = [];
     this.animatedFans = [];
     this.houseAnimatedFans = [];
@@ -1253,7 +1561,7 @@ export class BuildScene {
     this.columnCutawayRecords = [];
     if (this.liveTerrainTempMesh) {
       this.overlayGroup.remove(this.liveTerrainTempMesh);
-      this.liveTerrainTempMesh.geometry.dispose();
+      disposeGeometry(this.liveTerrainTempMesh.geometry);
       this.liveTerrainTempMesh = null;
     }
 
@@ -1285,6 +1593,7 @@ export class BuildScene {
     });
 
     this.houseContainer.add(built.houseRoot);
+    this.housePickables = built.pickables;
     this.dynResources.push(...built.resources);
     this.levelRoots = built.levelRoots;
     this.lt2StructuralGroup = built.lt2StructuralGroup;
@@ -1324,6 +1633,7 @@ export class BuildScene {
     });
     this.rebuildGridOverlay();
     this.applyLevelAndWallVisibility();
+    this.markShadowDirty();
   }
 
   private build3dDimensions(width: number, depth: number, topY: number): void {
@@ -1404,6 +1714,7 @@ export class BuildScene {
     const e = THREE.MathUtils.clamp(k, 0, 1);
     for (const p of this.explodePieces) {
       p.obj.position.copy(p.base).addScaledVector(p.off, e);
+      p.obj.updateMatrix();
     }
     for (const im of this.explodeInstanced) {
       for (let i = 0; i < im.n; i++) {
@@ -1420,6 +1731,7 @@ export class BuildScene {
       im.im.instanceMatrix.needsUpdate = true;
     }
     this._s1.set(1, 1, 1);
+    this.markShadowDirty();
   }
 
   private rebuildAnimatedFanList(): void {
@@ -1437,20 +1749,26 @@ export class BuildScene {
     const lt2Y = lt1Y + (project.levels[0]?.height ?? 3.6);
     this.propLevelRoots[0].position.y = lt1Y;
     this.propLevelRoots[1].position.y = lt2Y;
+    this.lightPoolLevelRoots[0].position.y = lt1Y;
+    this.lightPoolLevelRoots[1].position.y = lt2Y;
 
     const stage = this.studioView?.stage ?? 0;
     const showProps = stage === 0 || stage >= 9;
     this.propsContainer.visible = showProps;
 
     const desiredKeys = new Set<string>();
+    let propsMutated = false;
 
     const disposePropKey = (key: string) => {
       const existing = this.propEntries.get(key);
       if (!existing) return;
       this.propLevelRoots[existing.lvIdx].remove(existing.root);
-      for (const r of existing.resources) r.dispose();
+      for (const r of existing.resources) disposeResource(r);
       this.propEntries.delete(key);
+      propsMutated = true;
     };
+
+    const decalSpecsByLevel: [ContactDecalSpec[], ContactDecalSpec[]] = [[], []];
 
     if (showProps) {
       const peilKey = `${peil.floor1PeilM.toFixed(3)}:${peil.carportPeilM.toFixed(3)}:${peil.terracePeilM.toFixed(3)}`;
@@ -1463,12 +1781,33 @@ export class BuildScene {
           desiredKeys.add(key);
           const sig = `${f.catalogId}|${f.name}|${f.colorHex}|${f.accentHex ?? ""}|${f.position.x.toFixed(3)},${f.position.y.toFixed(3)},${f.position.z.toFixed(3)}|${f.rotationY.toFixed(4)}|${f.size.x.toFixed(3)},${f.size.y.toFixed(3)},${f.size.z.toFixed(3)}|${peilKey}`;
           const prev = this.propEntries.get(key);
-          if (prev && prev.sig === sig) continue;
+          if (prev && prev.sig === sig) {
+            decalSpecsByLevel[lvIdx].push({
+              id: f.id,
+              x: prev.root.position.x,
+              y: prev.root.position.y,
+              z: prev.root.position.z,
+              w: f.catalogId === "motorbike" ? 0.65 : f.size.x,
+              d: f.size.z,
+              rotY: f.rotationY,
+            });
+            continue;
+          }
           if (prev) disposePropKey(key);
           const res: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
-          const root = buildProjectFurnitureObject(f, lvIdx, peil, this.palette, res, this.contactShadowMat);
+          const root = buildProjectFurnitureObject(f, lvIdx, peil, this.palette, res);
           targetGroup.add(root);
           this.propEntries.set(key, { sig, lvIdx, root, resources: res, fanBlades: [] });
+          propsMutated = true;
+          decalSpecsByLevel[lvIdx].push({
+            id: f.id,
+            x: root.position.x,
+            y: root.position.y,
+            z: root.position.z,
+            w: f.catalogId === "motorbike" ? 0.65 : f.size.x,
+            d: f.size.z,
+            rotY: f.rotationY,
+          });
         }
 
         for (const hv of lv.hvac) {
@@ -1483,32 +1822,115 @@ export class BuildScene {
           const root = buildProjectHvacObject(hv, lvIdx, this.palette, res, fans);
           targetGroup.add(root);
           this.propEntries.set(key, { sig, lvIdx, root, resources: res, fanBlades: fans });
+          propsMutated = true;
         }
 
-        const activeLights = lv.lights.filter((x) => x.on && x.dimmer > 0);
-        const activeIdSet = new Set(activeLights.slice(-7).map((x) => x.id));
         for (const l of lv.lights) {
           const key = `light:${lvIdx}:${l.id}`;
           desiredKeys.add(key);
-          const isDyn = activeIdSet.has(l.id);
-          const sig = `${l.type}|${l.name}|${l.on}|${isDyn}|${l.lumens}|${l.colorTempK}|${l.dimmer}|${lv.height.toFixed(2)}|${l.position.x.toFixed(3)},${l.position.y.toFixed(3)},${l.position.z.toFixed(3)}|${(l.rotationY ?? 0).toFixed(4)}`;
+          const sig = `${l.type}|${l.name}|${l.on}|${l.lumens}|${l.colorTempK}|${l.dimmer}|${lv.height.toFixed(2)}|${l.position.x.toFixed(3)},${l.position.y.toFixed(3)},${l.position.z.toFixed(3)}|${(l.rotationY ?? 0).toFixed(4)}`;
           const prev = this.propEntries.get(key);
           if (prev && prev.sig === sig) continue;
           if (prev) disposePropKey(key);
           const res: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
-          const root = buildProjectLightObject(l, lvIdx, lv.height, this.palette, res, isDyn);
+          const root = buildProjectLightObject(l, lvIdx, lv.height, this.palette, res, false);
           targetGroup.add(root);
           this.propEntries.set(key, { sig, lvIdx, root, resources: res, fanBlades: [] });
+          propsMutated = true;
         }
       }
     }
+
+    this.updateLightPool(derived);
 
     for (const key of [...this.propEntries.keys()]) {
       if (!desiredKeys.has(key)) disposePropKey(key);
     }
 
+    // Layer 3 Baked AO: Rebuild 1 instanced contact AO decal mesh per level when props changed
+    if (propsMutated || !this.contactDecalMeshes[0] && decalSpecsByLevel[0].length > 0) {
+      this.contactDecalIndexMap.clear();
+      for (const lvIdx of [0, 1] as const) {
+        const old = this.contactDecalMeshes[lvIdx];
+        if (old) {
+          this.propLevelRoots[lvIdx].remove(old);
+          old.dispose();
+          this.contactDecalMeshes[lvIdx] = null;
+        }
+        for (const g of this.contactDecalResources[lvIdx]) disposeGeometry(g);
+        this.contactDecalResources[lvIdx] = [];
+
+        const specs = decalSpecsByLevel[lvIdx];
+        const im = buildInstancedContactDecals(specs, this.contactShadowMat, this.contactDecalResources[lvIdx]);
+        if (im) {
+          this.propLevelRoots[lvIdx].add(im);
+          this.contactDecalMeshes[lvIdx] = im;
+          specs.forEach((sp, idx) => {
+            const ent = this.propEntries.get(`furn:${lvIdx}:${sp.id}`);
+            const fItem = project.levels[lvIdx]?.furniture.find((x) => x.id === sp.id);
+            const yRenderOffset = ent && fItem ? ent.root.position.y - fItem.position.y : 0;
+            this.contactDecalIndexMap.set(sp.id, { lvIdx, index: idx, w: sp.w, d: sp.d, yRenderOffset });
+          });
+        }
+      }
+      this.markShadowDirty();
+    }
+
     this.rebuildAnimatedFanList();
     this.applyLevelAndWallVisibility();
+  }
+
+  private updateLightPool(derived: DerivedProjectModel): void {
+    const stage = this.studioView?.stage ?? 0;
+    const enabled = stage === 0 || stage >= 9;
+    for (const lvIdx of [0, 1] as const) {
+      const lv = derived.project.levels[lvIdx];
+      const spots = this.spotLightPools[lvIdx];
+      const points = this.pointLightPools[lvIdx];
+      let spotIdx = 0;
+      let pointIdx = 0;
+
+      if (enabled && lv) {
+        const activeLights = lv.lights.filter((x) => x.on && x.dimmer > 0).slice(-7);
+        for (const l of activeLights) {
+          const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de;
+          const clampedY = Math.min(lv.height - 0.25, Math.max(0.25, l.position.y));
+          if (l.type === "garden") {
+            const pt = points[pointIdx++];
+            if (!pt) continue;
+            pt.color.setHex(lightHex);
+            pt.intensity = (l.lumens / 500) * l.dimmer * 1.4;
+            pt.position.set(l.position.x, clampedY, l.position.z);
+            pt.visible = true;
+          } else {
+            const spot = spots[spotIdx++];
+            if (!spot) continue;
+            const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
+            const rotY = l.rotationY ?? 0;
+            const fwdOff = l.type === "wall" ? 1.15 : 0;
+            spot.color.setHex(lightHex);
+            spot.intensity = (l.lumens / 450) * l.dimmer * 2.5;
+            spot.distance = Math.min(3.85, lv.height + 0.15);
+            spot.angle = halfAngle;
+            spot.position.set(
+              l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.1 : 0),
+              clampedY - 0.04,
+              l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.1 : 0),
+            );
+            spot.target.position.set(
+              l.position.x + Math.sin(rotY) * fwdOff,
+              0,
+              l.position.z + Math.cos(rotY) * fwdOff,
+            );
+            spot.target.updateMatrixWorld();
+            spot.visible = true;
+          }
+        }
+      }
+
+      for (let i = spotIdx; i < spots.length; i++) spots[i]!.visible = false;
+      for (let i = pointIdx; i < points.length; i++) points[i]!.visible = false;
+    }
   }
 
   private applyWireframe(wf: boolean): void {
@@ -1530,7 +1952,7 @@ export class BuildScene {
   private rebuildGridOverlay(): void {
     if (this.gridMesh) {
       this.overlayGroup.remove(this.gridMesh);
-      this.gridMesh.geometry.dispose();
+      disposeGeometry(this.gridMesh.geometry);
       (this.gridMesh.material as THREE.Material).dispose();
       this.gridMesh = null;
     }
@@ -1598,6 +2020,8 @@ export class BuildScene {
     }
     this.propLevelRoots[0].visible = true;
     this.propLevelRoots[1].visible = lv >= 1;
+    this.lightPoolLevelRoots[0].visible = true;
+    this.lightPoolLevelRoots[1].visible = lv >= 1;
     if (this.lt2StructuralGroup) {
       this.lt2StructuralGroup.visible = lv >= 1;
     }
@@ -1626,10 +2050,11 @@ export class BuildScene {
     const uz = dz / len;
     const viewAngle = Math.atan2(ux, uz);
     const exploded = this.explodeTarget > 0.05 || this.explodeCurrent > 0.005;
+    const cutActive = this.clipPlane.constant < 10;
     const showBricksOverlay = this.viewOpts.showBricksOverlay;
     const showFinishing = showBricksOverlay ? false : (this.studioView?.showFinishing ?? true);
-    const showBrickMeshes = exploded || showBricksOverlay || !showFinishing;
-    const key = `${this.viewOpts.wallVisibility}:${this.viewOpts.activeLevel}:${exploded ? 1 : 0}:${showBrickMeshes ? 1 : 0}:${Math.round(tgt.x * 10)},${Math.round(tgt.z * 10)}`;
+    const showBrickMeshes = exploded || showBricksOverlay || !showFinishing || cutActive;
+    const key = `${this.viewOpts.wallVisibility}:${this.viewOpts.activeLevel}:${exploded ? 1 : 0}:${showBrickMeshes ? 1 : 0}:${cutActive ? 1 : 0}:${Math.round(tgt.x * 10)},${Math.round(tgt.z * 10)}`;
     if (!force && key === this.lastCutawayKey && Math.abs(viewAngle - this.lastCutawayYaw) < 0.04) return;
     this.lastCutawayYaw = viewAngle;
     this.lastCutawayKey = key;
@@ -1715,7 +2140,8 @@ export class BuildScene {
     // bricks never block open cutaway walls even when "Bata" or unfinished view is active.
     for (const batch of this.brickBatches) {
       batch.im.visible = showBrickMeshes;
-      if (showBrickMeshes && !exploded) {
+      if (!showBrickMeshes) continue;
+      if (!exploded) {
         const entry = this.brickExplodeMap.get(batch.im);
         if (!entry) continue;
         for (const [wallId, indices] of batch.wallIndices) {
@@ -1736,6 +2162,7 @@ export class BuildScene {
       }
     }
     this._s1.set(1, 1, 1);
+    this.markShadowDirty();
   }
 
   private updateSelectionRing(derived: DerivedProjectModel, sel: SelectionTarget): void {
@@ -1807,7 +2234,7 @@ export class BuildScene {
           this.roomOutlineLoop.renderOrder = 997;
           this.overlayGroup.add(this.roomOutlineLoop);
         } else {
-          this.roomOutlineLoop.geometry.dispose();
+          disposeGeometry(this.roomOutlineLoop.geometry);
           this.roomOutlineLoop.geometry = new THREE.BufferGeometry().setFromPoints(pts);
         }
         this.roomOutlineLoop.visible = true;
@@ -1843,9 +2270,10 @@ export class BuildScene {
 
   private clearSim(): void {
     this.simGroup.clear();
+    this.airParticlesMesh?.dispose();
     this.airParticlesMesh = null;
     this.airParticleStates = [];
-    for (const r of this.simResources) r.dispose();
+    for (const r of this.simResources) disposeResource(r);
     this.simResources = [];
   }
 
@@ -1950,9 +2378,39 @@ export class BuildScene {
     }
   }
 
+  private getCanvasRect(): DOMRect {
+    if (!this.canvasRect || this.canvasRect.width <= 0 || this.canvasRect.height <= 0) {
+      this.canvasRect = this.canvas.getBoundingClientRect();
+    }
+    return this.canvasRect;
+  }
+
+  private collectRayHits(e: PointerEvent): THREE.Intersection[] {
+    const rect = this.getCanvasRect();
+    if (rect.width <= 0 || rect.height <= 0) return [];
+    this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
+
+    const targets = this._pickTargets;
+    targets.length = 0;
+    if (this.propsContainer.visible) {
+      if (this.propLevelRoots[0].visible) targets.push(this.propLevelRoots[0]);
+      if (this.propLevelRoots[1].visible) targets.push(this.propLevelRoots[1]);
+    }
+    if (this.houseContainer.visible) {
+      if (this.housePickables.length > 0) {
+        for (const p of this.housePickables) targets.push(p);
+      } else {
+        targets.push(this.houseContainer);
+      }
+    }
+    return targets.length > 0 ? this.raycaster.intersectObjects(targets, true) : [];
+  }
+
   private raycastHit(
     e: PointerEvent,
     ignoreParts = true,
+    precomputedHits?: THREE.Intersection[],
   ): {
     sel: NonNullable<SelectionTarget>;
     label: string;
@@ -1960,11 +2418,7 @@ export class BuildScene {
     point: THREE.Vector3;
     faceNormalWorld?: THREE.Vector3;
   } | null {
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
-    this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
-    const hits = this.raycaster.intersectObjects([this.propsContainer, this.houseContainer], true);
+    const hits = precomputedHits ?? this.collectRayHits(e);
     const project = this.derived?.project;
     const lt2BaseY = project ? project.site.peil.floor1PeilM + (project.levels[0]?.height ?? 3.6) - 0.12 : 4.0;
 
@@ -2359,7 +2813,7 @@ export class BuildScene {
       return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Lantai tidak tersedia", altBypass };
     }
 
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.getCanvasRect();
     if (rect.width > 0 && rect.height > 0) {
       this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
       this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
@@ -2497,7 +2951,7 @@ export class BuildScene {
     };
   }
 
-  private updateToolPreview(e: PointerEvent): void {
+  private updateToolPreview(e: PointerEvent, precomputedHits?: THREE.Intersection[]): void {
     if (!this.derived) return;
     this.clearPreviewMeshes();
 
@@ -2560,7 +3014,7 @@ export class BuildScene {
     }
 
     if (tool === "select" || tool === "sledgehammer" || tool === "eyedropper" || tool === "wall_paint") {
-      const hitRes = this.raycastHit(e, true);
+      const hitRes = this.raycastHit(e, true, precomputedHits);
       if (tool === "wall_paint") {
         if (hitRes?.sel.kind === "wall") {
           const target = this.resolveWallPaintTarget(hitRes, e.shiftKey);
@@ -2687,19 +3141,28 @@ export class BuildScene {
 
     if (tool === "floor_tile") {
       const blocked = this.getBlockedPolysForLevel(lvIdx);
+      const fillPooledPreview = (cells: Iterable<{ gx: number; gz: number }>) => {
+        let count = 0;
+        for (const c of cells) {
+          if (count >= 500) break;
+          this._m4.makeTranslation((c.gx + 0.5) * cs, baseY + 0.035, (c.gz + 0.5) * cs);
+          this.floorPreviewPool.setMatrixAt(count++, this._m4);
+        }
+        if (count > 0) {
+          this.floorPreviewPool.count = count;
+          this.floorPreviewPool.instanceMatrix.needsUpdate = true;
+          this.floorPreviewPool.visible = true;
+          this.previewGroup.add(this.floorPreviewPool);
+        }
+      };
+
       if (this.viewOpts.floorBrushMode === "fill") {
         if (!this.lastWorldPos.inBounds) {
           this.actions.onPreviewHud({ label: "Di luar batas kavling", valid: false });
           return;
         }
         const cells = computeProjectRoomFloodCells(lv.walls, cols, rows, cs, gx, gz, blocked);
-        const geos = cells.slice(0, 500).map((c) => {
-          const g = new THREE.BoxGeometry(cs, 0.03, cs);
-          g.translate((c.gx + 0.5) * cs, baseY + 0.035, (c.gz + 0.5) * cs);
-          return g;
-        });
-        const merged = mergeGeometryBatch(geos);
-        if (merged) this.previewGroup.add(new THREE.Mesh(merged, this.validMat));
+        fillPooledPreview(cells);
         this.actions.onPreviewHud({
           label: cells.length > 0 ? `Isi Ruangan: ${(cells.length * cs * cs).toFixed(1)} m²` : "Area diblokir void / kolam",
           valid: cells.length > 0,
@@ -2720,13 +3183,7 @@ export class BuildScene {
         return;
       }
       if (this.brushStrokeCells.size > 0) {
-        const geos = [...this.brushStrokeCells.values()].map((c) => {
-          const g = new THREE.BoxGeometry(cs, 0.03, cs);
-          g.translate((c.gx + 0.5) * cs, baseY + 0.035, (c.gz + 0.5) * cs);
-          return g;
-        });
-        const merged = mergeGeometryBatch(geos);
-        if (merged) this.previewGroup.add(new THREE.Mesh(merged, this.validMat));
+        fillPooledPreview(this.brushStrokeCells.values());
         this.actions.onPreviewHud({ label: `Kuas Lantai: ${this.brushStrokeCells.size} petak`, valid: true });
       }
       return;
@@ -2868,7 +3325,7 @@ export class BuildScene {
 
   private handlePointerMove(e: PointerEvent): void {
     if (!this.derived || !this.hoverTileMesh) return;
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.getCanvasRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
@@ -3036,6 +3493,20 @@ export class BuildScene {
           if (this.draggingMesh) {
             this.draggingMesh.position.set(cx, nextPlaced.y + pending.yRenderOffset, cz);
             if (nextPlaced.rotationY !== undefined) this.draggingMesh.rotation.y = nextPlaced.rotationY;
+            if (pending.kind === "furniture") {
+              const decalInfo = this.contactDecalIndexMap.get(pending.id);
+              const decalIm = decalInfo ? this.contactDecalMeshes[decalInfo.lvIdx] : null;
+              if (decalInfo && decalIm) {
+                this._v1.set(cx, nextPlaced.y + decalInfo.yRenderOffset + 0.008, cz);
+                this._q.setFromAxisAngle(this._up, nextPlaced.rotationY ?? pending.rotationY ?? 0);
+                this._s1.set(decalInfo.w * 1.18, 1, decalInfo.d * 1.15);
+                this._m4.compose(this._v1, this._q, this._s1);
+                decalIm.setMatrixAt(decalInfo.index, this._m4);
+                decalIm.instanceMatrix.needsUpdate = true;
+                this._s1.set(1, 1, 1);
+              }
+            }
+            this.markShadowDirty();
             this._hoverBox.setFromObject(this.draggingMesh);
             this._hoverBox.getSize(this._hoverSize);
             this._hoverBox.getCenter(this._hoverCenter);
@@ -3091,20 +3562,24 @@ export class BuildScene {
     }
 
     this.actions.onHoverCell(fineGx, fineGz, hit.x, hit.z, inBounds);
+    let sharedHits: THREE.Intersection[] | undefined;
     if (this.viewOpts.activeTool === "select" && !this.dragPendingCommit && this.actions.onHoverPart) {
       const nowMs = performance.now();
       if (nowMs - this.lastHoverMs > 70) {
         this.lastHoverMs = nowMs;
-        const hPart = this.raycastHit(e, false);
+        sharedHits = this.collectRayHits(e);
+        const hPart = this.raycastHit(e, false, sharedHits);
         this.actions.onHoverPart(hPart ? hPart.label : null, e.clientX - rect.left, e.clientY - rect.top);
       }
     } else {
       this.actions.onHoverPart?.(null, 0, 0);
     }
-    this.updateToolPreview(e);
+    this.scheduleToolPreview(e, sharedHits);
+    this.requestRender();
   }
 
   private handlePointerDown(e: PointerEvent): void {
+    this.requestRender();
     if (e.button === 2) {
       this.rightDownPos = { x: e.clientX, y: e.clientY };
       if (
@@ -3134,7 +3609,7 @@ export class BuildScene {
     if (tool === "select") {
       // Check Push-Pull Arrow Gizmo first when a wall is selected
       if (this.pushPullGizmoGroup.visible && this.selected?.kind === "wall") {
-        const rect = this.canvas.getBoundingClientRect();
+        const rect = this.getCanvasRect();
         if (rect.width > 0 && rect.height > 0) {
           this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
           this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
@@ -3309,6 +3784,7 @@ export class BuildScene {
   }
 
   private handlePointerUp(e: PointerEvent): void {
+    this.requestRender();
     try {
       if (this.canvas.hasPointerCapture?.(e.pointerId)) {
         this.canvas.releasePointerCapture(e.pointerId);
@@ -3796,6 +4272,7 @@ export class BuildScene {
   }
 
   private handleResize(): void {
+    this.canvasRect = this.canvas.getBoundingClientRect();
     const parent = this.canvas.parentElement;
     const w = Math.max(1, parent?.clientWidth ?? this.canvas.clientWidth);
     const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
@@ -3817,13 +4294,13 @@ export class BuildScene {
       const cam = this.cameraCtrl.activeCamera;
       if (this.postActive && this.composer) {
         if (this.renderPass) this.renderPass.camera = cam;
-        if (this.gtaoPass) this.gtaoPass.camera = cam;
         this.updateAtmosphere(cam);
         this.composer.render();
       } else {
         this.renderer.render(this.scene, cam);
       }
     }
+    this.requestRender();
   }
 
   private handleVisibility(): void {
@@ -3834,6 +4311,7 @@ export class BuildScene {
       }
     } else {
       this.lastFrameMs = performance.now();
+      this.requestRender();
       this.startLoop();
     }
   }
@@ -3848,9 +4326,34 @@ export class BuildScene {
       const dt = (now - this.lastFrameMs) / 1000;
       this.lastFrameMs = now;
       const clampedDt = Math.min(0.05, Math.max(0.001, dt));
+
+      const camMoved = this.cameraCtrl.update(dt);
+      const explodeActive = Math.abs(this.explodeCurrent - this.explodeTarget) > 0.001;
+      const fansActive = this.animatedFans.length > 0 && !this.reducedMotion;
+      const rainActive = Boolean(this.rainPoints && this.rainPoints.visible && this.rainArray && !this.reducedMotion);
+      const lightningActive = this.lightningEnergy > 0.01 && !this.reducedMotion;
+      const floodActive = Boolean(this.studioView?.showFloodWater && this.flood && this.flood.streetFloodCm > 0 && !this.reducedMotion);
+      const airActive = Boolean(this.airParticlesMesh && this.airflow && this.airParticleStates.length > 0 && this.derived);
+      const draggingActive = Boolean(this.draggingEntity || this.pushPullDragState || this.openingDragState || this.isBrushDown);
+
+      const shouldRender =
+        this.needsRender ||
+        camMoved ||
+        explodeActive ||
+        fansActive ||
+        rainActive ||
+        lightningActive ||
+        floodActive ||
+        airActive ||
+        draggingActive;
+
+      if (!shouldRender) {
+        return;
+      }
+      this.needsRender = false;
       this.simElapsedS += clampedDt;
 
-      if (Math.abs(this.explodeCurrent - this.explodeTarget) > 0.001) {
+      if (explodeActive) {
         this.explodeCurrent += (this.explodeTarget - this.explodeCurrent) * (this.reducedMotion ? 1 : Math.min(1, dt * 10));
         if (Math.abs(this.explodeCurrent - this.explodeTarget) <= 0.001) {
           this.explodeCurrent = this.explodeTarget;
@@ -3861,13 +4364,13 @@ export class BuildScene {
         }
       }
 
-      if (!this.reducedMotion) {
+      if (fansActive) {
         for (const fan of this.animatedFans) {
           fan.rotation.y += dt * 7.5;
         }
       }
 
-      if (this.rainPoints && this.rainPoints.visible && this.rainArray && !this.reducedMotion) {
+      if (rainActive && this.rainPoints && this.rainArray) {
         const speed = 13.5 * clampedDt;
         const slant = 2.6 * clampedDt;
         for (let i = 0; i < this.rainActiveCount; i++) {
@@ -3890,7 +4393,7 @@ export class BuildScene {
           }
         }
       }
-      if (this.lightningEnergy > 0.01 && !this.reducedMotion) {
+      if (lightningActive) {
         this.lightningEnergy *= Math.exp(-clampedDt * 10);
         this.lightningLight.intensity = this.lightningEnergy;
       } else {
@@ -3900,12 +4403,11 @@ export class BuildScene {
       this.palette.floodUniforms.uTime.value = this.reducedMotion ? 0 : this.simElapsedS;
       this.palette.floodUniforms.uRain.value = Math.min(1, this.lastRainMmH / 100);
 
-      if (this.airParticlesMesh && this.airflow && this.airParticleStates.length > 0 && this.derived) {
+      if (airActive && this.airParticlesMesh && this.airflow && this.derived) {
         const af = this.airflow;
         const proj = this.derived.project;
         const lt1Y = proj.site.peil.floor1PeilM;
         const lt2Y = lt1Y + (proj.levels[0]?.height ?? 3.6);
-        const clampedDt = Math.min(0.05, Math.max(0.001, dt));
         for (let i = 0; i < this.airParticleStates.length; i++) {
           const p = this.airParticleStates[i]!;
           const gx = Math.max(0, Math.min(af.gridW - 1, Math.floor(p.x / 0.2)));
@@ -3937,30 +4439,12 @@ export class BuildScene {
         if (this.airParticlesMesh.instanceColor) this.airParticlesMesh.instanceColor.needsUpdate = true;
       }
 
-      this.cameraCtrl.update(dt);
       this.updateWallCutawayVisibility(false);
       // Lock sky dome center to camera (`3d-sky-background`) so orbiting never introduces dome translation parallax
       this.skyMesh.position.copy(this.cameraCtrl.activeCamera.position);
       const cam = this.cameraCtrl.activeCamera;
       if (this.postActive && this.composer) {
         if (this.renderPass) this.renderPass.camera = cam;
-        if (this.gtaoPass && this.gtaoPass.camera !== cam) {
-          this.gtaoPass.camera = cam;
-          // GTAO bakes PERSPECTIVE_CAMERA into its shader defines at construction;
-          // switching to the orthographic plan/elevation views without refreshing it
-          // evaluates AO with the wrong projection and smears the frame.
-          const gm = (this.gtaoPass as unknown as { gtaoMaterial?: THREE.ShaderMaterial }).gtaoMaterial;
-          if (gm) {
-            gm.defines.PERSPECTIVE_CAMERA = (cam as THREE.PerspectiveCamera).isPerspectiveCamera ? 1 : 0;
-            gm.needsUpdate = true;
-          }
-        }
-        // Skip GTAO while the section cut or rain streaks would write ghosts into the AO gbuffer
-        if (this.gtaoPass) {
-          const cutActive = (this.studioView?.cutH ?? 100) < 9.15;
-          const rainActive = Boolean(this.studioView?.showRain) && this.lastRainMmH > 0;
-          this.gtaoPass.enabled = this.activeTier === "high" && !this.softwareGpu && !cutActive && !rainActive;
-        }
         this.updateAtmosphere(cam);
         this.composer.render();
       } else {

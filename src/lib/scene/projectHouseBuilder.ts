@@ -4,6 +4,16 @@ import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import type { SelectionTarget } from "@/lib/store/useStudioStore";
 import { createChamferBox, mergeGeometryBatch, StaticBatchCollector } from "@/lib/scene/geometryHelpers";
+import {
+  applyFloorWorldUv1,
+  applyGradientVertexAo,
+  applyWallVertexAo,
+  attachBakedAoShader,
+  buildInstancedContactDecals,
+  computeWallCornerFlags,
+  generateFloorAoTexture,
+  type ContactDecalSpec,
+} from "@/lib/scene/bakedAo";
 import type { MaterialPalette } from "@/lib/scene/materials";
 import { buildFurnitureMesh, buildHvacMesh, buildLightFixtureMesh } from "@/lib/scene/propsBuilder";
 import { pointInPolygon, polygonArea, polygonBounds } from "@/lib/geometry/rooms";
@@ -123,41 +133,45 @@ export function buildStaticNeighborhood(
     m.receiveShadow = true;
     m.userData.isTerrain = true;
     envGroup.add(m);
+    staticDisposables.push(mergedStripes);
   }
 
   const curbMat = new THREE.MeshStandardMaterial({ color: 0x7b8087, roughness: 0.88, metalness: 0.02 });
   const grateMat = new THREE.MeshStandardMaterial({ color: 0x3b4046, roughness: 0.55, metalness: 0.72 });
   const drainDarkMat = new THREE.MeshStandardMaterial({ color: 0x1c2128, roughness: 0.95 });
 
-  const gutterFrontWall = new THREE.Mesh(new THREE.BoxGeometry(28, 0.08, 0.12), curbMat);
-  gutterFrontWall.position.set(2.5, -0.015, -0.52);
-  gutterFrontWall.receiveShadow = true;
-  gutterFrontWall.userData.isTerrain = true;
-  const gutterBackWall = new THREE.Mesh(new THREE.BoxGeometry(28, 0.08, 0.12), curbMat);
-  gutterBackWall.position.set(2.5, -0.015, -0.06);
-  gutterBackWall.receiveShadow = true;
-  gutterBackWall.userData.isTerrain = true;
-  const gutterBed = new THREE.Mesh(new THREE.BoxGeometry(28, 0.02, 0.36), drainDarkMat);
+  const curbGeos: THREE.BufferGeometry[] = [];
+  const gutterFrontGeo = new THREE.BoxGeometry(28, 0.08, 0.12);
+  gutterFrontGeo.translate(2.5, -0.015, -0.52);
+  curbGeos.push(gutterFrontGeo);
+  const gutterBackGeo = new THREE.BoxGeometry(28, 0.08, 0.12);
+  gutterBackGeo.translate(2.5, -0.015, -0.06);
+  curbGeos.push(gutterBackGeo);
+  const bridge = createChamferBox(3.45, 0.075, 0.56, 0.012, 1);
+  bridge.translate(3.25, 0.015, -0.29);
+  curbGeos.push(bridge);
+  const frontApron = new THREE.BoxGeometry(3.5, 0.04, 0.25);
+  frontApron.translate(3.25, -0.01, -0.66);
+  curbGeos.push(frontApron);
+  const sidewalkGeo = new THREE.BoxGeometry(28, 0.045, 0.32);
+  sidewalkGeo.translate(2.5, -0.005, -0.68);
+  curbGeos.push(sidewalkGeo);
+  const mergedCurbs = mergeGeometryBatch(curbGeos);
+  if (mergedCurbs) {
+    const cm = new THREE.Mesh(mergedCurbs, curbMat);
+    cm.castShadow = false;
+    cm.receiveShadow = true;
+    cm.userData.isTerrain = true;
+    envGroup.add(cm);
+    staticDisposables.push(mergedCurbs);
+  }
+
+  const gutterBedGeo = new THREE.BoxGeometry(28, 0.02, 0.36);
+  const gutterBed = new THREE.Mesh(gutterBedGeo, drainDarkMat);
   gutterBed.position.set(2.5, -0.045, -0.29);
   gutterBed.receiveShadow = true;
   gutterBed.userData.isTerrain = true;
-  envGroup.add(gutterFrontWall, gutterBackWall, gutterBed);
-
-  const bridgeGeos: THREE.BufferGeometry[] = [];
-  const bridge = createChamferBox(3.45, 0.075, 0.56, 0.012, 1);
-  bridge.translate(3.25, 0.015, -0.29);
-  bridgeGeos.push(bridge);
-  const frontApron = new THREE.BoxGeometry(3.5, 0.04, 0.25);
-  frontApron.translate(3.25, -0.01, -0.66);
-  bridgeGeos.push(frontApron);
-  const mergedBridge = mergeGeometryBatch(bridgeGeos);
-  if (mergedBridge) {
-    const m = new THREE.Mesh(mergedBridge, curbMat);
-    m.castShadow = true;
-    m.receiveShadow = true;
-    m.userData.isTerrain = true;
-    envGroup.add(m);
-  }
+  envGroup.add(gutterBed);
 
   const grateGeos: THREE.BufferGeometry[] = [];
   for (let gx = 0.05; gx <= 1.45; gx += 0.14) {
@@ -171,15 +185,8 @@ export function buildStaticNeighborhood(
     gm.receiveShadow = true;
     gm.userData.isTerrain = true;
     envGroup.add(gm);
+    staticDisposables.push(mergedGrate);
   }
-
-  // Concrete pedestrian sidewalk curb between gutter and asphalt road (`3d-modular-buildings`)
-  const sidewalkGeo = new THREE.BoxGeometry(28, 0.045, 0.32);
-  const sidewalk = new THREE.Mesh(sidewalkGeo, curbMat);
-  sidewalk.position.set(2.5, -0.005, -0.68);
-  sidewalk.receiveShadow = true;
-  sidewalk.userData.isTerrain = true;
-  envGroup.add(sidewalk);
 
   const shadowMat = new THREE.MeshBasicMaterial({
     map: contactShadowTex,
@@ -189,7 +196,16 @@ export function buildStaticNeighborhood(
     polygonOffset: true,
     polygonOffsetFactor: -1,
   });
-  staticDisposables.push(shadowMat, groundGeo, roadGeo, sidewalkGeo, stripeMat, curbMat, grateMat, drainDarkMat);
+  staticDisposables.push(
+    shadowMat,
+    groundGeo,
+    roadGeo,
+    gutterBedGeo,
+    stripeMat,
+    curbMat,
+    grateMat,
+    drainDarkMat,
+  );
 
   // Subtle architectural base contact shadow strip under lot footprint (`3d-wood-lighting-scorecard`)
   if (contactShadowTex) {
@@ -328,17 +344,28 @@ export function buildStaticNeighborhood(
       sill.translate(sideWinX + (labelSide === "left" ? 0.04 : -0.04), wy - 0.63, wz);
       winSillGeos.push(sill);
     }
-    const mergedWinFrame = mergeGeometryBatch(winFrameGeos);
-    if (mergedWinFrame) {
-      const fm = new THREE.Mesh(mergedWinFrame, palette.aluDark);
+    // Rooftop water tank + side condenser: merge with window frames (all share palette.aluDark)
+    const tank = new THREE.CylinderGeometry(0.42, 0.46, 1.12, 14);
+    tank.translate(cx + 1.18, 8.78, 14.1);
+    winFrameGeos.push(tank);
+    const tankCap = new THREE.CylinderGeometry(0.48, 0.48, 0.08, 14);
+    tankCap.translate(cx + 1.18, 9.38, 14.1);
+    winFrameGeos.push(tankCap);
+    const acGeo = new THREE.BoxGeometry(0.68, 0.54, 0.3);
+    acGeo.translate(cx + (labelSide === "left" ? -2.58 : 2.58), 4.28, 9.3);
+    winFrameGeos.push(acGeo);
+
+    const mergedAlu = mergeGeometryBatch(winFrameGeos);
+    if (mergedAlu) {
+      const fm = new THREE.Mesh(mergedAlu, palette.aluDark);
       fm.castShadow = true;
       grp.add(fm);
-      staticDisposables.push(mergedWinFrame);
+      staticDisposables.push(mergedAlu);
     }
     const mergedWinGlass = mergeGeometryBatch(winGlassGeos);
     if (mergedWinGlass) {
       const gm = new THREE.Mesh(mergedWinGlass, winMat);
-      gm.castShadow = true;
+      gm.castShadow = false;
       grp.add(gm);
       staticDisposables.push(mergedWinGlass);
     }
@@ -349,28 +376,6 @@ export function buildStaticNeighborhood(
       grp.add(sm);
       staticDisposables.push(mergedWinSill);
     }
-
-    // Rooftop water tank + side condenser: small silhouettes that make the context read as lived-in.
-    const tankGeos: THREE.BufferGeometry[] = [];
-    const tank = new THREE.CylinderGeometry(0.42, 0.46, 1.12, 14);
-    tank.translate(cx + 1.18, 8.78, 14.1);
-    tankGeos.push(tank);
-    const tankCap = new THREE.CylinderGeometry(0.48, 0.48, 0.08, 14);
-    tankCap.translate(cx + 1.18, 9.38, 14.1);
-    tankGeos.push(tankCap);
-    const mergedTank = mergeGeometryBatch(tankGeos);
-    if (mergedTank) {
-      const tm = new THREE.Mesh(mergedTank, palette.aluDark);
-      tm.castShadow = true;
-      grp.add(tm);
-      staticDisposables.push(mergedTank);
-    }
-    const acGeo = new THREE.BoxGeometry(0.68, 0.54, 0.3);
-    acGeo.translate(cx + (labelSide === "left" ? -2.58 : 2.58), 4.28, 9.3);
-    const ac = new THREE.Mesh(acGeo, palette.aluDark);
-    ac.castShadow = true;
-    grp.add(ac);
-    staticDisposables.push(acGeo);
 
     // Front hedge behind the low fence, tucked under the neighbour tree.
     const hedgeGeo = createChamferBox(3.95, 0.52, 0.32, 0.07, 1);
@@ -408,6 +413,7 @@ export function buildStaticNeighborhood(
       const trunk = new THREE.Mesh(mergedTrunk, palette.woodTeak);
       trunk.castShadow = true;
       grp.add(trunk);
+      staticDisposables.push(mergedTrunk);
     }
 
     const foliageMat = new THREE.MeshStandardMaterial({ color: 0x568746, roughness: 0.86, envMapIntensity: 0.28 });
@@ -429,6 +435,7 @@ export function buildStaticNeighborhood(
       cm.castShadow = true;
       cm.receiveShadow = true;
       grp.add(cm);
+      staticDisposables.push(mergedCrown);
     }
     const topCap = new THREE.IcosahedronGeometry(0.58, 1);
     topCap.scale(1.08, 0.8, 1.08);
@@ -448,6 +455,17 @@ export function buildStaticNeighborhood(
 
   addNeighborHouse(-2.58, "left");
   addNeighborHouse(7.58, "right");
+
+  const freezeStatic = (obj: THREE.Object3D) => {
+    obj.traverse((o) => {
+      if (o instanceof THREE.Mesh) {
+        o.updateMatrix();
+        o.matrixAutoUpdate = false;
+      }
+    });
+  };
+  freezeStatic(envGroup);
+  freezeStatic(neighborsGroup);
 }
 
 function buildCutoutRoofGeometry(
@@ -528,22 +546,29 @@ function buildAcCondenserUnit(
   y: number,
   z: number,
   rotY: number,
+  palette: MaterialPalette,
   resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[],
 ): THREE.Group {
   const g = new THREE.Group();
   g.position.set(x, y, z);
   g.rotation.y = rotY;
-  const bodyGeo = createChamferBox(0.76, 0.54, 0.28, 0.012, 2);
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe6e7e9, roughness: 0.42, metalness: 0.15 });
-  const grilleGeo = new THREE.CylinderGeometry(0.19, 0.19, 0.03, 16);
+  const bodyGeo = attachBvh(createChamferBox(0.76, 0.54, 0.28, 0.012, 2));
+  const bodyMat = palette.getPropMaterial(
+    "hvac:condenser:body",
+    () => new THREE.MeshStandardMaterial({ color: 0xe6e7e9, roughness: 0.42, metalness: 0.15 }),
+  );
+  const grilleGeo = attachBvh(new THREE.CylinderGeometry(0.19, 0.19, 0.03, 16));
   grilleGeo.rotateX(Math.PI / 2);
   grilleGeo.translate(-0.1, 0, -0.145);
-  const grilleMat = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.48, metalness: 0.68 });
+  const grilleMat = palette.getPropMaterial(
+    "hvac:condenser:grille",
+    () => new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.48, metalness: 0.68 }),
+  );
   const mBody = new THREE.Mesh(bodyGeo, bodyMat);
   mBody.castShadow = true;
   const mGrille = new THREE.Mesh(grilleGeo, grilleMat);
   g.add(mBody, mGrille);
-  resources.push(bodyGeo, bodyMat, grilleGeo, grilleMat);
+  resources.push(bodyGeo, grilleGeo);
   return g;
 }
 
@@ -553,7 +578,7 @@ export function buildProjectFurnitureObject(
   peil: Project["site"]["peil"],
   palette: MaterialPalette,
   resources: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[],
-  contactShadowMat: THREE.Material,
+  contactShadowMat?: THREE.Material,
 ): THREE.Object3D {
   const mesh = buildFurnitureMesh(f, palette, resources, contactShadowMat);
   const lt1Y = peil.floor1PeilM;
@@ -591,7 +616,7 @@ export function buildProjectHvacObject(
         ? Math.min(4.45, hv.position.x)
         : 3.15
       : Math.max(2.1, Math.min(4.45, hv.position.x));
-    const outUnit = buildAcCondenserUnit(extX, 2.72, extZ, isFront ? 0 : Math.PI, resources);
+    const outUnit = buildAcCondenserUnit(extX, 2.72, extZ, isFront ? 0 : Math.PI, palette, resources);
     outUnit.userData.sel = { kind: "hvac", id: hv.id, levelIndex: lvIdx };
     outUnit.userData.label = `Outdoor ${hv.name}`;
     wrap.add(outUnit);
@@ -805,6 +830,30 @@ export function buildProjectHouse(
   const batchLt2 = new StaticBatchCollector();
   const batchRoof = new StaticBatchCollector();
 
+  // Baked AO Layer 1: Fast per-level 2D distance-field AO maps for floors & ceilings
+  const aoMapLt1 = generateFloorAoTexture(project.levels[0], project, struct.columns, 0);
+  const aoMapLt2 = generateFloorAoTexture(project.levels[1], project, struct.columns, 1);
+  resources.push(aoMapLt1, aoMapLt2);
+  const floorAoMatCache = new Map<string, THREE.Material>();
+  const getFloorAoMat = (lvIdx: 0 | 1, baseMat: THREE.Material): THREE.Material => {
+    if (!(baseMat instanceof THREE.MeshStandardMaterial)) return baseMat;
+    const key = `${lvIdx}:${baseMat.uuid}`;
+    let m = floorAoMatCache.get(key);
+    if (!m) {
+      const cloned = baseMat.clone();
+      cloned.aoMap = lvIdx === 0 ? aoMapLt1 : aoMapLt2;
+      cloned.aoMapIntensity = 1.15;
+      attachBakedAoShader(cloned);
+      cloned.needsUpdate = true;
+      resources.push(cloned);
+      floorAoMatCache.set(key, cloned);
+      m = cloned;
+    }
+    return m;
+  };
+  const siteW = project.site.width;
+  const siteD = project.site.depth;
+
   const lt1Rooms = project.levels[0]?.rooms ?? [];
   const lt1WallsAll = project.levels[0]?.walls ?? [];
   const hasAnyHouse =
@@ -835,45 +884,78 @@ export function buildProjectHouse(
         Math.max(0.4, fb.width),
         0.08,
         Math.max(0.4, fb.depth),
+        { castShadow: false, receiveShadow: true },
       );
     }
     if (carportRoom) {
       const cb = polygonBounds(carportRoom.polygon);
       const cpH = Math.max(0.08, peil.carportPeilM);
+      const cpX = (cb.minX + cb.maxX) * 0.5;
+      const cpZ = (cb.minZ + cb.maxZ) * 0.5;
+      const cpGeo = applyFloorWorldUv1(
+        createChamferBox(Math.max(0.5, cb.width), cpH, Math.max(0.5, cb.depth), 0.014, 1),
+        siteW,
+        siteD,
+        cpX,
+        cpZ,
+      );
       batchBase.addGeo(
         "site:carport",
-        palette.carport,
+        getFloorAoMat(0, palette.carport),
         "lantai",
         carportRoom.name,
-        createChamferBox(Math.max(0.5, cb.width), cpH, Math.max(0.5, cb.depth), 0.014, 1),
-        (cb.minX + cb.maxX) * 0.5,
+        cpGeo,
+        cpX,
         cpH * 0.5,
-        (cb.minZ + cb.maxZ) * 0.5,
+        cpZ,
+        0,
+        undefined,
+        false,
+        true,
       );
     }
     if (terasRoom) {
       const tb = polygonBounds(terasRoom.polygon);
       const trH = Math.max(0.12, peil.terracePeilM);
+      const trX = (tb.minX + tb.maxX) * 0.5;
+      const trZ = (tb.minZ + tb.maxZ) * 0.5;
+      const trGeo = applyFloorWorldUv1(
+        createChamferBox(Math.max(0.5, tb.width), trH, Math.max(0.5, tb.depth), 0.012, 1),
+        siteW,
+        siteD,
+        trX,
+        trZ,
+      );
       batchBase.addGeo(
         "site:teras",
-        palette.woodDeck,
+        getFloorAoMat(0, palette.woodDeck),
         "lantai",
         terasRoom.name,
-        createChamferBox(Math.max(0.5, tb.width), trH, Math.max(0.5, tb.depth), 0.012, 1),
-        (tb.minX + tb.maxX) * 0.5,
+        trGeo,
+        trX,
         trH * 0.5,
-        (tb.minZ + tb.maxZ) * 0.5,
+        trZ,
+        0,
+        undefined,
+        false,
+        true,
       );
       if (lt1Y > trH + 0.03) {
+        const stX = Math.min(tb.maxX - 0.5, tb.minX + 1.58);
+        const stZ = tb.maxZ - 0.15;
         batchBase.addGeo(
           "site:entry-step",
-          palette.tileFloor,
+          getFloorAoMat(0, palette.tileFloor),
           "lantai",
           "Tangga Masuk Teras",
-          createChamferBox(Math.min(1.12, tb.width * 0.6), lt1Y - trH, 0.34, 0.01, 1),
-          Math.min(tb.maxX - 0.5, tb.minX + 1.58),
+          applyFloorWorldUv1(createChamferBox(Math.min(1.12, tb.width * 0.6), lt1Y - trH, 0.34, 0.01, 1), siteW, siteD, stX, stZ),
+          stX,
           (lt1Y + trH) * 0.5,
-          tb.maxZ - 0.15,
+          stZ,
+          0,
+          undefined,
+          false,
+          true,
         );
       }
     }
@@ -903,22 +985,35 @@ export function buildProjectHouse(
         pW,
         Math.max(0.1, lt1Y - 0.08),
         pD,
+        { castShadow: false, receiveShadow: true },
       );
     }
 
     // Human-scale landscaping only when corresponding garden rooms exist
     if (frontGardenRoom || rearGardenRoom) {
-      const leafDeep = new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 });
-      const leafLight = new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 });
-      const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 });
-      const gardenLightMat = new THREE.MeshStandardMaterial({
-        color: 0xffe7b2,
-        emissive: 0xffc46b,
-        emissiveIntensity: 1.8,
-        roughness: 0.38,
-        metalness: 0.1,
-      });
-      resources.push(leafDeep, leafLight, hedgeMat, gardenLightMat);
+      const leafDeep = palette.getPropMaterial(
+        "garden:leafDeep",
+        () => new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 }),
+      );
+      const leafLight = palette.getPropMaterial(
+        "garden:leafLight",
+        () => new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 }),
+      );
+      const hedgeMat = palette.getPropMaterial(
+        "garden:hedge",
+        () => new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 }),
+      );
+      const gardenLightMat = palette.getPropMaterial(
+        "garden:bulb",
+        () =>
+          new THREE.MeshStandardMaterial({
+            color: 0xffe7b2,
+            emissive: 0xffc46b,
+            emissiveIntensity: 1.8,
+            roughness: 0.38,
+            metalness: 0.1,
+          }),
+      );
 
       const addGardenTree = (x: number, z: number, scale: number, mat: THREE.Material) => {
         const trunkGeos: THREE.BufferGeometry[] = [];
@@ -974,6 +1069,7 @@ export function buildProjectHouse(
         hedgeGeos.push(frontHedge);
 
         const bollardGeos: THREE.BufferGeometry[] = [];
+        const bulbGeos: THREE.BufferGeometry[] = [];
         for (const [bx, bz] of [
           [0.08, 0.82],
           [0.08, 2.28],
@@ -983,8 +1079,15 @@ export function buildProjectHouse(
           bollardGeos.push(post);
           const bulb = new THREE.SphereGeometry(0.065, 10, 7);
           bulb.translate(bx, 0.57, bz);
-          levelRoots[0].add(new THREE.Mesh(bulb, gardenLightMat));
-          resources.push(bulb);
+          bulbGeos.push(bulb);
+        }
+        const mergedBulbs = mergeGeometryBatch(bulbGeos);
+        if (mergedBulbs) {
+          const gm = new THREE.Mesh(mergedBulbs, gardenLightMat);
+          gm.updateMatrix();
+          gm.matrixAutoUpdate = false;
+          levelRoots[0].add(gm);
+          resources.push(mergedBulbs);
         }
         const mergedBollard = mergeGeometryBatch(bollardGeos);
         if (mergedBollard) {
@@ -1042,6 +1145,7 @@ export function buildProjectHouse(
       }
     }
     tGeo.computeVertexNormals();
+    attachBvh(tGeo);
     const tMesh = new THREE.Mesh(tGeo, palette.grass);
     tMesh.name = "build-terrain-mesh";
     tMesh.userData.isTerrainMesh = true;
@@ -1052,6 +1156,8 @@ export function buildProjectHouse(
 
   // 2. Foundations, Batu Kali / Cakar Ayam / Strauss Pile & Sumur Resapan
   if (showFnd) {
+    // Buried foundations only cast shadows when terrain is hidden (foundation inspection mode)
+    const fndCastShadow = !showTerrain;
     for (const f of struct.foundations) {
       const fw = project.systems.foundation === "footplate_full" ? 1.2 : project.systems.foundation === "cakar_ayam" ? 1.1 : 1.0;
       batchBase.addGeo(
@@ -1065,6 +1171,8 @@ export function buildProjectHouse(
         f.z,
         0,
         [0, -1.4, 0],
+        fndCastShadow,
+        true,
       );
       batchBase.addBox(
         "fnd:all",
@@ -1077,7 +1185,7 @@ export function buildProjectHouse(
         0.26,
         lt1Y + 0.45,
         0.26,
-        { explodeOff: [0, -1.4, 0] },
+        { explodeOff: [0, -1.4, 0], castShadow: fndCastShadow, receiveShadow: true },
       );
       if (project.systems.foundation === "strauss_pile") {
         for (const sxOff of [-0.24, 0.24]) {
@@ -1092,6 +1200,8 @@ export function buildProjectHouse(
             f.z,
             0,
             [0, -1.6, 0],
+            fndCastShadow,
+            true,
           );
           if (opts.xrayRebar) {
             batchBase.addGeo(
@@ -1105,6 +1215,8 @@ export function buildProjectHouse(
               f.z,
               0,
               [0, -1.6, 0],
+              fndCastShadow,
+              true,
             );
           }
         }
@@ -1120,12 +1232,14 @@ export function buildProjectHouse(
           f.z,
           0,
           [0, -1.5, 0],
+          fndCastShadow,
+          true,
         );
       }
       if (opts.xrayRebar) {
         for (const off of [-0.32, 0, 0.32]) {
-          batchBase.addBox("fnd:rebar", palette.rebar, "pondasi", "Tulangan Footplate", f.x, -0.68, f.z + off, fw * 0.84, 0.03, 0.03, { explodeOff: [0, -1.4, 0] });
-          batchBase.addBox("fnd:rebar", palette.rebar, "pondasi", "Tulangan Footplate", f.x + off, -0.68, f.z, 0.03, 0.03, fw * 0.84, { explodeOff: [0, -1.4, 0] });
+          batchBase.addBox("fnd:rebar", palette.rebar, "pondasi", "Tulangan Footplate", f.x, -0.68, f.z + off, fw * 0.84, 0.03, 0.03, { explodeOff: [0, -1.4, 0], castShadow: fndCastShadow });
+          batchBase.addBox("fnd:rebar", palette.rebar, "pondasi", "Tulangan Footplate", f.x + off, -0.68, f.z, 0.03, 0.03, fw * 0.84, { explodeOff: [0, -1.4, 0], castShadow: fndCastShadow });
         }
         for (const [rx, rz] of [[-0.07, -0.07], [0.07, -0.07], [-0.07, 0.07], [0.07, 0.07]] as const) {
           batchBase.addBox(
@@ -1139,7 +1253,7 @@ export function buildProjectHouse(
             0.025,
             lt1Y + 0.5,
             0.025,
-            { explodeOff: [0, -1.4, 0] },
+            { explodeOff: [0, -1.4, 0], castShadow: fndCastShadow },
           );
         }
       }
@@ -1167,7 +1281,7 @@ export function buildProjectHouse(
           len,
           stripH,
           0.34,
-          { rotY: ang, explodeOff: [0, -0.95, 0] },
+          { rotY: ang, explodeOff: [0, -0.95, 0], castShadow: fndCastShadow },
         );
       }
     } else if (project.systems.foundation === "cakar_ayam" && (project.levels[0]?.walls.length ?? 0) > 0) {
@@ -1182,7 +1296,7 @@ export function buildProjectHouse(
         5.0,
         0.12,
         13.0,
-        { explodeOff: [0, -1.0, 0] },
+        { explodeOff: [0, -1.0, 0], castShadow: fndCastShadow },
       );
     }
 
@@ -1198,6 +1312,7 @@ export function buildProjectHouse(
         1.2 + i * 1.1,
         0,
         [0, -1.2, 0],
+        fndCastShadow,
       );
     }
   }
@@ -1405,15 +1520,36 @@ export function buildProjectHouse(
         }
       }
 
-      const geo = new THREE.ExtrudeGeometry(shape, { depth: slab.thickness, bevelEnabled: false });
+      const geo = applyFloorWorldUv1(
+        new THREE.ExtrudeGeometry(shape, { depth: slab.thickness, bevelEnabled: false }),
+        siteW,
+        siteD,
+      );
       geo.rotateX(-Math.PI / 2);
+      // Re-apply world uv1 after rotateX(-PI/2) so xz maps cleanly
+      applyFloorWorldUv1(geo, siteW, siteD);
       const matKey = slab.isOverhang ? "woodDeck" : showTileFloor ? "tileFloor" : "concrete";
-      const mat = slab.isOverhang ? palette.woodDeck : showTileFloor ? palette.tileFloor : concreteStructMat;
+      const baseMat = slab.isOverhang ? palette.woodDeck : showTileFloor ? palette.tileFloor : concreteStructMat;
+      const mat = getFloorAoMat(1, baseMat);
       batchLt2.addGeo(`slab:${matKey}`, mat, "pelat", slab.name, geo, 0, lt2Y - slab.thickness, 0, 0, [0, 1.5, 0]);
       if (opts.showFinishing && !slab.isOverhang) {
         const soffitGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.014, bevelEnabled: false });
         soffitGeo.rotateX(-Math.PI / 2);
-        batchLt2.addGeo("slab:ceiling", palette.ceiling, "plafon", "Plafon Gypsum LT1", soffitGeo, 0, lt2Y - slab.thickness - 0.014, 0, 0, [0, 1.5, 0]);
+        applyFloorWorldUv1(soffitGeo, siteW, siteD);
+        batchLt2.addGeo(
+          "slab:ceiling",
+          getFloorAoMat(0, palette.ceiling),
+          "plafon",
+          "Plafon Gypsum LT1",
+          soffitGeo,
+          0,
+          lt2Y - slab.thickness - 0.014,
+          0,
+          0,
+          [0, 1.5, 0],
+          false,
+          true,
+        );
       }
     }
   }
@@ -1432,6 +1568,7 @@ export function buildProjectHouse(
         Math.max(0.4, rb.width),
         0.04,
         Math.max(0.4, rb.depth),
+        { castShadow: false, receiveShadow: true },
       );
       for (const px of [2.15, 2.75, 3.35, 3.95]) {
         if (px < rb.minX + 0.25 || px > rb.maxX - 0.25) continue;
@@ -1444,6 +1581,10 @@ export function buildProjectHouse(
           px,
           lt1Y + 0.01,
           (rb.minZ + rb.maxZ) * 0.5 - 0.15,
+          0,
+          undefined,
+          false,
+          true,
         );
       }
     }
@@ -1487,6 +1628,7 @@ export function buildProjectHouse(
 
         const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.03, bevelEnabled: false });
         geo.rotateX(-Math.PI / 2);
+        applyFloorWorldUv1(geo, siteW, siteD);
         const customTint = CUSTOM_TILE_HEX[rm.room.floorMaterialId];
         let mat: THREE.Material = rm.isWetRoom
           ? palette.tileWet
@@ -1498,8 +1640,17 @@ export function buildProjectHouse(
         if (customTint) {
           mat = palette.getCachedMaterial(customTint.hex, customTint.roughness);
         }
+        const matKey = customTint
+          ? `custom:${rm.room.floorMaterialId}`
+          : rm.isWetRoom
+            ? "wet"
+            : rm.room.floorMaterialId === "wood_deck"
+              ? "wood_deck"
+              : rm.room.floorMaterialId === "tile_wood_warm"
+                ? "tile_wood"
+                : "tile_floor";
         const yOff = lvIdx === 0 && rm.room.program === "circulation" ? peil.terracePeilM + 0.005 : baseFloorY;
-        bTarget.addGeo(`floor${lvIdx}:${rm.room.id}`, mat, "lantai", rm.room.name, geo, 0, yOff, 0, 0, undefined, false, true);
+        bTarget.addGeo(`floor${lvIdx}:${matKey}`, getFloorAoMat(lvIdx, mat), "lantai", rm.room.name, geo, 0, yOff, 0, 0, undefined, false, true);
       }
     }
   }
@@ -1540,17 +1691,25 @@ export function buildProjectHouse(
       const [lvStr, matId] = k.split(":");
       const merged = mergeGeometryBatch(geos);
       if (!merged) continue;
+      const lvNum = Number(lvStr) === 1 ? 1 : 0;
+      applyFloorWorldUv1(merged, siteW, siteD);
       const spec = CUSTOM_TILE_HEX[matId ?? ""] ?? { hex: "#dbd4c8", roughness: 0.45 };
       const baseMat = palette.getCachedMaterial(spec.hex, spec.roughness);
       const tileMat = baseMat.clone();
+      tileMat.aoMap = lvNum === 0 ? aoMapLt1 : aoMapLt2;
+      tileMat.aoMapIntensity = 1.15;
+      attachBakedAoShader(tileMat);
       tileMat.polygonOffset = true;
       tileMat.polygonOffsetFactor = -2;
       tileMat.polygonOffsetUnits = -2;
       resources.push(merged, tileMat);
       const mesh = new THREE.Mesh(merged, tileMat);
-      mesh.userData.customTileMeta = { levelIndex: Number(lvStr) === 1 ? 1 : 0, materialId: matId ?? "granite_warm" };
+      mesh.userData.customTileMeta = { levelIndex: lvNum, materialId: matId ?? "granite_warm" };
       mesh.receiveShadow = true;
-      levelRoots[Number(lvStr) === 1 ? 1 : 0].add(mesh);
+      mesh.updateMatrix();
+      mesh.matrixAutoUpdate = false;
+      levelRoots[lvNum].add(mesh);
+      pickables.push(mesh);
     }
   }
 
@@ -1561,20 +1720,29 @@ export function buildProjectHouse(
     const z2 = (Math.max(pool.gz1, pool.gz2) + 1) * 0.5;
     const pw = Math.max(0.5, x2 - x1);
     const pd = Math.max(0.5, z2 - z1);
-    const pBasin = new THREE.Mesh(
-      new THREE.BoxGeometry(pw, 0.12, pd),
-      new THREE.MeshStandardMaterial({ color: "#286e8a", roughness: 0.35 }),
+    const pBasinGeo = attachBvh(new THREE.BoxGeometry(pw, 0.12, pd));
+    const pBasinMat = palette.getPropMaterial(
+      "pool:basin",
+      () => new THREE.MeshStandardMaterial({ color: "#286e8a", roughness: 0.35 }),
     );
+    const pBasin = new THREE.Mesh(pBasinGeo, pBasinMat);
     pBasin.position.set((x1 + x2) * 0.5, 0.02, (z1 + z2) * 0.5);
-    const pWater = new THREE.Mesh(
-      new THREE.BoxGeometry(pw - 0.08, 0.08, pd - 0.08),
-      new THREE.MeshStandardMaterial({ color: "#3ab2e3", roughness: 0.08, transparent: true, opacity: 0.8 }),
+    pBasin.updateMatrix();
+    pBasin.matrixAutoUpdate = false;
+    const pWaterGeo = attachBvh(new THREE.BoxGeometry(pw - 0.08, 0.08, pd - 0.08));
+    const pWaterMat = palette.getPropMaterial(
+      "pool:water",
+      () => new THREE.MeshStandardMaterial({ color: "#3ab2e3", roughness: 0.08, transparent: true, opacity: 0.8 }),
     );
+    const pWater = new THREE.Mesh(pWaterGeo, pWaterMat);
     pWater.position.set((x1 + x2) * 0.5, lt1Y + 0.03, (z1 + z2) * 0.5);
+    pWater.castShadow = false;
+    pWater.updateMatrix();
+    pWater.matrixAutoUpdate = false;
     tagPickable(pBasin, { kind: "pool", id: pool.id, levelIndex: 0 }, "Kolam Renang");
     tagPickable(pWater, { kind: "pool", id: pool.id, levelIndex: 0 }, "Kolam Renang");
     levelRoots[0].add(pBasin, pWater);
-    resources.push(pBasin.geometry, pBasin.material as THREE.Material, pWater.geometry, pWater.material as THREE.Material);
+    resources.push(pBasinGeo, pWaterGeo);
   }
 
   // 5. Staircase & Railings
@@ -1652,6 +1820,7 @@ export function buildProjectHouse(
       batchLt2.addBox(`rail:glass-${partId}`, palette.glass, partId, `Railing ${label}`, mx, lt2Y + 0.5, mz, rLen, 0.98, 0.035, {
         rotY: ang,
         explodeOff: [0, 1.5, 0],
+        castShadow: false,
       });
       batchLt2.addGeo(
         "rail:alu",
@@ -1759,6 +1928,8 @@ export function buildProjectHouse(
         off[i * 3 + 2] = (b.z - 8.5) * 0.25;
       }
       im.instanceMatrix.needsUpdate = true;
+      im.updateMatrix();
+      im.matrixAutoUpdate = false;
       const lvIdx: 0 | 1 = lvTarget === 1 ? 1 : 0;
       levelRoots[lvIdx].add(im);
       tagPickable(im, { kind: "part", id: "dinding" }, label);
@@ -1782,6 +1953,8 @@ export function buildProjectHouse(
     const lvIdx = (lv.index === 1 ? 1 : 0) as 0 | 1;
     const baseLvY = lvIdx === 0 ? lt1Y : lt2Y;
     const lvRoot = levelRoots[lvIdx];
+    const cornerFlags = computeWallCornerFlags(lv.walls);
+    const walkStaticBatch = !opts.supportWallCutaway ? new StaticBatchCollector() : null;
 
     for (const w of lv.walls) {
       const dx = w.end.x - w.start.x;
@@ -1822,6 +1995,7 @@ export function buildProjectHouse(
         wallShape.lineTo(0, w.height + extra0);
         wallShape.closePath();
 
+        const openingBounds: { lo: number; hi: number; sill: number; top: number }[] = [];
         for (const op of w.openings) {
           const lo = Math.max(0.02, op.offset - op.width * 0.5);
           const hi = Math.min(len - 0.02, op.offset + op.width * 0.5);
@@ -1834,26 +2008,55 @@ export function buildProjectHouse(
             hole.lineTo(lo, top);
             hole.closePath();
             wallShape.holes.push(hole);
+            openingBounds.push({ lo, hi, sill: op.sill, top });
           }
         }
 
         const skinThickness = w.thickness + 0.022;
         const rawGeo = new THREE.ExtrudeGeometry(wallShape, { depth: skinThickness, bevelEnabled: false });
         rawGeo.translate(0, 0, -skinThickness * 0.5);
-        let meshMat: THREE.Material | THREE.Material[] = frontMat;
-        if (frontMat !== backMat) {
-          splitWallExtrudeMaterialGroups(rawGeo);
-          meshMat = [frontMat, backMat, edgeMat];
+        const corners = cornerFlags.get(w.id) ?? { startCorner: false, endCorner: false };
+        applyWallVertexAo(
+          rawGeo,
+          len,
+          w.height + Math.max(extra0, extra1),
+          corners.startCorner,
+          corners.endCorner,
+          openingBounds,
+        );
+        if (walkStaticBatch && frontMat === backMat) {
+          walkStaticBatch.addGeo(
+            `walkWall:${lvIdx}:${frontMat.uuid}`,
+            frontMat,
+            "cat",
+            w.name,
+            rawGeo,
+            w.start.x,
+            baseLvY,
+            w.start.z,
+            ang,
+            undefined,
+            true,
+            true,
+          );
+        } else {
+          let meshMat: THREE.Material | THREE.Material[] = frontMat;
+          if (frontMat !== backMat) {
+            splitWallExtrudeMaterialGroups(rawGeo);
+            meshMat = [frontMat, backMat, edgeMat];
+          }
+          const geo = attachBvh(rawGeo);
+          const mesh = new THREE.Mesh(geo, meshMat);
+          mesh.position.set(w.start.x, baseLvY, w.start.z);
+          mesh.rotation.y = ang;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          mesh.updateMatrix();
+          mesh.matrixAutoUpdate = false;
+          fullGroup.add(mesh);
+          resources.push(geo);
+          tagPickable(mesh, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
         }
-        const geo = attachBvh(rawGeo);
-        const mesh = new THREE.Mesh(geo, meshMat);
-        mesh.position.set(w.start.x, baseLvY, w.start.z);
-        mesh.rotation.y = ang;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        fullGroup.add(mesh);
-        resources.push(geo);
-        tagPickable(mesh, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
       }
       // Keep plaster skin and its door/window/vent openings locked together during Bongkar,
       // using the original Struktur Mode travel factors (X-splay 0.5, per-level lift 1.3).
@@ -1881,11 +2084,15 @@ export function buildProjectHouse(
             head.translate(0, op.height - ft * 0.5, 0);
             const frameGeo = mergeGeometryBatch([jambL, jambR, head]);
             if (frameGeo) {
-              const fm = new THREE.Mesh(frameGeo, palette.woodTeak);
-              fm.castShadow = true;
-              fm.receiveShadow = true;
-              opGroup.add(fm);
-              resources.push(frameGeo);
+              if (walkStaticBatch) {
+                walkStaticBatch.addGeo(`walkOpFrameWood:${lvIdx}`, palette.woodTeak, "pintu", op.label, frameGeo, cx, baseLvY + op.sill, cz, ang, undefined, true, true);
+              } else {
+                const fm = new THREE.Mesh(frameGeo, palette.woodTeak);
+                fm.castShadow = true;
+                fm.receiveShadow = true;
+                opGroup.add(fm);
+                resources.push(frameGeo);
+              }
             }
             if (op.kind === "door") {
               const pivot = new THREE.Group();
@@ -1934,16 +2141,27 @@ export function buildProjectHouse(
             }
             const frameGeo = mergeGeometryBatch(fParts);
             if (frameGeo) {
-              const fm = new THREE.Mesh(frameGeo, palette.aluDark);
-              fm.castShadow = true;
-              fm.receiveShadow = true;
-              opGroup.add(fm);
-              resources.push(frameGeo);
+              if (walkStaticBatch) {
+                walkStaticBatch.addGeo(`walkOpFrameAlu:${lvIdx}`, palette.aluDark, "pintu", op.label, frameGeo, cx, baseLvY + op.sill, cz, ang, undefined, true, true);
+              } else {
+                const fm = new THREE.Mesh(frameGeo, palette.aluDark);
+                fm.castShadow = true;
+                fm.receiveShadow = true;
+                opGroup.add(fm);
+                resources.push(frameGeo);
+              }
             }
-            const glassGeo = attachBvh(new THREE.BoxGeometry(op.width - ft * 2, op.height - ft * 2, 0.015));
+            const glassGeo = new THREE.BoxGeometry(op.width - ft * 2, op.height - ft * 2, 0.015);
             glassGeo.translate(0, op.height * 0.5, 0);
-            opGroup.add(new THREE.Mesh(glassGeo, palette.glass));
-            resources.push(glassGeo);
+            if (walkStaticBatch) {
+              walkStaticBatch.addGeo(`walkOpGlass:${lvIdx}`, palette.glass, "pintu", op.label, glassGeo, cx, baseLvY + op.sill, cz, ang, undefined, false, false);
+            } else {
+              attachBvh(glassGeo);
+              const gm = new THREE.Mesh(glassGeo, palette.glass);
+              gm.castShadow = false;
+              opGroup.add(gm);
+              resources.push(glassGeo);
+            }
             tagPickable(opGroup, { kind: "opening", id: op.id, wallId: w.id, levelIndex: lvIdx }, op.label);
           } else if (op.kind === "vent") {
             const cells = Math.max(1, Math.round(op.width / 0.2));
@@ -1957,11 +2175,15 @@ export function buildProjectHouse(
             }
             const ventGeo = mergeGeometryBatch(vParts);
             if (ventGeo) {
-              const vm = new THREE.Mesh(ventGeo, palette.concrete);
-              vm.castShadow = true;
-              vm.receiveShadow = true;
-              opGroup.add(vm);
-              resources.push(ventGeo);
+              if (walkStaticBatch) {
+                walkStaticBatch.addGeo(`walkOpVent:${lvIdx}`, palette.concrete, "pintu", op.label, ventGeo, cx, baseLvY + op.sill, cz, ang, undefined, true, true);
+              } else {
+                const vm = new THREE.Mesh(ventGeo, palette.concrete);
+                vm.castShadow = true;
+                vm.receiveShadow = true;
+                opGroup.add(vm);
+                resources.push(ventGeo);
+              }
             }
             tagPickable(opGroup, { kind: "opening", id: op.id, wallId: w.id, levelIndex: lvIdx }, op.label);
           }
@@ -1991,6 +2213,10 @@ export function buildProjectHouse(
           }
           if (len > cursor + 0.03) spans.push([cursor, len]);
 
+          const bodyGeos: THREE.BufferGeometry[] = [];
+          const capGeos: THREE.BufferGeometry[] = [];
+          const sillGeos: THREE.BufferGeometry[] = [];
+
           for (const [s0, s1] of spans) {
             const extL = s0 <= 0.005 ? w.thickness * 0.25 : 0;
             const extR = s1 >= len - 0.005 ? w.thickness * 0.25 : 0;
@@ -2003,19 +2229,35 @@ export function buildProjectHouse(
             const cz = w.start.z + uz * midAlong;
 
             const bodyG = new THREE.BoxGeometry(segLen, effH, skinT);
-            const bodyM = new THREE.Mesh(bodyG, wallMat);
-            bodyM.position.set(cx, baseLvY + effH * 0.5, cz);
-            bodyM.rotation.y = ang;
-            bodyM.castShadow = true;
-            bodyM.receiveShadow = true;
+            applyGradientVertexAo(bodyG, 0.44, 0.06);
+            bodyG.rotateY(ang);
+            bodyG.translate(cx, baseLvY + effH * 0.5, cz);
+            bodyGeos.push(bodyG);
 
             const capG = new THREE.BoxGeometry(segLen, 0.024, skinT + 0.01);
-            const capM = new THREE.Mesh(capG, cutawayCapMat);
-            capM.position.set(cx, baseLvY + effH + 0.012, cz);
-            capM.rotation.y = ang;
+            capG.rotateY(ang);
+            capG.translate(cx, baseLvY + effH + 0.012, cz);
+            capGeos.push(capG);
+          }
 
-            grp.add(bodyM, capM);
-            resources.push(bodyG, capG);
+          const mergedBody = mergeGeometryBatch(bodyGeos);
+          if (mergedBody) {
+            const bodyM = new THREE.Mesh(mergedBody, wallMat);
+            bodyM.castShadow = true;
+            bodyM.receiveShadow = true;
+            bodyM.updateMatrix();
+            bodyM.matrixAutoUpdate = false;
+            grp.add(bodyM);
+            resources.push(mergedBody);
+          }
+          const mergedCap = mergeGeometryBatch(capGeos);
+          if (mergedCap) {
+            const capM = new THREE.Mesh(mergedCap, cutawayCapMat);
+            capM.castShadow = false;
+            capM.updateMatrix();
+            capM.matrixAutoUpdate = false;
+            grp.add(capM);
+            resources.push(mergedCap);
           }
 
           // Subtle threshold strip for doors/arches so doorways remain readable in Cutaway/Rendah (BM-04)
@@ -2024,12 +2266,18 @@ export function buildProjectHouse(
               const cx = w.start.x + ux * op.offset;
               const cz = w.start.z + uz * op.offset;
               const sillG = new THREE.BoxGeometry(op.width, 0.026, skinT + 0.015);
-              const sillM = new THREE.Mesh(sillG, palette.woodTeak);
-              sillM.position.set(cx, baseLvY + 0.013, cz);
-              sillM.rotation.y = ang;
-              grp.add(sillM);
-              resources.push(sillG);
+              sillG.rotateY(ang);
+              sillG.translate(cx, baseLvY + 0.013, cz);
+              sillGeos.push(sillG);
             }
+          }
+          const mergedSill = mergeGeometryBatch(sillGeos);
+          if (mergedSill) {
+            const sillM = new THREE.Mesh(mergedSill, palette.woodTeak);
+            sillM.updateMatrix();
+            sillM.matrixAutoUpdate = false;
+            grp.add(sillM);
+            resources.push(mergedSill);
           }
           tagPickable(grp, { kind: "wall", id: w.id, levelIndex: lvIdx }, w.name);
           return grp;
@@ -2055,6 +2303,12 @@ export function buildProjectHouse(
           downGroup,
         });
       }
+    }
+
+    if (walkStaticBatch) {
+      walkStaticBatch.flush(lvRoot, resources, (mesh, partId, label) => {
+        tagPickable(mesh, { kind: "part", id: partId as never }, label);
+      });
     }
   }
 
@@ -2166,6 +2420,9 @@ export function buildProjectHouse(
         const skyGlass = new THREE.Mesh(attachBvh(new THREE.BoxGeometry(hW + 0.06, 0.035, hD + 0.06)), palette.glass);
         skyGlass.position.set(hMidX, skyAvgY + 0.04, hMidZ);
         skyGlass.rotation.x = -skyRotX;
+        skyGlass.castShadow = false;
+        skyGlass.updateMatrix();
+        skyGlass.matrixAutoUpdate = false;
         roofGroup.add(skyGlass);
         resources.push(skyGlass.geometry);
         tagPickable(skyGlass, { kind: "part", id: "plafon" }, "Skylight Tangga Tempered Glass");
@@ -2196,7 +2453,7 @@ export function buildProjectHouse(
           new THREE.Vector3(dx, 0.25, wallZ),
           new THREE.Vector3(dx, 0.09, wallZ - 0.22),
         ]);
-        const tubeGeo = attachBvh(new THREE.TubeGeometry(curve, 22, 0.044, 10, false));
+        const tubeGeo = new THREE.TubeGeometry(curve, 22, 0.044, 10, false);
         batchRoof.addGeo("roof:gutter", palette.aluDark, "talang", "Pipa Turun Hujan (Downspout)", tubeGeo, 0, 0, 0, 0, [0, 2.85, 0]);
         for (const cy of [1.2, 3.4, 5.6]) {
           batchRoof.addGeo("roof:gutter", palette.aluDark, "talang", "Klem Pipa Talang", new THREE.CylinderGeometry(0.062, 0.062, 0.045, 10), dx, cy, wallZ, 0, [0, 2.85, 0]);
@@ -2256,10 +2513,24 @@ export function buildProjectHouse(
       const lvGrp = new THREE.Group();
       lvGrp.position.y = baseY;
 
+      const decals: ContactDecalSpec[] = [];
       for (const f of lv.furniture) {
-        const mesh = buildProjectFurnitureObject(f, lvIdx, peil, palette, resources, contactShadowMat);
+        const mesh = buildProjectFurnitureObject(f, lvIdx, peil, palette, resources);
         lvGrp.add(mesh);
         pickables.push(mesh);
+        decals.push({
+          id: f.id,
+          x: mesh.position.x,
+          y: mesh.position.y,
+          z: mesh.position.z,
+          w: f.catalogId === "motorbike" ? 0.65 : f.size.x,
+          d: f.size.z,
+          rotY: f.rotationY,
+        });
+      }
+      const decalIm = buildInstancedContactDecals(decals, contactShadowMat, resources);
+      if (decalIm) {
+        lvGrp.add(decalIm);
       }
 
       for (const hv of lv.hvac) {
@@ -2403,7 +2674,7 @@ export function buildProjectHouse(
     });
 
     if (opts.showAir || stage === 7) {
-      const bioGeo = new THREE.CylinderGeometry(0.55, 0.55, 1.35, 16);
+      const bioGeo = attachBvh(new THREE.CylinderGeometry(0.55, 0.55, 1.35, 16));
       const bio = new THREE.Mesh(bioGeo, palette.mepWaterWaste);
       bio.position.set(2.8, -0.75, 1.6);
       bio.renderOrder = 951;

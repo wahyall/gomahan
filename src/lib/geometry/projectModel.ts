@@ -59,9 +59,15 @@ function polylineLen(pts: Vec3[]): number {
   return len;
 }
 
-export function buildDerivedModel(project: Project): DerivedProjectModel {
+export interface BuildDerivedModelOptions {
+  includeBricks?: boolean;
+}
+
+export function buildDerivedModel(project: Project, options?: BuildDerivedModelOptions): DerivedProjectModel {
   const roof = computeRoofMetrics(project);
-  const masonry = computeMasonryTakeoff(project.levels, project.systems.brick, roof.extraWallHeightAt);
+  const masonry = computeMasonryTakeoff(project.levels, project.systems.brick, roof.extraWallHeightAt, {
+    includeBricks: options?.includeBricks ?? true,
+  });
   const floors = project.levels.map((lv) =>
     computeLevelRoomsMetrics(lv, project.systems.brick, project.systems.tileSizeCm),
   );

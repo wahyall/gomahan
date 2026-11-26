@@ -322,7 +322,7 @@ describe("Rumah Studio 5x17 Engineering & Simulation Engines", () => {
     });
     expect(xlsxBlob.size).toBeGreaterThan(1000);
 
-    const pdfBlob = buildPdfDrawingsAndReportBlob({
+    const pdfBlob = await buildPdfDrawingsAndReportBlob({
       derived: d1,
       struct: s1,
       rab: r1,

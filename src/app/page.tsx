@@ -6,14 +6,16 @@ import { toast } from "sonner";
 import { buildDerivedModel } from "@/lib/geometry/projectModel";
 import { computeStructuralReport } from "@/lib/structure/sniEngine";
 import { buildRabSummary } from "@/lib/quantities/rabEngine";
-import { buildScheduleSummary } from "@/lib/timeline/scheduleEngine";
-import { runLightingSimulation } from "@/lib/simulation/lightingEngine";
-import { runAirflowSimulation } from "@/lib/simulation/airflowEngine";
-import { runFloodSimulation } from "@/lib/simulation/floodEngine";
+import { buildScheduleSummary, type ScheduleSummary } from "@/lib/timeline/scheduleEngine";
+import { type LightingSimulationResult } from "@/lib/simulation/lightingEngine";
+import { type AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
+import { runFloodSimulation, type FloodSimulationResult } from "@/lib/simulation/floodEngine";
+import { runAirflowSimulationAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
 import { parseVersionedProjectSave, validateProjectImport } from "@/lib/model/schema";
 import type { Project } from "@/lib/model/types";
 import { loadLatestProject, quarantineCorruptSave, saveAutosaveProject, saveProjectSnapshot } from "@/lib/store/db";
 import { useStudioStore } from "@/lib/store/useStudioStore";
+import { useBuildModeStore } from "@/features/buildMode/store";
 import { TopBar } from "@/components/shell/TopBar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { CommandPalette } from "@/components/shell/CommandPalette";
@@ -51,10 +53,84 @@ const DeliverWorkspace = dynamic(
   { ssr: false, loading: () => <WorkspaceLoading label="Pusat Ekspor" /> },
 );
 
+const EMPTY_SCHEDULE: ScheduleSummary = {
+  stages: [],
+  totalDurationDays: 0,
+  totalWeeks: 0,
+  weeklyCashFlow: [],
+  procurementOrders: [],
+  nextStageFunding: null,
+  earnedValue: { pv: 0, ev: 0, ac: 0, cpi: 1, spi: 1, eac: 0, vac: 0 },
+  scenarios: { baselineDays: 0, acceleratedDays: 0, acceleratedCostIdr: 0, delayedDays: 0, delayedCostIdr: 0 },
+};
+
+const EMPTY_LIGHTING: LightingSimulationResult = {
+  solar: { altitudeDeg: 45, azimuthDeg: 90, sunDir: [0.45, 0.78, -0.42], skyIrradianceLux: 0, isDaylight: true },
+  rooms: [],
+  gridWidth: 25,
+  gridDepth: 85,
+  lt1LuxGrid: new Float32Array(25 * 85),
+  lt2LuxGrid: new Float32Array(25 * 85),
+  avgHouseLux: 0,
+  sniCompliancePct: 0,
+  daylightScore: 0,
+  recommendations: [],
+  methodologyNote: "",
+};
+
+const EMPTY_AIRFLOW: AirflowSimulationResult = {
+  zones: [],
+  gridW: 25,
+  gridD: 85,
+  lt1VelX: new Float32Array(25 * 85),
+  lt1VelZ: new Float32Array(25 * 85),
+  lt1Temp: new Float32Array(25 * 85).fill(29),
+  lt2VelX: new Float32Array(25 * 85),
+  lt2VelZ: new Float32Array(25 * 85),
+  lt2Temp: new Float32Array(25 * 85).fill(29),
+  avgAch: 0,
+  crossVentPct: 0,
+  totalCoolingLoadW: 0,
+  totalHvacPowerW: 0,
+  airflowScore: 0,
+  recommendations: [],
+  methodologyNote: "",
+};
+
+const EMPTY_FLOOD: FloodSimulationResult = {
+  rainfallMmH: 0,
+  roofRunoffLps: 0,
+  gutterCapacityLps: 0,
+  downspoutCapacityLps: 0,
+  gutterOverflowRisk: false,
+  rearVoidSplashDepthM: 0,
+  infiltrationCapacityLph: 0,
+  pumpCapacityLph: 0,
+  streetFloodCm: 0,
+  effectiveBarrierHeightCm: 0,
+  lt1FloorFloodCm: 0,
+  carportFloodCm: 0,
+  terraceFloodCm: 0,
+  backflowActive: false,
+  electricalHazardOutlets: false,
+  electricalHazardMcb: false,
+  lt2EvacuationSafe: true,
+  zoneImpacts: [],
+  floodResilienceScore: 100,
+  warnings: [],
+  mitigationTips: [],
+};
+
 export default function HomePage() {
   const project = useStudioStore((s) => s.project);
   const workspace = useStudioStore((s) => s.workspace);
   const scheduleScenario = useStudioStore((s) => s.scheduleScenario);
+  const showBricksView = useStudioStore((s) => s.view.showBricks);
+  const showFinishingView = useStudioStore((s) => s.view.showFinishing);
+  const cutHView = useStudioStore((s) => s.view.cutH);
+  const explodeView = useStudioStore((s) => s.view.explode);
+  const stageView = useStudioStore((s) => s.view.stage);
+  const showBricksOverlay = useBuildModeStore((s) => s.showBricksOverlay);
   const guideOpen = useStudioStore((s) => s.guideOpen);
   const setGuideOpen = useStudioStore((s) => s.setGuideOpen);
   const loadProject = useStudioStore((s) => s.loadProject);
@@ -63,6 +139,7 @@ export default function HomePage() {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSnapshotRef = useRef<string | null>(null);
+  const lastSavedProjectRef = useRef<Project | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [hydrated, setHydrated] = useState(false);
@@ -79,6 +156,7 @@ export default function HomePage() {
         if (saved) {
           const check = parseVersionedProjectSave(saved);
           if (check.status === "ok") {
+            lastSavedProjectRef.current = check.data;
             loadProject(check.data);
             if (check.migratedFromVersion) {
               toast.info(`Save proyek lama (v${check.migratedFromVersion}) otomatis dimigrasi ke v${check.data.schemaVersion}.`);
@@ -104,13 +182,16 @@ export default function HomePage() {
     canvasRef.current = cv;
   }, []);
 
-  // Debounced autosave to IndexedDB
+  // Debounced autosave to IndexedDB (skip redundant write immediately after hydration or unchanged ref)
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || project === lastSavedProjectRef.current) return;
     const timer = setTimeout(() => {
       setSaveStatus("saving");
       saveAutosaveProject(project)
-        .then(() => setSaveStatus("saved"))
+        .then(() => {
+          lastSavedProjectRef.current = project;
+          setSaveStatus("saved");
+        })
         .catch(() => setSaveStatus("idle"));
     }, 600);
     return () => clearTimeout(timer);
@@ -186,17 +267,72 @@ export default function HomePage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [pendingImport, setSelected, setWorkspace, snapshotsOpen]);
 
-  // Core reactive computation pipeline: synchronous structure for 3D edit responsiveness, deferred heavy sims
-  const derived = useMemo(() => buildDerivedModel(project), [project]);
-  const struct = useMemo(() => computeStructuralReport(derived), [derived]);
+  // Core reactive computation pipeline: slice-memoized geometry + lazy bricks + deferred heavy sims
+  const needBricks =
+    workspace === "build" &&
+    showBricksView &&
+    (showBricksOverlay || !showFinishingView || explodeView > 0.05 || cutHView < 10 || (stageView > 0 && stageView <= 7));
+
+  const coreGeom = useMemo(
+    () => buildDerivedModel(project, { includeBricks: needBricks }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- project.simulation/priceBook/rabSettings do not alter core geometry
+    [project.site, project.levels, project.systems, project.structuralParams, needBricks],
+  );
+  const derived = useMemo(
+    () => (coreGeom.project === project ? coreGeom : { ...coreGeom, project }),
+    [coreGeom, project],
+  );
+  const struct = useMemo(() => computeStructuralReport(coreGeom), [coreGeom]);
+
   const deferredProject = useDeferredValue(project);
-  const deferredDerived = useMemo(() => buildDerivedModel(deferredProject), [deferredProject]);
-  const deferredStruct = useMemo(() => computeStructuralReport(deferredDerived), [deferredDerived]);
-  const rab = useMemo(() => buildRabSummary(deferredDerived, deferredStruct), [deferredDerived, deferredStruct]);
-  const schedule = useMemo(() => buildScheduleSummary(deferredProject, rab, scheduleScenario), [deferredProject, rab, scheduleScenario]);
-  const lighting = useMemo(() => runLightingSimulation(deferredDerived), [deferredDerived]);
-  const airflow = useMemo(() => runAirflowSimulation(deferredDerived), [deferredDerived]);
-  const flood = useMemo(() => runFloodSimulation(deferredDerived), [deferredDerived]);
+  const deferredCoreGeom = useDeferredValue(coreGeom);
+  const deferredStruct = useDeferredValue(struct);
+  const rabInputDerived = useMemo(
+    () => (deferredCoreGeom.project === deferredProject ? deferredCoreGeom : { ...deferredCoreGeom, project: deferredProject }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- RAB ignores simulation sliders and stageProgress
+    [
+      deferredCoreGeom,
+      deferredProject.priceBook,
+      deferredProject.rabSettings,
+      deferredProject.floodMitigation,
+      deferredProject.buildExtras,
+    ],
+  );
+  const rab = useMemo(() => buildRabSummary(rabInputDerived, deferredStruct), [rabInputDerived, deferredStruct]);
+
+  const scheduleNeeded = workspace === "timeline" || workspace === "deliver";
+  const schedule = useMemo(
+    () => (scheduleNeeded ? buildScheduleSummary(deferredProject, rab, scheduleScenario) : EMPTY_SCHEDULE),
+    [scheduleNeeded, deferredProject, rab, scheduleScenario],
+  );
+
+  const simInputDerived = useMemo(
+    () => (deferredCoreGeom.project === deferredProject ? deferredCoreGeom : { ...deferredCoreGeom, project: deferredProject }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Sims depend only on geometry, site peil/mitigation, and simulation env
+    [deferredCoreGeom, deferredProject.simulation, deferredProject.floodMitigation],
+  );
+  const [lighting, setLighting] = useState<LightingSimulationResult>(EMPTY_LIGHTING);
+  const [airflow, setAirflow] = useState<AirflowSimulationResult>(EMPTY_AIRFLOW);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    let active = true;
+    const simProj = simInputDerived.project;
+    void runLightingSimulationAsync(simProj).then((res) => {
+      if (active && res) setLighting(res);
+    });
+    void runAirflowSimulationAsync(simProj).then((res) => {
+      if (active && res) setAirflow(res);
+    });
+    return () => {
+      active = false;
+    };
+  }, [hydrated, simInputDerived]);
+
+  const flood = useMemo(
+    () => (hydrated ? runFloodSimulation(simInputDerived) : EMPTY_FLOOD),
+    [hydrated, simInputDerived],
+  );
 
   const handleExportJson = useCallback(() => {
     const check = validateProjectImport(project);

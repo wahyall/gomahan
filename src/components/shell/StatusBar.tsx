@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
@@ -21,7 +22,7 @@ interface StatusBarProps {
   saveStatus: "idle" | "saving" | "saved";
 }
 
-export function StatusBar({
+export const StatusBar = memo(function StatusBar({
   derived,
   struct,
   rab,
@@ -31,7 +32,7 @@ export function StatusBar({
   saveStatus,
 }: StatusBarProps) {
   const selected = useStudioStore((s) => s.selected);
-  const view = useStudioStore((s) => s.view);
+  const ortho = useStudioStore((s) => s.view.ortho);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
   const openBuildPanel = useStudioStore((s) => s.openBuildPanel);
   const criticalCount = derived.validation.filter((v) => v.severity === "critical").length;
@@ -67,7 +68,7 @@ export function StatusBar({
         <span className="hidden items-center gap-1 lg:flex">
           <Layers className="h-3 w-3 text-sky-400" />
           <span className="max-w-[170px] truncate">{selectedLabel}</span>
-          <span className="text-muted-foreground">· {view.ortho ? "Orto" : "Persp"}</span>
+          <span className="text-muted-foreground">· {ortho ? "Orto" : "Persp"}</span>
         </span>
       </div>
 
@@ -158,4 +159,4 @@ export function StatusBar({
       </div>
     </footer>
   );
-}
+});

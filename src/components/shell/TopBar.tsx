@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   BookOpen,
@@ -58,7 +58,7 @@ interface TopBarProps {
   onOpenSnapshots: () => void;
 }
 
-export function TopBar({
+export const TopBar = memo(function TopBar({
   derived,
   rab,
   onExportJson,
@@ -305,4 +305,4 @@ export function TopBar({
       />
     </header>
   );
-}
+});

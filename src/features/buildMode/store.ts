@@ -8,6 +8,7 @@ import type {
   RoofVisibilityMode,
   WallVisibilityMode,
 } from "@/features/buildMode/types";
+import type { BuildSceneStats } from "@/features/buildMode/BuildScene";
 import type { RoofType } from "@/lib/model/types";
 
 export interface BuildHoverState {
@@ -66,8 +67,9 @@ interface BuildModeViewState {
   pendingRoofType: RoofType | null;
   hover: BuildHoverState | null;
   previewHud: BuildPreviewHud | null;
+  stats: BuildSceneStats | null;
   savedCameraSnapshot: BuildCameraSnapshot | null;
-  /** Cinematic ray-traced-look post stack (GTAO + sun shafts + bloom + MSAA HDR). */
+  /** Cinematic ray-traced-look post stack (Baked AO + sun shafts + bloom + MSAA HDR). */
   rtLook: boolean;
   renderTier: BuildRenderTier;
 
@@ -97,6 +99,7 @@ interface BuildModeViewState {
   setPendingRoofType: (roofType: RoofType | null) => void;
   setHover: (hover: BuildHoverState | null) => void;
   setPreviewHud: (hud: BuildPreviewHud | null) => void;
+  setStats: (stats: BuildSceneStats | null) => void;
   saveCameraSnapshot: (snap: BuildCameraSnapshot) => void;
 }
 
@@ -122,6 +125,7 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
   pendingRoofType: null,
   hover: null,
   previewHud: null,
+  stats: null,
   savedCameraSnapshot: null,
   rtLook: true,
   renderTier: "auto",
@@ -222,6 +226,27 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
       }
       return { hover };
     }),
-  setPreviewHud: (previewHud) => set({ previewHud }),
+  setPreviewHud: (previewHud) =>
+    set((s) => {
+      if (
+        s.previewHud?.label === previewHud?.label &&
+        s.previewHud?.valid === previewHud?.valid
+      ) {
+        return s;
+      }
+      return { previewHud };
+    }),
+  setStats: (stats) =>
+    set((s) => {
+      if (
+        s.stats?.fps === stats?.fps &&
+        s.stats?.tier === stats?.tier &&
+        s.stats?.calls === stats?.calls &&
+        s.stats?.dpr === stats?.dpr
+      ) {
+        return s;
+      }
+      return { stats };
+    }),
   saveCameraSnapshot: (savedCameraSnapshot) => set({ savedCameraSnapshot }),
 }));

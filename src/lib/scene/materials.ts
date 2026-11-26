@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { attachBakedAoShader } from "@/lib/scene/bakedAo";
 
 /**
  * High-resolution procedural PBR textures & materials guided by:
@@ -8,17 +9,21 @@ import * as THREE from "three";
  * - `3d-harbour-water` (animated capillary ripples & rain impact rings via onBeforeCompile with distinct cache key)
  */
 
-function makeSeededCanvas(
-  width: number,
-  height: number,
-  draw: (ctx: CanvasRenderingContext2D) => void,
-  srgb = true,
-): THREE.CanvasTexture {
+function makeCanvasOnly(width: number, height: number, draw: (ctx: CanvasRenderingContext2D) => void): HTMLCanvasElement {
   const cv = document.createElement("canvas");
   cv.width = width;
   cv.height = height;
   const ctx = cv.getContext("2d");
   if (ctx) draw(ctx);
+  return cv;
+}
+
+function wrapCanvasTexture(
+  cv: HTMLCanvasElement,
+  srgb = true,
+  repeatX = 1,
+  repeatY = 1,
+): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(cv);
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
@@ -27,14 +32,15 @@ function makeSeededCanvas(
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.anisotropy = 4;
+  if (repeatX !== 1 || repeatY !== 1) tex.repeat.set(repeatX, repeatY);
   tex.needsUpdate = true;
   return tex;
 }
 
 /**
- * Generates a linear tangent-space Normal Map (`NoColorSpace`) from a grayscale height canvas.
+ * Generates a linear tangent-space Normal Map canvas from a grayscale height canvas.
  */
-function normalMapFromHeight(heightCanvas: HTMLCanvasElement, strength = 2.2): THREE.CanvasTexture {
+function normalCanvasFromHeight(heightCanvas: HTMLCanvasElement, strength = 2.2): HTMLCanvasElement {
   const w = heightCanvas.width;
   const h = heightCanvas.height;
   const hCtx = heightCanvas.getContext("2d")!;
@@ -70,15 +76,269 @@ function normalMapFromHeight(heightCanvas: HTMLCanvasElement, strength = 2.2): T
     }
   }
   oCtx.putImageData(dst, 0, 0);
-  const tex = new THREE.CanvasTexture(outCv);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.NoColorSpace;
-  tex.generateMipmaps = true;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.anisotropy = 4;
-  tex.needsUpdate = true;
-  return tex;
+  return outCv;
+}
+
+function normalMapFromHeight(heightCanvas: HTMLCanvasElement, strength = 2.2): THREE.CanvasTexture {
+  return wrapCanvasTexture(normalCanvasFromHeight(heightCanvas, strength), false);
+}
+
+interface CachedCanvasTriple {
+  albedo: HTMLCanvasElement;
+  rough?: HTMLCanvasElement;
+  normal: HTMLCanvasElement;
+}
+
+interface CachedCanvasPalette {
+  woodMain: CachedCanvasTriple;
+  woodDeck: CachedCanvasTriple;
+  plaster: { albedo: HTMLCanvasElement; normal: HTMLCanvasElement };
+  tileCream: CachedCanvasTriple;
+  tileGrey: CachedCanvasTriple;
+  grass: { albedo: HTMLCanvasElement; normal: HTMLCanvasElement };
+  road: { albedo: HTMLCanvasElement; normal: HTMLCanvasElement };
+  brushedRough: HTMLCanvasElement;
+  roofNormal: HTMLCanvasElement;
+}
+
+const cachedCanvasSets = new Map<number, CachedCanvasPalette>();
+
+function getOrBuildCanvasPalette(texScale: number): CachedCanvasPalette {
+  const key = Math.max(1, Math.round(texScale));
+  const existing = cachedCanvasSets.get(key);
+  if (existing) return existing;
+
+  const S = Math.min(1024, 512 * key);
+
+  const buildWoodCanvases = (baseHex: string, darkHex: string): CachedCanvasTriple => {
+    const heightCv = document.createElement("canvas");
+    heightCv.width = S;
+    heightCv.height = S;
+    const hCtx = heightCv.getContext("2d")!;
+    hCtx.fillStyle = "#888888";
+    hCtx.fillRect(0, 0, S, S);
+    const albedo = makeCanvasOnly(S, S, (ctx) => {
+      ctx.fillStyle = baseHex;
+      ctx.fillRect(0, 0, S, S);
+      for (let i = 0; i < 260; i++) {
+        const y = (i / 260) * S;
+        const tVal = (Math.sin(i * 1.43) + 1) * 0.5;
+        ctx.strokeStyle = darkHex;
+        ctx.globalAlpha = 0.05 + tVal * 0.16;
+        ctx.lineWidth = 1 + (i % 3);
+        ctx.beginPath();
+        hCtx.strokeStyle = tVal > 0.55 ? "#5a5a5a" : "#9c9c9c";
+        hCtx.lineWidth = ctx.lineWidth;
+        hCtx.beginPath();
+        for (let x = 0; x <= S; x += 16) {
+          const wave = Math.sin(x * 0.025 + i * 0.19) * 5.2 + Math.cos(x * 0.055 - i * 0.07) * 1.8;
+          if (x === 0) {
+            ctx.moveTo(0, y + wave);
+            hCtx.moveTo(0, y + wave);
+          } else {
+            ctx.lineTo(x, y + wave);
+            hCtx.lineTo(x, y + wave);
+          }
+        }
+        ctx.stroke();
+        hCtx.stroke();
+      }
+      for (let p = 0; p < 1400; p++) {
+        const px = (p * 173) % S;
+        const py = (p * 89) % S;
+        ctx.fillStyle = p % 3 === 0 ? "rgba(0,0,0,0.14)" : "rgba(255,255,255,0.04)";
+        ctx.fillRect(px, py, 8 + (p % 10), 1);
+        hCtx.fillStyle = "#484848";
+        hCtx.fillRect(px, py, 8 + (p % 10), 1);
+      }
+      ctx.globalAlpha = 1;
+    });
+    const rough = makeCanvasOnly(S, S, (ctx) => {
+      ctx.fillStyle = "#8a8a8a";
+      ctx.fillRect(0, 0, S, S);
+      for (let i = 0; i < 260; i++) {
+        ctx.fillStyle = i % 3 === 0 ? "#a8a8a8" : i % 2 === 0 ? "#7a7a7a" : "#909090";
+        ctx.fillRect(0, (i / 260) * S, S, 2);
+      }
+    });
+    const normal = normalCanvasFromHeight(heightCv, 1.8);
+    return { albedo, rough, normal };
+  };
+
+  const buildPlasterCanvases = () => {
+    const heightCv = document.createElement("canvas");
+    heightCv.width = S;
+    heightCv.height = S;
+    const hCtx = heightCv.getContext("2d")!;
+    hCtx.fillStyle = "#808080";
+    hCtx.fillRect(0, 0, S, S);
+    const albedo = makeCanvasOnly(S, S, (ctx) => {
+      ctx.fillStyle = "#f4f0e7";
+      ctx.fillRect(0, 0, S, S);
+      for (let i = 0; i < 3600; i++) {
+        const x = (i * 107) % S;
+        const y = (i * 211) % S;
+        const sz = 1 + (i % 3);
+        ctx.fillStyle = i % 2 === 0 ? "rgba(255,255,255,0.035)" : "rgba(0,0,0,0.038)";
+        ctx.fillRect(x, y, sz, sz);
+        hCtx.fillStyle = i % 2 === 0 ? "#919191" : "#6f6f6f";
+        hCtx.fillRect(x, y, sz, sz);
+      }
+    });
+    return { albedo, normal: normalCanvasFromHeight(heightCv, 1.3) };
+  };
+
+  const buildTileCanvases = (baseHex: string, groutHex: string): CachedCanvasTriple => {
+    const heightCv = document.createElement("canvas");
+    heightCv.width = S;
+    heightCv.height = S;
+    const hCtx = heightCv.getContext("2d")!;
+    hCtx.fillStyle = "#d8d8d8";
+    hCtx.fillRect(0, 0, S, S);
+    hCtx.strokeStyle = "#303030";
+    hCtx.lineWidth = 8;
+    hCtx.strokeRect(4, 4, S - 8, S - 8);
+    const albedo = makeCanvasOnly(S, S, (ctx) => {
+      ctx.fillStyle = baseHex;
+      ctx.fillRect(0, 0, S, S);
+      for (let i = 0; i < 1100; i++) {
+        const x = (i * 193) % S;
+        const y = (i * 97) % S;
+        ctx.fillStyle = i % 3 === 0 ? "rgba(0,0,0,0.035)" : "rgba(255,255,255,0.045)";
+        ctx.fillRect(x, y, 2 + (i % 3), 2 + (i % 3));
+      }
+      ctx.strokeStyle = "rgba(0,0,0,0.30)";
+      ctx.lineWidth = 12;
+      ctx.strokeRect(3.5, 3.5, S - 7, S - 7);
+      ctx.strokeStyle = groutHex;
+      ctx.lineWidth = 7;
+      ctx.strokeRect(3.5, 3.5, S - 7, S - 7);
+    });
+    const rough = makeCanvasOnly(S, S, (ctx) => {
+      ctx.fillStyle = "#484848";
+      ctx.fillRect(0, 0, S, S);
+      ctx.strokeStyle = "#e0e0e0";
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, S - 8, S - 8);
+    });
+    return { albedo, rough, normal: normalCanvasFromHeight(heightCv, 2.0) };
+  };
+
+  const buildGrassCanvases = () => {
+    const GS = 512;
+    const heightCv = document.createElement("canvas");
+    heightCv.width = GS;
+    heightCv.height = GS;
+    const hCtx = heightCv.getContext("2d")!;
+    hCtx.fillStyle = "#7e7e7e";
+    hCtx.fillRect(0, 0, GS, GS);
+    let seed = 0x5f3759df;
+    const rand = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const albedo = makeCanvasOnly(GS, GS, (ctx) => {
+      ctx.fillStyle = "#5c8c46";
+      ctx.fillRect(0, 0, GS, GS);
+      for (let i = 0; i < 42; i++) {
+        const cx = rand() * GS;
+        const cy = rand() * GS;
+        const rad = 28 + rand() * 52;
+        const warm = i % 2 === 0;
+        for (const ox of [-GS, 0, GS]) {
+          for (const oy of [-GS, 0, GS]) {
+            const g = ctx.createRadialGradient(cx + ox, cy + oy, 2, cx + ox, cy + oy, rad);
+            g.addColorStop(0, warm ? "rgba(130, 174, 86, 0.14)" : "rgba(68, 108, 49, 0.13)");
+            g.addColorStop(1, "rgba(0,0,0,0)");
+            ctx.fillStyle = g;
+            ctx.fillRect(cx + ox - rad, cy + oy - rad, rad * 2, rad * 2);
+          }
+        }
+      }
+      ctx.fillStyle = "rgba(148, 192, 104, 0.08)";
+      ctx.fillRect(0, 0, GS * 0.5, GS);
+      for (let i = 0; i < 6500; i++) {
+        const x = rand() * GS;
+        const y = rand() * GS;
+        const r = rand();
+        ctx.fillStyle =
+          r < 0.32 ? "rgba(72, 114, 52, 0.28)" : r < 0.68 ? "rgba(122, 168, 86, 0.26)" : "rgba(92, 138, 68, 0.24)";
+        ctx.fillRect(x, y, 1.4, 3.2 + rand() * 3.5);
+        hCtx.fillStyle = r > 0.5 ? "rgba(142,142,142,0.45)" : "rgba(110,110,110,0.45)";
+        hCtx.fillRect(x, y, 1.5, 3.5);
+      }
+    });
+    return { albedo, normal: normalCanvasFromHeight(heightCv, 1.0) };
+  };
+
+  const buildRoadCanvases = () => {
+    const RS = 512;
+    const heightCv = document.createElement("canvas");
+    heightCv.width = RS;
+    heightCv.height = RS;
+    const hCtx = heightCv.getContext("2d")!;
+    hCtx.fillStyle = "#808080";
+    hCtx.fillRect(0, 0, RS, RS);
+    const albedo = makeCanvasOnly(RS, RS, (ctx) => {
+      ctx.fillStyle = "#3c4147";
+      ctx.fillRect(0, 0, RS, RS);
+      for (let i = 0; i < 4800; i++) {
+        const x = (i * 157) % RS;
+        const y = (i * 229) % RS;
+        ctx.fillStyle = i % 3 === 0 ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.08)";
+        ctx.fillRect(x, y, 2, 2);
+        hCtx.fillStyle = i % 2 === 0 ? "#9e9e9e" : "#626262";
+        hCtx.fillRect(x, y, 2, 2);
+      }
+    });
+    return { albedo, normal: normalCanvasFromHeight(heightCv, 1.8) };
+  };
+
+  const brushedRough = makeCanvasOnly(512, 512, (ctx) => {
+    ctx.fillStyle = "#4c4c4c";
+    ctx.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < 600; i++) {
+      const y = (i * 37) % 512;
+      ctx.fillStyle = i % 2 === 0 ? "#6a6a6a" : "#3a3a3a";
+      ctx.fillRect(0, y, 512, 1);
+    }
+  });
+
+  const roofHeightCv = makeCanvasOnly(512, 512, (ctx) => {
+    ctx.fillStyle = "#767676";
+    ctx.fillRect(0, 0, 512, 512);
+    for (let x = 0; x < 512; x += 42) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(x, 0, 5, 512);
+      ctx.fillStyle = "#525252";
+      ctx.fillRect(x + 5, 0, 3, 512);
+    }
+  });
+
+  const built: CachedCanvasPalette = {
+    woodMain: buildWoodCanvases("#9c6b42", "#58351c"),
+    woodDeck: buildWoodCanvases("#b28558", "#6d4827"),
+    plaster: buildPlasterCanvases(),
+    tileCream: buildTileCanvases("#dfd9cd", "#b4aba0"),
+    tileGrey: buildTileCanvases("#8f959c", "#63686f"),
+    grass: buildGrassCanvases(),
+    road: buildRoadCanvases(),
+    brushedRough,
+    roofNormal: normalCanvasFromHeight(roofHeightCv, 3.0),
+  };
+  cachedCanvasSets.set(key, built);
+  return built;
+}
+
+function makeSeededCanvas(
+  width: number,
+  height: number,
+  draw: (ctx: CanvasRenderingContext2D) => void,
+  srgb = true,
+): THREE.CanvasTexture {
+  return wrapCanvasTexture(makeCanvasOnly(width, height, draw), srgb);
 }
 
 /**
@@ -213,6 +473,10 @@ export function createTileTextures(tileCm: number, baseHex: string, groutHex: st
         ctx.fillStyle = i % 3 === 0 ? "rgba(0,0,0,0.035)" : "rgba(255,255,255,0.045)";
         ctx.fillRect(x, y, 2 + (i % 3), 2 + (i % 3));
       }
+      // Layer 4 Baked AO: subtle micro-cavity darkening in tile grout joints
+      ctx.strokeStyle = "rgba(0,0,0,0.30)";
+      ctx.lineWidth = 12;
+      ctx.strokeRect(3.5, 3.5, S - 7, S - 7);
       ctx.strokeStyle = groutHex;
       ctx.lineWidth = 7;
       ctx.strokeRect(3.5, 3.5, S - 7, S - 7);
@@ -563,19 +827,50 @@ export interface MaterialPalette {
   setAnisotropy: (maxAniso: number) => void;
   bindEnvMap: (env: THREE.Texture | null) => void;
   getCachedMaterial: (hex: string, roughness: number) => THREE.MeshStandardMaterial;
+  getPropMaterial: <T extends THREE.Material>(key: string, factory: () => T) => T;
   dispose: () => void;
 }
 
 export function createMaterialPalette(texScale = 1): MaterialPalette {
-  const woodMain = createWoodTextures("#9c6b42", "#58351c", texScale);
-  const woodDeckTex = createWoodTextures("#b28558", "#6d4827", texScale);
-  const plasterTex = createPlasterTextures("#f4f0e7", texScale);
-  const tileCream = createTileTextures(40, "#dfd9cd", "#b4aba0", texScale);
-  const tileGrey = createTileTextures(30, "#8f959c", "#63686f", texScale);
-  const grassTex = createGrassTextures();
-  const roadTex = createRoadTextures();
-  const brushedRough = createMetalBrushedRoughness();
-  const roofTex = createStandingSeamBumpTexture();
+  const cached = getOrBuildCanvasPalette(texScale);
+  const woodMain = {
+    albedo: wrapCanvasTexture(cached.woodMain.albedo, true),
+    rough: wrapCanvasTexture(cached.woodMain.rough!, false),
+    normal: wrapCanvasTexture(cached.woodMain.normal, false),
+  };
+  const woodDeckTex = {
+    albedo: wrapCanvasTexture(cached.woodDeck.albedo, true),
+    rough: wrapCanvasTexture(cached.woodDeck.rough!, false),
+    normal: wrapCanvasTexture(cached.woodDeck.normal, false),
+  };
+  const plasterTex = {
+    albedo: wrapCanvasTexture(cached.plaster.albedo, true),
+    normal: wrapCanvasTexture(cached.plaster.normal, false),
+  };
+  const perM40 = 100 / 40;
+  const tileCream = {
+    albedo: wrapCanvasTexture(cached.tileCream.albedo, true, perM40, perM40),
+    rough: wrapCanvasTexture(cached.tileCream.rough!, false, perM40, perM40),
+    normal: wrapCanvasTexture(cached.tileCream.normal, false, perM40, perM40),
+  };
+  const perM30 = 100 / 30;
+  const tileGrey = {
+    albedo: wrapCanvasTexture(cached.tileGrey.albedo, true, perM30, perM30),
+    rough: wrapCanvasTexture(cached.tileGrey.rough!, false, perM30, perM30),
+    normal: wrapCanvasTexture(cached.tileGrey.normal, false, perM30, perM30),
+  };
+  const grassTex = {
+    albedo: wrapCanvasTexture(cached.grass.albedo, true, 14, 14),
+    normal: wrapCanvasTexture(cached.grass.normal, false, 14, 14),
+  };
+  const roadTex = {
+    albedo: wrapCanvasTexture(cached.road.albedo, true, 14, 2),
+    normal: wrapCanvasTexture(cached.road.normal, false, 14, 2),
+  };
+  const brushedRough = wrapCanvasTexture(cached.brushedRough, false);
+  const roofTex = {
+    normal: wrapCanvasTexture(cached.roofNormal, false, 3, 3),
+  };
 
   const textures = [
     woodMain.albedo,
@@ -597,7 +892,6 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
     roadTex.albedo,
     roadTex.normal,
     brushedRough,
-    roofTex.bump,
     roofTex.normal,
   ];
 
@@ -767,8 +1061,6 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
 
   const roofCover = new THREE.MeshStandardMaterial({
     color: 0x3a4046,
-    bumpMap: roofTex.bump,
-    bumpScale: 0.035,
     normalMap: roofTex.normal,
     normalScale: new THREE.Vector2(0.75, 0.75),
     roughnessMap: brushedRough,
@@ -915,6 +1207,22 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
     mepElecAc,
   ];
 
+  // Layer 2 Baked AO: attach indirect-only vertex crease AO shader to structural/architectural materials
+  for (const m of [
+    brickOuter,
+    brickInner,
+    mortar,
+    concrete,
+    plasterExt,
+    plasterInt,
+    woodTeak,
+    woodDeck,
+    lisplank,
+    ceiling,
+  ]) {
+    attachBakedAoShader(m);
+  }
+
   const envBoundMats: THREE.MeshStandardMaterial[] = [
     brickOuter,
     brickInner,
@@ -945,6 +1253,7 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
   ];
 
   const customCache = new Map<string, THREE.MeshStandardMaterial>();
+  const propCache = new Map<string, THREE.Material>();
 
   return {
     brickOuter,
@@ -1006,21 +1315,31 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
       const key = `${hex.toLowerCase()}|${roughness.toFixed(2)}`;
       let mat = customCache.get(key);
       if (!mat) {
-        mat = new THREE.MeshStandardMaterial({
-          color: hex,
-          roughness,
-          envMapIntensity: 0.42,
-          envMap: plasterInt.envMap,
-          clippingPlanes: plasterInt.clippingPlanes,
-        });
+        mat = attachBakedAoShader(
+          new THREE.MeshStandardMaterial({
+            color: hex,
+            roughness,
+            envMapIntensity: 0.42,
+            clippingPlanes: plasterInt.clippingPlanes,
+          }),
+        );
         customCache.set(key, mat);
       }
       return mat;
+    },
+    getPropMaterial: <T extends THREE.Material>(key: string, factory: () => T): T => {
+      const existing = propCache.get(key);
+      if (existing) return existing as T;
+      const created = factory();
+      propCache.set(key, created);
+      return created;
     },
     dispose: () => {
       allMats.forEach((m) => m.dispose());
       customCache.forEach((m) => m.dispose());
       customCache.clear();
+      propCache.forEach((m) => m.dispose());
+      propCache.clear();
       textures.forEach((t) => t.dispose());
     },
   };

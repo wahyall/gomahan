@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
 import { useStudioStore } from "@/lib/store/useStudioStore";
@@ -8,6 +8,63 @@ import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 import { KpiMetric, SectionHeader, StudioCard, StudioConfirmDialog, StudioNumberField, StudioRange } from "@/components/ui/StudioPrimitives";
 import { BrickWall, ChevronDown, ChevronRight, Layers, RotateCcw, Ruler, Search, Wallet, X } from "lucide-react";
+
+const RabPriceInput = memo(function RabPriceInput({
+  value,
+  disabled,
+  className,
+  onCommit,
+}: {
+  value: number;
+  disabled?: boolean;
+  className: string;
+  onCommit: (nextVal: number) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const commitNow = (raw: string, clearDraft: boolean) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    const next = Math.max(0, Number(raw) || 0);
+    if (next !== value) {
+      onCommit(next);
+    }
+    if (clearDraft) setDraft(null);
+  };
+
+  return (
+    <input
+      type="number"
+      min={0}
+      step={500}
+      disabled={disabled}
+      value={draft ?? String(value)}
+      onChange={(e) => {
+        const nextStr = e.target.value;
+        setDraft(nextStr);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => commitNow(nextStr, false), 250);
+      }}
+      onBlur={() => commitNow(draft ?? String(value), true)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          commitNow(draft ?? String(value), true);
+          (e.currentTarget as HTMLInputElement).blur();
+        }
+      }}
+      className={className}
+    />
+  );
+});
 
 export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; rab: RabSummary }) {
   const project = useStudioStore((s) => s.project);
@@ -28,19 +85,23 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
   const diffRp = rab.budgetCapIdr - rab.grandTotal;
 
   const qLower = query.trim().toLowerCase();
-  const filteredDivisions = rab.divisions
-    .map((div) => ({
-      ...div,
-      rows: div.rows.filter(
-        (r) =>
-          !qLower ||
-          r.uraian.toLowerCase().includes(qLower) ||
-          r.ahspCode.toLowerCase().includes(qLower) ||
-          r.spek.toLowerCase().includes(qLower) ||
-          div.nama.toLowerCase().includes(qLower),
-      ),
-    }))
-    .filter((d) => d.rows.length > 0);
+  const filteredDivisions = useMemo(
+    () =>
+      rab.divisions
+        .map((div) => ({
+          ...div,
+          rows: div.rows.filter(
+            (r) =>
+              !qLower ||
+              r.uraian.toLowerCase().includes(qLower) ||
+              r.ahspCode.toLowerCase().includes(qLower) ||
+              r.spek.toLowerCase().includes(qLower) ||
+              div.nama.toLowerCase().includes(qLower),
+          ),
+        }))
+        .filter((d) => d.rows.length > 0),
+    [rab.divisions, qLower],
+  );
 
   const toggleDiv = (id: string) => {
     setCollapsedDivs((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -283,23 +344,17 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
                               {fmtNum(r.qty, r.qty % 1 === 0 ? 0 : 2)} {r.unit}
                             </td>
                             <td className="px-3.5 py-1.5 text-right">
-                              <input
-                                type="number"
-                                min={0}
-                                step={500}
+                              <RabPriceInput
                                 value={r.materialUnit}
-                                onChange={(e) => updatePriceItem(r.priceKey, "materialPrice", Math.max(0, Number(e.target.value) || 0))}
+                                onCommit={(val) => updatePriceItem(r.priceKey, "materialPrice", val)}
                                 className="h-7 w-28 rounded-lg border border-input bg-[#111418] px-2 text-right font-mono text-xs outline-none focus:border-primary"
                               />
                             </td>
                             <td className="px-3.5 py-1.5 text-right">
-                              <input
-                                type="number"
-                                min={0}
-                                step={500}
+                              <RabPriceInput
                                 disabled={settings.laborMode === "borongan_pct"}
                                 value={r.laborUnit}
-                                onChange={(e) => updatePriceItem(r.priceKey, "laborPrice", Math.max(0, Number(e.target.value) || 0))}
+                                onCommit={(val) => updatePriceItem(r.priceKey, "laborPrice", val)}
                                 className="h-7 w-24 rounded-lg border border-input bg-[#111418] px-2 text-right font-mono text-xs outline-none focus:border-primary disabled:opacity-40"
                               />
                             </td>

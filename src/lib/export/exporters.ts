@@ -1,4 +1,4 @@
-import { jsPDF } from "jspdf";
+import type { jsPDF as JsPdfDoc } from "jspdf";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
@@ -255,7 +255,7 @@ export async function exportExcelWorkbook(input: ExportBundleInput) {
   downloadBlob(blob, "02_RAB_BOQ_Jadwal_5x17.xlsx");
 }
 
-function addDraftWatermarkIfNeeded(doc: jsPDF, isDraft: boolean) {
+function addDraftWatermarkIfNeeded(doc: JsPdfDoc, isDraft: boolean) {
   if (!isDraft) return;
   doc.saveGraphicsState();
   doc.setTextColor(210, 90, 70);
@@ -264,7 +264,8 @@ function addDraftWatermarkIfNeeded(doc: jsPDF, isDraft: boolean) {
   doc.restoreGraphicsState();
 }
 
-export function buildPdfDrawingsAndReportBlob(input: ExportBundleInput): Blob {
+export async function buildPdfDrawingsAndReportBlob(input: ExportBundleInput): Promise<Blob> {
+  const { jsPDF } = await import("jspdf");
   const { derived, struct, rab, schedule, lighting, airflow, flood, isDraft } = input;
   const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
 
@@ -437,8 +438,8 @@ export function buildPdfDrawingsAndReportBlob(input: ExportBundleInput): Blob {
   return doc.output("blob");
 }
 
-export function exportPdfDrawingsAndReport(input: ExportBundleInput) {
-  const blob = buildPdfDrawingsAndReportBlob(input);
+export async function exportPdfDrawingsAndReport(input: ExportBundleInput) {
+  const blob = await buildPdfDrawingsAndReportBlob(input);
   downloadBlob(blob, "01_Gambar_Struktur_RAB_5x17.pdf");
 }
 
@@ -461,7 +462,7 @@ export function exportCanvasJpg(
 export async function exportContractorZipPackage(input: ExportBundleInput) {
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
-  const pdfBlob = buildPdfDrawingsAndReportBlob(input);
+  const pdfBlob = await buildPdfDrawingsAndReportBlob(input);
   const xlsxBlob = await buildExcelWorkbookBlob(input);
   const csvStr = generateTakeoffCsv(input.rab, input.derived);
 

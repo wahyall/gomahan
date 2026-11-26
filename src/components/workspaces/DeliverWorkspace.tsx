@@ -134,7 +134,7 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             title="01. Gambar & Laporan PDF"
             desc="Cover proyek, denah LT1 & LT2 (5×17 m), ringkasan struktur SNI, daftar besi BBS, dan rekap divisi RAB."
             btnLabel={readyToIssue ? "Unduh PDF Final" : "Unduh PDF Draft"}
-            onClick={() => exportPdfDrawingsAndReport(makeBundle(!readyToIssue))}
+            onClick={() => void exportPdfDrawingsAndReport(makeBundle(!readyToIssue))}
           />
           <ExportCard
             icon={<FileSpreadsheet className="h-5 w-5 text-emerald-400" />}

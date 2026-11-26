@@ -40,6 +40,27 @@ export function createChamferBox(
 }
 
 /**
+ * Safely disposes a BufferGeometry along with any attached three-mesh-bvh bounds tree.
+ */
+export function disposeGeometry(geo: THREE.BufferGeometry | null | undefined): void {
+  if (!geo) return;
+  (geo as unknown as { disposeBoundsTree?: () => void }).disposeBoundsTree?.();
+  geo.dispose();
+}
+
+/**
+ * Disposes any Three.js resource (BufferGeometry with BVH, Material, or Texture).
+ */
+export function disposeResource(r: THREE.BufferGeometry | THREE.Material | THREE.Texture | null | undefined): void {
+  if (!r) return;
+  if (r instanceof THREE.BufferGeometry) {
+    disposeGeometry(r);
+  } else {
+    r.dispose();
+  }
+}
+
+/**
  * Normalizes a list of BufferGeometries (matching attributes & non-indexed layout)
  * and merges them into a single BufferGeometry, disposing temporary clones.
  */
@@ -51,18 +72,37 @@ export function mergeGeometryBatch(geos: THREE.BufferGeometry[]): THREE.BufferGe
     return single;
   }
 
+  let hasUv1 = false;
+  let hasBakedAo = false;
+  for (const src of geos) {
+    if (src.getAttribute("uv1")) hasUv1 = true;
+    if (src.getAttribute("aAoDarken")) hasBakedAo = true;
+  }
+
   const normalized: THREE.BufferGeometry[] = [];
   for (const src of geos) {
     const g = src.index ? src.toNonIndexed() : src.clone();
-    src.dispose();
+    disposeGeometry(src);
     if (!g.getAttribute("normal")) g.computeVertexNormals();
+    const count = g.getAttribute("position").count;
     if (!g.getAttribute("uv")) {
-      const count = g.getAttribute("position").count;
       g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
     }
-    // Strip extra incompatible attributes (like tangent or uv1) if not uniform
+    if (hasUv1 && !g.getAttribute("uv1")) {
+      g.setAttribute("uv1", new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+    }
+    if (hasBakedAo && !g.getAttribute("aAoDarken")) {
+      g.setAttribute("aAoDarken", new THREE.BufferAttribute(new Float32Array(count), 1));
+    }
+    // Strip extra incompatible attributes (like tangent) if not uniform
     for (const key of Object.keys(g.attributes)) {
-      if (key !== "position" && key !== "normal" && key !== "uv") {
+      if (
+        key !== "position" &&
+        key !== "normal" &&
+        key !== "uv" &&
+        !(hasUv1 && key === "uv1") &&
+        !(hasBakedAo && key === "aAoDarken")
+      ) {
         g.deleteAttribute(key);
       }
     }
@@ -84,9 +124,9 @@ export function createContactShadowTexture(): THREE.CanvasTexture {
   const ctx = cv.getContext("2d")!;
   const half = size * 0.5;
   const grad = ctx.createRadialGradient(half, half, size * 0.08, half, half, half);
-  grad.addColorStop(0, "rgba(8, 10, 14, 0.58)");
-  grad.addColorStop(0.55, "rgba(8, 10, 14, 0.24)");
-  grad.addColorStop(1, "rgba(8, 10, 14, 0.0)");
+  grad.addColorStop(0, "rgba(6, 8, 12, 0.84)");
+  grad.addColorStop(0.55, "rgba(6, 8, 12, 0.38)");
+  grad.addColorStop(1, "rgba(6, 8, 12, 0.0)");
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
   const tex = new THREE.CanvasTexture(cv);
@@ -193,6 +233,8 @@ export class StaticBatchCollector {
       const mesh = new THREE.Mesh(merged, bucket.mat);
       mesh.castShadow = bucket.castShadow;
       mesh.receiveShadow = bucket.receiveShadow;
+      mesh.updateMatrix();
+      mesh.matrixAutoUpdate = false;
       parent.add(mesh);
       disposables.push(merged);
       onMesh(mesh, bucket.partId, bucket.label, bucket.explodeOff);

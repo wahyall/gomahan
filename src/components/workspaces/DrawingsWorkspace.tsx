@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { fmtM, fmtNum } from "@/lib/utils/format";
@@ -29,17 +29,21 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
   const [zoomPct, setZoomPct] = useState(100);
   const [scheduleOpen, setScheduleOpen] = useState(false);
 
-  const openingsList = derived.project.levels.flatMap((lv) =>
-    lv.walls.flatMap((w) =>
-      w.openings.map((o) => ({
-        lv: lv.index + 1,
-        kind: o.kind === "door" ? "Pintu" : o.kind === "window" ? "Jendela" : "Roster",
-        label: o.label,
-        w: o.width,
-        h: o.height,
-        sill: o.sill,
-      })),
-    ),
+  const openingsList = useMemo(
+    () =>
+      derived.project.levels.flatMap((lv) =>
+        lv.walls.flatMap((w) =>
+          w.openings.map((o) => ({
+            lv: lv.index + 1,
+            kind: o.kind === "door" ? "Pintu" : o.kind === "window" ? "Jendela" : "Roster",
+            label: o.label,
+            w: o.width,
+            h: o.height,
+            sill: o.sill,
+          })),
+        ),
+      ),
+    [derived.project.levels],
   );
 
   return (
@@ -223,7 +227,7 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
   );
 }
 
-function DenahFloorSvg({
+const DenahFloorSvg = memo(function DenahFloorSvg({
   derived,
   struct,
   levelIndex,
@@ -528,9 +532,9 @@ function DenahFloorSvg({
       </text>
     </svg>
   );
-}
+});
 
-function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectModel; struct: StructuralReport }) {
+const PotonganMemanjangSvg = memo(function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectModel; struct: StructuralReport }) {
   const ML = 95;
   const baseY = 385;
   const VW = ML + 17 * S + 80;
@@ -585,9 +589,9 @@ function PotonganMemanjangSvg({ derived, struct }: { derived: DerivedProjectMode
       <TitleBlock x={VW - 290} y={VH - 20} judul="POTONGAN MEMANJANG A-A (5×17 M)" kode="A-03" rev={derived.project.structuralParams.drawingRevision} />
     </svg>
   );
-}
+});
 
-function StrukturPlanSvg({ derived, struct }: { derived: DerivedProjectModel; struct: StructuralReport }) {
+const StrukturPlanSvg = memo(function StrukturPlanSvg({ derived, struct }: { derived: DerivedProjectModel; struct: StructuralReport }) {
   const ML = 95;
   const MT = 80;
   const VW = ML + 17 * S + 80;
@@ -642,7 +646,7 @@ function StrukturPlanSvg({ derived, struct }: { derived: DerivedProjectModel; st
       </text>
     </svg>
   );
-}
+});
 
 function HDim({ x1, x2, y, label }: { x1: number; x2: number; y: number; label: string }) {
   return (

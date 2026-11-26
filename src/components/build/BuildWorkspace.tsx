@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useStore } from "zustand";
 import {
@@ -39,17 +39,21 @@ import {
   X,
   Wind,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import { StudioSidePanel } from "@/components/build/StudioSidePanel";
 import { PartInfoPanel } from "@/components/panels/PartInfoPanel";
-import { StageTimelineBar } from "@/components/panels/StageTimelineBar";
+
+const StageTimelineBar = dynamic(
+  () => import("@/components/panels/StageTimelineBar").then((m) => m.StageTimelineBar),
+  { ssr: false },
+);
 import {
   BuildScene,
   UNIFIED_BUILD_CATALOG,
   useBuildModeStore,
   type BuildCatalogEntry,
   type BuildCategoryId,
-  type BuildSceneStats,
   type FurnitureSubcategory,
   type RoofVisibilityMode,
   type WallVisibilityMode,
@@ -232,6 +236,50 @@ function ItemThumbnail({ item }: { item: BuildCatalogEntry }) {
   );
 }
 
+const HoverGridPill = memo(function HoverGridPill() {
+  const hover = useBuildModeStore((s) => s.hover);
+  if (!hover || !hover.inBounds) return null;
+  return (
+    <div className="hidden w-[272px] max-w-[calc(100vw-24px)] rounded-2xl px-3 py-2 text-xs studio-glass sm:block">
+      <div className="flex items-center justify-between gap-3 font-mono text-[11px] tabular-nums">
+        <span className="font-semibold text-[#f6ba86]">Grid ({hover.gx}, {hover.gz})</span>
+        <span className="text-muted-foreground">
+          {(hover.gx * 0.25).toFixed(2)}m × {(hover.gz * 0.25).toFixed(2)}m
+        </span>
+      </div>
+    </div>
+  );
+});
+
+const PreviewHudBanner = memo(function PreviewHudBanner() {
+  const previewHud = useBuildModeStore((s) => s.previewHud);
+  if (!previewHud) return null;
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-[174px] z-20 flex justify-center px-3 sm:bottom-[152px]">
+      <div
+        className={cn(
+          "rounded-full border px-4 py-1.5 text-xs font-semibold shadow-xl backdrop-blur-md",
+          previewHud.valid
+            ? "border-emerald-400/45 bg-[#122620]/90 text-emerald-200"
+            : "border-rose-400/45 bg-[#2b1416]/90 text-rose-200",
+        )}
+      >
+        {previewHud.label} · Klik kanan / Esc untuk batal
+      </div>
+    </div>
+  );
+});
+
+const FpsBadge = memo(function FpsBadge() {
+  const fps = useBuildModeStore((s) => s.stats?.fps);
+  if (fps === undefined) return null;
+  return (
+    <span className="hidden pl-1.5 pr-1 font-mono text-[9.5px] text-muted-foreground tabular-nums sm:inline">
+      {fps}fps
+    </span>
+  );
+});
+
 export function BuildWorkspace({
   derived,
   struct,
@@ -281,8 +329,6 @@ export function BuildWorkspace({
   const placementRotationStep = useBuildModeStore((s) => s.placementRotationStep);
   const placementFlipSwing = useBuildModeStore((s) => s.placementFlipSwing);
   const pendingRoofType = useBuildModeStore((s) => s.pendingRoofType);
-  const hover = useBuildModeStore((s) => s.hover);
-  const previewHud = useBuildModeStore((s) => s.previewHud);
   const savedCameraSnapshot = useBuildModeStore((s) => s.savedCameraSnapshot);
   const rtLook = useBuildModeStore((s) => s.rtLook);
   const renderTier = useBuildModeStore((s) => s.renderTier);
@@ -293,9 +339,7 @@ export function BuildWorkspace({
   const futureCount = useStore(useStudioStore.temporal, (s) => s.futureStates.length);
 
   const setActiveLevel = useBuildModeStore((s) => s.setActiveLevel);
-  const stepLevel = useBuildModeStore((s) => s.stepLevel);
   const setWallVisibility = useBuildModeStore((s) => s.setWallVisibility);
-  const cycleWallVisibility = useBuildModeStore((s) => s.cycleWallVisibility);
   const setRoofVisibility = useBuildModeStore((s) => s.setRoofVisibility);
   const toggleGrid = useBuildModeStore((s) => s.toggleGrid);
   const toggleSnap90 = useBuildModeStore((s) => s.toggleSnap90);
@@ -315,10 +359,10 @@ export function BuildWorkspace({
   const setPendingRoofType = useBuildModeStore((s) => s.setPendingRoofType);
   const setHover = useBuildModeStore((s) => s.setHover);
   const setPreviewHud = useBuildModeStore((s) => s.setPreviewHud);
+  const setStats = useBuildModeStore((s) => s.setStats);
   const saveCameraSnapshot = useBuildModeStore((s) => s.saveCameraSnapshot);
 
   const [query, setQuery] = useState("");
-  const [stats, setStats] = useState<BuildSceneStats | null>(null);
   const [webglError, setWebglError] = useState<string | null>(null);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -645,84 +689,86 @@ export function BuildWorkspace({
     }
   }, [selected]);
 
+  const keyHandlerStateRef = useRef({
+    handleRotateSelected,
+    handleDeleteSelected,
+    resetModalOpen,
+    helpOpen,
+  });
+  useEffect(() => {
+    keyHandlerStateRef.current = {
+      handleRotateSelected,
+      handleDeleteSelected,
+      resetModalOpen,
+      helpOpen,
+    };
+  }, [handleRotateSelected, handleDeleteSelected, resetModalOpen, helpOpen]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
       const mod = e.ctrlKey || e.metaKey;
       const st = useStudioStore.getState();
+      const bm = useBuildModeStore.getState();
+      const refState = keyHandlerStateRef.current;
       if (e.key === "PageUp") {
         e.preventDefault();
-        stepLevel(1);
+        bm.stepLevel(1);
         simsAudio.play("select");
       } else if (e.key === "PageDown") {
         e.preventDefault();
-        stepLevel(-1);
+        bm.stepLevel(-1);
         simsAudio.play("select");
       } else if (e.key === "Home") {
         e.preventDefault();
-        cycleWallVisibility();
+        bm.cycleWallVisibility();
         simsAudio.play("select");
       } else if (e.key === "End") {
         e.preventDefault();
-        setWallVisibility(wallVisibility === "down" ? "cutaway" : "down");
+        bm.setWallVisibility(bm.wallVisibility === "down" ? "cutaway" : "down");
         simsAudio.play("select");
       } else if (e.key.toLowerCase() === "b" && !mod && !e.shiftKey) {
-        selectCatalogById("tool_wall_straight");
+        bm.selectCatalogById("tool_wall_straight");
         simsAudio.play("select");
       } else if (e.key.toLowerCase() === "v" && !mod && !e.shiftKey) {
-        selectCatalogById("tool_select");
+        bm.selectCatalogById("tool_select");
         simsAudio.play("select");
       } else if (e.key.toLowerCase() === "g" && !mod) {
-        toggleGrid();
+        bm.toggleGrid();
       } else if (e.key.toLowerCase() === "k" && !mod) {
-        selectCatalogById("tool_sledgehammer");
+        bm.selectCatalogById("tool_sledgehammer");
         simsAudio.play("select");
       } else if (e.key.toLowerCase() === "i" && !mod) {
-        selectCatalogById("tool_eyedropper");
+        bm.selectCatalogById("tool_eyedropper");
         simsAudio.play("select");
       } else if ((e.key.toLowerCase() === "r" || e.key === "." || e.key === ",") && !mod) {
-        handleRotateSelected(e.key === "," ? -1 : 1);
+        refState.handleRotateSelected(e.key === "," ? -1 : 1);
       } else if (e.key === "Delete" || e.key === "Backspace") {
-        if (selected && selected.kind !== "part") {
+        if (st.selected && st.selected.kind !== "part") {
           e.preventDefault();
-          handleDeleteSelected();
+          refState.handleDeleteSelected();
         }
       } else if (e.key === "Escape") {
         if (st.commandPaletteOpen || st.guideOpen) return;
-        if (resetModalOpen) {
+        if (refState.resetModalOpen) {
           e.stopImmediatePropagation();
           setResetModalOpen(false);
-        } else if (helpOpen) {
+        } else if (refState.helpOpen) {
           e.stopImmediatePropagation();
           setHelpOpen(false);
-        } else if (pendingRoofType) {
+        } else if (bm.pendingRoofType) {
           e.stopImmediatePropagation();
-          setPendingRoofType(null);
-        } else if (activeTool !== "select") {
+          bm.setPendingRoofType(null);
+        } else if (bm.activeTool !== "select") {
           e.stopImmediatePropagation();
-          selectCatalogById("tool_select");
+          bm.selectCatalogById("tool_select");
         }
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [
-    stepLevel,
-    cycleWallVisibility,
-    setWallVisibility,
-    wallVisibility,
-    toggleGrid,
-    selectCatalogById,
-    handleRotateSelected,
-    selected,
-    handleDeleteSelected,
-    resetModalOpen,
-    helpOpen,
-    pendingRoofType,
-    setPendingRoofType,
-    activeTool,
-  ]);
+  }, []);
 
   const handleFocusFoundation = useCallback(() => {
     patchView({ showTerrain: false, showStructure: true });
@@ -1120,7 +1166,7 @@ export function BuildWorkspace({
                       </div>
                       <p className="mt-1.5 text-[9.5px] leading-relaxed text-muted-foreground">
                         {rtLook
-                          ? "GTAO, berkas matahari, bloom HDR & MSAA aktif sesuai tier (mode Banjir/hujan mematikan GTAO otomatis)."
+                          ? "Baked AO, berkas matahari, bloom HDR & MSAA aktif sesuai tier."
                           : "Mode kompatibilitas: render langsung tanpa pasca-pemrosesan."}
                       </p>
                     </div>
@@ -1361,13 +1407,8 @@ export function BuildWorkspace({
               )}
 
           {/* Contextual Selected Object Card OR Live Hover Coordinates */}
-          {(selectedDetails || (hover && hover.inBounds) || activeTool === "select") && (
-            <div
-              className={cn(
-                "w-[272px] max-w-[calc(100vw-24px)] rounded-2xl px-3 py-2 text-xs studio-glass",
-                !selectedDetails && "hidden sm:block",
-              )}
-            >
+          {selectedDetails || activeTool === "select" ? (
+            <div className="w-[272px] max-w-[calc(100vw-24px)] rounded-2xl px-3 py-2 text-xs studio-glass">
               {selectedDetails ? (
                 <div className="space-y-2">
                   <div className="flex items-start justify-between gap-2">
@@ -1524,41 +1565,21 @@ export function BuildWorkspace({
                     </button>
                   </div>
                 </div>
-              ) : activeTool === "select" ? (
+              ) : (
                 <div className="flex items-center justify-between gap-2 text-[11px]">
                   <span className="font-semibold text-foreground">Mode Pilih</span>
                   <span className="text-muted-foreground">Klik atau seret objek di 3D</span>
                 </div>
-              ) : (
-                hover && (
-                  <div className="flex items-center justify-between gap-3 font-mono text-[11px] tabular-nums">
-                    <span className="font-semibold text-[#f6ba86]">Grid ({hover.gx}, {hover.gz})</span>
-                    <span className="text-muted-foreground">
-                      {(hover.gx * 0.25).toFixed(2)}m × {(hover.gz * 0.25).toFixed(2)}m
-                    </span>
-                  </div>
-                )
               )}
             </div>
+          ) : (
+            <HoverGridPill />
           )}
         </div>
       </div>
 
       {/* FLOATING PLACEMENT PREVIEW HUD PILL */}
-      {previewHud && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-[174px] z-20 flex justify-center px-3 sm:bottom-[152px]">
-          <div
-            className={cn(
-              "rounded-full border px-4 py-1.5 text-xs font-semibold shadow-xl backdrop-blur-md",
-              previewHud.valid
-                ? "border-emerald-400/45 bg-[#122620]/90 text-emerald-200"
-                : "border-rose-400/45 bg-[#2b1416]/90 text-rose-200",
-            )}
-          >
-            {previewHud.label} · Klik kanan / Esc untuk batal
-          </div>
-        </div>
-      )}
+      <PreviewHudBanner />
 
       {/* ONBOARDING / SHORTCUTS CHEATSHEET */}
       {helpOpen && (
@@ -1658,11 +1679,7 @@ export function BuildWorkspace({
                 </button>
               );
             })}
-            {stats && (
-              <span className="hidden pl-1.5 pr-1 font-mono text-[9.5px] text-muted-foreground tabular-nums sm:inline">
-                {stats.fps}fps
-              </span>
-            )}
+            <FpsBadge />
           </div>
 
           {/* Material legend (restored from Struktur Mode) with contextual MEP rows */}

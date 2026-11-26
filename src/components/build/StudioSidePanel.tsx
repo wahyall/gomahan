@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import {
   CloudRain,
   Eye,
@@ -12,13 +13,7 @@ import {
   Wind,
   X,
 } from "lucide-react";
-import { InspectorPanel } from "@/components/panels/InspectorPanel";
-import { OutlinerPanel } from "@/components/panels/OutlinerPanel";
 import { StudioRange } from "@/components/ui/StudioPrimitives";
-import { AirflowWorkspace } from "@/components/workspaces/AirflowWorkspace";
-import { FloodWorkspace } from "@/components/workspaces/FloodWorkspace";
-import { LightingWorkspace } from "@/components/workspaces/LightingWorkspace";
-import { StructureWorkspace } from "@/components/workspaces/StructureWorkspace";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { CUT_PLANE_MAX_M, CUT_PLANE_MIN_M, CUT_PLANE_OFF } from "@/lib/model/constants";
 import type { AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
@@ -27,6 +22,13 @@ import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { useStudioStore, type StudioPanelId } from "@/lib/store/useStudioStore";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { cn } from "@/lib/utils";
+
+const InspectorPanel = dynamic(() => import("@/components/panels/InspectorPanel").then((m) => m.InspectorPanel), { ssr: false });
+const OutlinerPanel = dynamic(() => import("@/components/panels/OutlinerPanel").then((m) => m.OutlinerPanel), { ssr: false });
+const AirflowWorkspace = dynamic(() => import("@/components/workspaces/AirflowWorkspace").then((m) => m.AirflowWorkspace), { ssr: false });
+const FloodWorkspace = dynamic(() => import("@/components/workspaces/FloodWorkspace").then((m) => m.FloodWorkspace), { ssr: false });
+const LightingWorkspace = dynamic(() => import("@/components/workspaces/LightingWorkspace").then((m) => m.LightingWorkspace), { ssr: false });
+const StructureWorkspace = dynamic(() => import("@/components/workspaces/StructureWorkspace").then((m) => m.StructureWorkspace), { ssr: false });
 
 interface StudioSidePanelProps {
   derived: DerivedProjectModel;

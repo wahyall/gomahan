@@ -66,6 +66,7 @@ export class WalkController {
   private seenStamp: Uint32Array;
   private stampCounter = 1;
   private readonly queryBuffer: number[] = [];
+  private readonly hitLabelsSet = new Set<string>();
 
   constructor(project: Project) {
     this.world = buildWalkCollisionWorld(project);
@@ -287,13 +288,16 @@ export class WalkController {
     const subDt = dt / substeps;
 
     this.collidedLastTick = false;
-    const labels = new Set<string>();
+    this.hitLabelsSet.clear();
 
     for (let s = 0; s < substeps; s++) {
-      this.advanceSubstep(subDt, labels);
+      this.advanceSubstep(subDt, this.hitLabelsSet);
     }
 
-    this.lastCollisionLabels = Array.from(labels);
+    this.lastCollisionLabels.length = 0;
+    for (const lbl of this.hitLabelsSet) {
+      this.lastCollisionLabels.push(lbl);
+    }
     this.refreshFloorAndDoorState();
   }
 
