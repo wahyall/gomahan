@@ -716,15 +716,16 @@ export class WalkScene {
       {
         const isNightP = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
         const isGoldenP = (sim.hourOfDay >= 16.5 && sim.hourOfDay <= 18.8) || (sim.hourOfDay >= 5.2 && sim.hourOfDay <= 7.5);
+        const isStormP = sim.rainIntensityMmH > 20;
         rtLookUniforms.uAerialWarm.value.setRGB(
-          isNightP ? 0.3 : isGoldenP ? 1.0 : 0.92,
-          isNightP ? 0.36 : isGoldenP ? 0.8 : 0.87,
-          isNightP ? 0.52 : isGoldenP ? 0.55 : 0.72,
+          isNightP ? 0.3 : isStormP ? 0.58 : isGoldenP ? 1.0 : 0.92,
+          isNightP ? 0.36 : isStormP ? 0.64 : isGoldenP ? 0.8 : 0.87,
+          isNightP ? 0.52 : isStormP ? 0.72 : isGoldenP ? 0.55 : 0.72,
         );
         rtLookUniforms.uAerialCool.value.setRGB(
-          isNightP ? 0.18 : 0.66,
-          isNightP ? 0.25 : 0.76,
-          isNightP ? 0.4 : 0.88,
+          isNightP ? 0.18 : isStormP ? 0.46 : 0.66,
+          isNightP ? 0.25 : isStormP ? 0.54 : 0.76,
+          isNightP ? 0.4 : isStormP ? 0.64 : 0.88,
         );
         rtLookUniforms.uSunTint.value.setRGB(
           isNightP ? 0.18 : isGoldenP ? 1.0 : 0.99,
@@ -790,7 +791,7 @@ export class WalkScene {
 
       if (this.scene.fog instanceof THREE.FogExp2) {
         this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
-        this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
+        this.scene.fog.density = isStorm ? 0.0056 : isNight ? 0.0052 : 0.0046;
         this.scene.fog.density *= this.photoPreset.aerialDensity;
       }
       this.markShadowDirty();

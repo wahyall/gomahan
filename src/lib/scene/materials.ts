@@ -991,9 +991,9 @@ uniform vec3 uAerialWarm;`,
   #endif
   vec3 rtFogColor = fogColor;
   if ( uRtAerial > 0.5 ) {
-    // GR-07: exponential height fog — air thickens toward the ground plane.
+    // GR-07: exponential height fog — air thickens toward the ground plane without turning mid-range grey.
     float rtHeightAtten = exp( - max( 0.0, uCamWorldY - vRtWorldY ) * 0.055 );
-    float rtAerialFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth * 2.1 * rtHeightAtten );
+    float rtAerialFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth * 1.15 * rtHeightAtten );
     rtFogFactor = max( rtFogFactor, rtAerialFactor * 0.9 );
     // Mie forward scattering (warm when the camera looks TOWARD the sun: the
     // view ray is -vViewPosition, the sun is +uSunDirView) vs Rayleigh depth.

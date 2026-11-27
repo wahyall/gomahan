@@ -269,8 +269,10 @@ describe("Hybrid RT Graphics Pipeline", () => {
     // Night wraps around midnight.
     expect(resolvePhotographicPreset(23, 0).id).toBe("malam");
     expect(resolvePhotographicPreset(2, 0).id).toBe("malam");
-    // Storm overrides everything.
-    expect(resolvePhotographicPreset(13, 45).id).toBe("hujan");
+    // Storm overrides everything while keeping aerial fog density bounded so distant scenes stay legible.
+    const storm = resolvePhotographicPreset(13, 45);
+    expect(storm.id).toBe("hujan");
+    expect(storm.aerialDensity).toBeLessThanOrEqual(1.25);
   });
 
   it("GR-08: setRtLookUniforms flips the whole uniform-driven stack without recompiles", () => {

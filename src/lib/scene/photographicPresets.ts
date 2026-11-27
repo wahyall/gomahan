@@ -94,7 +94,7 @@ export const PHOTOGRAPHIC_PRESETS: Record<PhotographicPreset["id"], Photographic
     giBounce: 0.65,
     bloomStrength: 0.2,
     bloomThreshold: 1.02,
-    aerialDensity: 1.6,
+    aerialDensity: 1.15,
     godRayBoost: 0.5,
   },
 };
@@ -109,7 +109,7 @@ export function resolvePhotographicPreset(hourOfDay: number, rainIntensityMmH: n
   const isStorm = rainIntensityMmH > 20;
   const rainy = rainIntensityMmH > 4;
   if (isStorm) return { ...PHOTOGRAPHIC_PRESETS.hujan, exposure: PHOTOGRAPHIC_PRESETS.hujan.exposure + 0.04 };
-  if (rainy) return { ...PHOTOGRAPHIC_PRESETS.hujan, aerialDensity: 1.25, bloomStrength: 0.22 };
+  if (rainy) return { ...PHOTOGRAPHIC_PRESETS.hujan, aerialDensity: 1.08, bloomStrength: 0.22 };
 
   // Continuous piecewise-lerp between editorial anchors (wraps at midnight):
   // malam ─ pagi ─ siang ─ golden ─ malam
