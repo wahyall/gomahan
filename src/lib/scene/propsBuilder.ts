@@ -265,7 +265,7 @@ export function buildFurnitureMesh(
       break;
     }
 
-    case "dining-table": {
+    case "dining_table": {
       const buildDining = (detail: 0 | 1 | 2) => {
         const b = new PropBatcher();
         if (detail === 2) {
