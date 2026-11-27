@@ -1,8 +1,7 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
 import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import type { BuildQualityTier } from "@/features/buildMode/BuildScene";
 import { WalkAvatar } from "@/features/walkMode/WalkAvatar";
@@ -65,8 +64,8 @@ export class WalkScene {
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
   private atmospherePass: AtmospherePass | null = null;
-  private bloomPass: UnrealBloomPass | null = null;
-  private outputPass: OutputPass | null = null;
+  private bloomPass: DualKawaseBloomPass | null = null;
+  private outputPass: FinalOutputPass | null = null;
   private postActive = false;
   private rayTracingEnabled = true;
   private qualityOverride: BuildQualityTier = "auto";
@@ -401,7 +400,7 @@ export class WalkScene {
     return false;
   }
 
-  /** OPT-18: mark <body> as 3D-active so `.studio-glass` drops its compositor blur
+  /** OPT-18: mark <body> as 3d-active so `.studio-glass` drops its compositor blur
    * while the camera is actually moving; released ~150 ms after it rests. */
   private update3dActiveFlag(active: boolean, now: number): void {
     if (active) {
@@ -447,8 +446,9 @@ export class WalkScene {
 
   /**
    * Cinematic "ray-traced like" real-time pipeline, mirrored from BuildScene:
-   * linear HDR MSAA buffer → Baked AO → screen-space sun shafts with
-   * vignette/dither → UnrealBloom → single ACES tone-map + sRGB in OutputPass.
+   * linear HDR MSAA buffer → Baked AO → screen-space sun shafts → progressive
+   * Dual-Kawase HDR bloom (OPT-04) → fused bloom composite + vignette + dither +
+   * single ACES tone-map + sRGB in `FinalOutputPass` (OPT-03 fusion).
    */
   private setupPostPipeline(): void {
     if (this.composer || this.disposed) return;
@@ -457,14 +457,18 @@ export class WalkScene {
     const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
     const target = new THREE.WebGLRenderTarget(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr), {
       type: THREE.HalfFloatType,
+      // OPT-21: no stencil pass exists in this app — dropping the stencil plane
+      // saves depth-stencil bandwidth on every composer buffer clear.
+      stencilBuffer: false,
       // MSAA resolve on HalfFloat targets wedges software rasterizers into ghost-white frames.
       samples: this.softwareGpu ? 0 : 4,
     });
     this.composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.atmospherePass = new AtmospherePass();
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.7, 1.45);
-    this.outputPass = new OutputPass();
+    this.bloomPass = new DualKawaseBloomPass(new THREE.Vector2(w, h));
+    this.outputPass = new FinalOutputPass();
+    this.outputPass.finalUniforms.tBloom.value = this.bloomPass.bloomTexture;
     this.composer.addPass(this.renderPass);
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
@@ -475,6 +479,7 @@ export class WalkScene {
     this.composer.setPixelRatio(this.currentDpr);
     this.lastAppliedSize = { w, h, dpr: this.currentDpr };
     this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    this.outputPass.finalUniforms.uAspect.value = w / h;
   }
 
   /** Enable / disable passes per quality tier; low tier falls back to the direct render. */
@@ -522,7 +527,8 @@ export class WalkScene {
     this.requestRender();
   }
 
-  /** Project the sun into screen space and drive the god-ray uniforms every frame (BuildScene parity). */
+  /** Project the sun into screen space and drive the god-ray uniforms every frame,
+   * then gate the pass chain (OPT-03 atmosphere kill-switch + OPT-04 bloom bypass). */
   private updateAtmosphere(cam: THREE.Camera): void {
     const ap = this.atmospherePass;
     if (!ap) return;
@@ -531,18 +537,37 @@ export class WalkScene {
     if (this._v1.z > -1) {
       // Sun sits behind the camera: no shafts, no mirrored source flash.
       ap.atmosphereUniforms.uSunFade.value = 0;
-      return;
+    } else {
+      this._v1.copy(this.sunLight.position).project(cam);
+      const ux = this._v1.x * 0.5 + 0.5;
+      const uy = this._v1.y * 0.5 + 0.5;
+      ap.atmosphereUniforms.uSunUv.value.set(ux, uy);
+      const aspect = ap.atmosphereUniforms.uAspect.value;
+      const d = Math.hypot((ux - 0.5) * aspect, uy - 0.5);
+      ap.atmosphereUniforms.uSunFade.value = THREE.MathUtils.clamp(1 - (d - 0.85) / 0.95, 0, 1);
+      ap.atmosphereUniforms.uIntensity.value = this.godRayStrength;
+      ap.atmosphereUniforms.uSunColor.value.copy(this.sunLight.color);
+      ap.atmosphereUniforms.uTime.value = this.simElapsedS;
     }
-    this._v1.copy(this.sunLight.position).project(cam);
-    const ux = this._v1.x * 0.5 + 0.5;
-    const uy = this._v1.y * 0.5 + 0.5;
-    ap.atmosphereUniforms.uSunUv.value.set(ux, uy);
-    const aspect = ap.atmosphereUniforms.uAspect.value;
-    const d = Math.hypot((ux - 0.5) * aspect, uy - 0.5);
-    ap.atmosphereUniforms.uSunFade.value = THREE.MathUtils.clamp(1 - (d - 0.85) / 0.95, 0, 1);
-    ap.atmosphereUniforms.uIntensity.value = this.godRayStrength;
-    ap.atmosphereUniforms.uSunColor.value.copy(this.sunLight.color);
-    ap.atmosphereUniforms.uTime.value = this.simElapsedS;
+
+    // OPT-03: no shafts → no full-resolution HalfFloat read/write at all.
+    ap.enabled = ap.atmosphereUniforms.uSunFade.value > 0.001;
+
+    // OPT-04 early bypass: sun down + every pooled interior light off → no pixel can
+    // pass the 1.45 bloom threshold → the whole 7-pass bloom pyramid is skipped.
+    if (this.bloomPass) {
+      let anyLightOn = false;
+      for (const spot of this.spotLightPool) {
+        if (spot.intensity > 0) {
+          anyLightOn = true;
+          break;
+        }
+      }
+      this.bloomPass.enabled = Boolean(this.sunCore?.visible) || anyLightOn;
+    }
+    if (this.outputPass) {
+      this.outputPass.finalUniforms.uTime.value = this.simElapsedS;
+    }
   }
 
   public updateProjectData(derived: DerivedProjectModel, struct: StructuralReport): void {
@@ -956,6 +981,7 @@ export class WalkScene {
       if (sizeChanged || dprChanged) this.composer.setSize(w, h);
     }
     if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    if (this.outputPass) this.outputPass.finalUniforms.uAspect.value = w / h;
     // A real resize just reset the drawing buffer; paint one frame right now so the
     // user never sees the cleared (black) canvas waiting for the next RAF.
     if (this.hasRenderedOnce && !this.contextLost && !this.disposed) {
