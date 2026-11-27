@@ -7,7 +7,7 @@ import { applyFloorWorldUv1, applyWallVertexAo, generateFloorAoTexture } from "@
 import { SpatialHashGrid } from "@/features/walkMode/collisionBuilder";
 import { runLightingSimulation } from "@/lib/simulation/lightingEngine";
 import { runAirflowSimulation } from "@/lib/simulation/airflowEngine";
-import { runAirflowSimulationAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
+import { runAirflowSimulationAsync, generateBricksAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 
 describe("Performance Architecture Regression Suite", () => {
@@ -133,5 +133,26 @@ describe("Performance Architecture Regression Suite", () => {
     expect(asyncAirflow).not.toBeNull();
     expect(asyncAirflow!.airflowScore).toBe(syncAirflow.airflowScore);
     expect(asyncAirflow!.avgAch).toBeCloseTo(syncAirflow.avgAch, 5);
+  });
+
+  it("offloads brick-instance generation through the simulation worker path with full positional parity", async () => {
+    const project = createDefaultProject();
+    const syncDerived = buildDerivedModel(project, { includeBricks: true });
+    const syncBricks = syncDerived.masonry.bricks;
+    const asyncBricks = await generateBricksAsync(project);
+
+    expect(asyncBricks).not.toBeNull();
+    expect(asyncBricks!.length).toBe(syncBricks.length);
+    expect(asyncBricks!.length).toBe(syncDerived.masonry.totalPiecesPlaced);
+    for (let i = 0; i < asyncBricks!.length; i++) {
+      const a = asyncBricks![i]!;
+      const b = syncBricks[i]!;
+      expect(a.levelIndex).toBe(b.levelIndex);
+      expect(a.wallId).toBe(b.wallId);
+      expect(a.x).toBeCloseTo(b.x, 6);
+      expect(a.y).toBeCloseTo(b.y, 6);
+      expect(a.z).toBeCloseTo(b.z, 6);
+      expect(a.rotY).toBeCloseTo(b.rotY, 6);
+    }
   });
 });

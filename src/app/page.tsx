@@ -10,9 +10,10 @@ import { buildScheduleSummary, type ScheduleSummary } from "@/lib/timeline/sched
 import { type LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { type AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import { runFloodSimulation, type FloodSimulationResult } from "@/lib/simulation/floodEngine";
-import { runAirflowSimulationAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
+import { runAirflowSimulationAsync, generateBricksAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
 import { parseVersionedProjectSave, validateProjectImport } from "@/lib/model/schema";
-import type { Project } from "@/lib/model/types";
+import type { BrickSpec, Level, Project } from "@/lib/model/types";
+import type { BrickInstance } from "@/lib/geometry/masonry";
 import { loadLatestProject, quarantineCorruptSave, saveAutosaveProject, saveProjectSnapshot } from "@/lib/store/db";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { useBuildModeStore } from "@/features/buildMode/store";
@@ -274,14 +275,52 @@ export default function HomePage() {
     (showBricksOverlay || !showFinishingView || explodeView > 0.05 || cutHView < 10 || (stageView > 0 && stageView <= 7));
 
   const coreGeom = useMemo(
-    () => buildDerivedModel(project, { includeBricks: needBricks }),
+    () => buildDerivedModel(project, { includeBricks: false }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- project.simulation/priceBook/rabSettings do not alter core geometry
-    [project.site, project.levels, project.systems, project.structuralParams, needBricks],
+    [project.site, project.levels, project.systems, project.structuralParams],
   );
-  const derived = useMemo(
-    () => (coreGeom.project === project ? coreGeom : { ...coreGeom, project }),
-    [coreGeom, project],
-  );
+
+  // PF-18: brick-by-brick arrays (Bata Merah ~15k instances) are generated in the simulation
+  // Web Worker (with an automatic synchronous fallback for SSR/Vitest) and merged into the
+  // derived model only when the result matches the current geometry identity.
+  const [asyncBricks, setAsyncBricks] = useState<{
+    levels: Level[];
+    brick: BrickSpec;
+    bricks: BrickInstance[];
+  } | null>(null);
+  useEffect(() => {
+    if (!hydrated || !needBricks) return;
+    let active = true;
+    void generateBricksAsync(project).then((bricks) => {
+      if (!active || !bricks) return;
+      setAsyncBricks({ levels: project.levels, brick: project.systems.brick, bricks });
+    });
+    return () => {
+      active = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- bricks depend only on levels, brick spec, and roof-affecting site/systems inputs
+  }, [hydrated, needBricks, project.site, project.levels, project.systems]);
+
+  const derived = useMemo(() => {
+    const base = coreGeom.project === project ? coreGeom : { ...coreGeom, project };
+    if (
+      !needBricks ||
+      !asyncBricks ||
+      asyncBricks.levels !== project.levels ||
+      asyncBricks.brick !== project.systems.brick
+    ) {
+      return base;
+    }
+    // The merged brick array rides on a fresh `systems` reference (the brick spec is
+    // a systems input): BuildScene's incremental rebuild compares input references,
+    // so each late-arriving worker result triggers exactly one house rebuild while
+    // every system value stays identical.
+    return {
+      ...base,
+      masonry: { ...base.masonry, bricks: asyncBricks.bricks },
+      project: { ...project, systems: { ...project.systems } },
+    };
+  }, [coreGeom, project, needBricks, asyncBricks]);
   const struct = useMemo(() => computeStructuralReport(coreGeom), [coreGeom]);
 
   const deferredProject = useDeferredValue(project);
