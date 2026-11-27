@@ -1,33 +1,38 @@
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { pointInPolygon, type RoomGeometryMetrics } from "@/lib/geometry/rooms";
-import type { Wall } from "@/lib/model/types";
+import { WallSpatialGrid, type WallGate } from "@/lib/simulation/wallGrid";
 
-function segmentBlockedByWalls(ax: number, az: number, bx: number, bz: number, walls: Wall[], ignoreWallId?: string): boolean {
-  const dx = bx - ax;
-  const dz = bz - az;
-  const segLen = Math.hypot(dx, dz);
-  if (segLen < 0.12) return false;
-  for (const w of walls) {
-    if (ignoreWallId && w.id === ignoreWallId) continue;
-    if (w.height < 1.6) continue;
-    const wx = w.end.x - w.start.x;
-    const wz = w.end.z - w.start.z;
-    const wLen = Math.hypot(wx, wz);
-    if (wLen < 0.1) continue;
-    const denom = dx * wz - dz * wx;
-    if (Math.abs(denom) < 1e-6) continue;
-    const t = ((w.start.x - ax) * wz - (w.start.z - az) * wx) / denom;
-    const u = ((w.start.x - ax) * dz - (w.start.z - az) * dx) / denom;
-    const minT = ignoreWallId ? 0.04 : 0.02;
-    if (t > minT && t <= 1.001 && u >= -0.005 && u <= 1.005) {
-      const hitAlong = Math.max(0, Math.min(wLen, u * wLen));
-      const passesOpening = w.openings.some(
-        (op) => Math.abs(hitAlong - op.offset) <= op.width * 0.5 && (op.kind === "arch" || op.kind === "window" || op.openPct > 15),
-      );
-      if (!passesOpening) return true;
-    }
-  }
-  return false;
+// OPT-15: gate sets replicate the original inline loop semantics bit-for-bit.
+const LIGHT_GATE: WallGate = {
+  tLo: 0.02,
+  tHi: 1.001,
+  tHiInclusive: true,
+  uLo: -0.005,
+  uLoInclusive: true,
+  uHi: 1.005,
+  uHiInclusive: true,
+  windowPasses: true,
+  clampHitAlong: true,
+};
+const LIGHT_GATE_IGNORE: WallGate = { ...LIGHT_GATE, tLo: 0.04 };
+
+function segmentBlockedByWalls(
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  grid: WallSpatialGrid,
+  ignoreWallId?: string,
+): boolean {
+  if (Math.hypot(bx - ax, bz - az) < 0.12) return false;
+  return grid.segmentBlocked(
+    ax,
+    az,
+    bx,
+    bz,
+    ignoreWallId ? LIGHT_GATE_IGNORE : LIGHT_GATE,
+    ignoreWallId,
+  );
 }
 
 export interface SolarPosition {
@@ -183,6 +188,9 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
     const lv = project.levels[lvIdx];
     if (!lv) return;
     const rainAtten = sim.rainIntensityMmH > 10 ? 0.55 : 1.0;
+    // OPT-15: build the 1 m wall spatial grid once per level — every ray below
+    // only visits the walls in the cells it actually crosses.
+    const wallGrid = new WallSpatialGrid(lv.walls, project.site.width, project.site.depth);
 
     for (let gz = 0; gz < gridD; gz++) {
       for (let gx = 0; gx < gridW; gx++) {
@@ -200,9 +208,12 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
             natLux += solar.skyIrradianceLux * 0.38 * rainAtten;
           } else {
             for (const op of openings) {
-              const dist = Math.hypot(px - op.x, pz - op.z);
-              if (dist > 7.0) continue;
-              if (segmentBlockedByWalls(op.x, op.z, px, pz, lv.walls, op.wallId)) continue;
+              // OPT-15: squared distance gate — sqrt only for survivors.
+              const dxo = px - op.x;
+              const dzo = pz - op.z;
+              if (dxo * dxo + dzo * dzo > 49) continue;
+              if (segmentBlockedByWalls(op.x, op.z, px, pz, wallGrid, op.wallId)) continue;
+              const dist = Math.hypot(dxo, dzo);
               const orientFactor = 0.45 + 0.55 * Math.abs(op.dirX * solar.sunDir[0] + op.dirZ * solar.sunDir[2]);
               const shading = pz < 5.0 ? Math.max(0.45, 1 - project.systems.overhangFrontM * 0.35) : 0.85;
               const falloff = 1 / (1 + dist * dist * 0.42);
@@ -224,9 +235,12 @@ export function runLightingSimulation(derived: DerivedProjectModel): LightingSim
         let artLux = 0;
         for (const l of lv.lights) {
           if (!l.on || l.dimmer <= 0) continue;
-          const dHoriz = Math.hypot(px - l.position.x, pz - l.position.z);
-          if (dHoriz > 6.5) continue;
-          if (segmentBlockedByWalls(l.position.x, l.position.z, px, pz, lv.walls)) continue;
+          // OPT-15: squared distance gate — sqrt only for survivors.
+          const dxl = px - l.position.x;
+          const dzl = pz - l.position.z;
+          if (dxl * dxl + dzl * dzl > 42.25) continue;
+          if (segmentBlockedByWalls(l.position.x, l.position.z, px, pz, wallGrid)) continue;
+          const dHoriz = Math.hypot(dxl, dzl);
           const dVert = Math.max(0.65, l.position.y - 0.75);
           const d3 = Math.hypot(dHoriz, dVert);
           const cosTheta = dVert / d3;
