@@ -101,19 +101,30 @@ export function buildFurnitureMesh(
   const isCloth = item.category === "seating" || item.category === "bed";
   const isVehicle = item.category === "vehicle";
   const bodyKey = `body|${item.colorHex.toLowerCase()}|${isCloth ? "c" : isVehicle ? "v" : item.category === "kitchen" ? "k" : "d"}`;
+  // OPT-06: `MeshPhysicalMaterial` stays ONLY where its physical features are real
+  // (vehicle clearcoat, cloth sheen) — matte wood/plastic/kitchen furniture runs on
+  // `MeshStandardMaterial` with calibrated roughness/metalness, killing the extra
+  // dual-lobe GGX + clearcoat IBL evaluation per pixel (~1.7x cheaper fragment).
   const bodyMat = palette.getPropMaterial(
     bodyKey,
     () =>
-      new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(item.colorHex),
-        roughness: isCloth ? 0.86 : isVehicle ? 0.24 : 0.44,
-        metalness: isVehicle ? 0.58 : item.category === "kitchen" ? 0.14 : 0.02,
-        sheen: isCloth ? 0.65 : 0,
-        sheenRoughness: 0.68,
-        clearcoat: isVehicle ? 0.92 : 0.05,
-        clearcoatRoughness: isVehicle ? 0.12 : 0.4,
-        envMapIntensity: isVehicle ? 1.15 : 0.45,
-      }),
+      isCloth || isVehicle
+        ? new THREE.MeshPhysicalMaterial({
+            color: new THREE.Color(item.colorHex),
+            roughness: isCloth ? 0.86 : 0.24,
+            metalness: isVehicle ? 0.58 : 0.02,
+            sheen: isCloth ? 0.65 : 0,
+            sheenRoughness: 0.68,
+            clearcoat: isVehicle ? 0.92 : 0,
+            clearcoatRoughness: isVehicle ? 0.12 : 0,
+            envMapIntensity: isVehicle ? 1.15 : 0.45,
+          })
+        : new THREE.MeshStandardMaterial({
+            color: new THREE.Color(item.colorHex),
+            roughness: 0.44,
+            metalness: item.category === "kitchen" ? 0.14 : 0.02,
+            envMapIntensity: 0.45,
+          }),
   );
   const accentHex = (item.accentHex ?? "#5a6354").toLowerCase();
   const accentMat = palette.getPropMaterial(
@@ -254,7 +265,7 @@ export function buildFurnitureMesh(
       break;
     }
 
-    case "dining_table": {
+    case "dining-table": {
       const buildDining = (detail: 0 | 1 | 2) => {
         const b = new PropBatcher();
         if (detail === 2) {
@@ -370,16 +381,20 @@ export function buildFurnitureMesh(
     }
 
     case "kloset_set": {
-      const ceramicMat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(item.colorHex),
-        roughness: 0.14,
-        metalness: 0.02,
-        clearcoat: 0.95,
-        clearcoatRoughness: 0.08,
-        envMap: palette.aluDark.envMap,
-        envMapIntensity: 0.75,
-      });
-      disposables.push(ceramicMat);
+      // OPT-06: ceramic lives in the palette prop cache (was re-created per item with
+      // a dangling `envMap: palette.aluDark.envMap` copy) and relies on scene.environment.
+      const ceramicMat = palette.getPropMaterial(
+        `ceramic|${item.colorHex.toLowerCase()}`,
+        () =>
+          new THREE.MeshPhysicalMaterial({
+            color: new THREE.Color(item.colorHex),
+            roughness: 0.14,
+            metalness: 0.02,
+            clearcoat: 0.95,
+            clearcoatRoughness: 0.08,
+            envMapIntensity: 0.75,
+          }),
+      );
       const b = new PropBatcher();
       const bowlPts = [
         new THREE.Vector2(0.08, 0),
@@ -397,19 +412,28 @@ export function buildFurnitureMesh(
     }
 
     case "car_city": {
-      const headMat = new THREE.MeshStandardMaterial({
-        color: 0xfff8d6,
-        emissive: 0xfff3b0,
-        emissiveIntensity: 1.5,
-        roughness: 0.2,
-      });
-      const tailMat = new THREE.MeshStandardMaterial({
-        color: 0x991b1b,
-        emissive: 0xef4444,
-        emissiveIntensity: 1.3,
-        roughness: 0.25,
-      });
-      disposables.push(headMat, tailMat);
+      // OPT-06: head/tail lamp materials ride the palette prop cache instead of being
+      // re-created per car instance (palette.dispose() owns their lifetime).
+      const headMat = palette.getPropMaterial(
+        "car-headlamp",
+        () =>
+          new THREE.MeshStandardMaterial({
+            color: 0xfff8d6,
+            emissive: 0xfff3b0,
+            emissiveIntensity: 1.5,
+            roughness: 0.2,
+          }),
+      );
+      const tailMat = palette.getPropMaterial(
+        "car-taillamp",
+        () =>
+          new THREE.MeshStandardMaterial({
+            color: 0x991b1b,
+            emissive: 0xef4444,
+            emissiveIntensity: 1.3,
+            roughness: 0.25,
+          }),
+      );
 
       const buildCar = (detail: 0 | 1 | 2) => {
         const b = new PropBatcher();
