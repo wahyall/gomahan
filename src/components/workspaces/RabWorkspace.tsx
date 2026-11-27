@@ -3,11 +3,14 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
+
+type RabRow = RabSummary["rows"][number];
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
+import { MobileBottomSheet } from "@/components/mobile/MobileBottomSheet";
 import { KpiMetric, SectionHeader, StudioCard, StudioConfirmDialog, StudioNumberField, StudioRange } from "@/components/ui/StudioPrimitives";
-import { BrickWall, ChevronDown, ChevronRight, Layers, RotateCcw, Ruler, Search, Wallet, X } from "lucide-react";
+import { BrickWall, ChevronDown, ChevronRight, Layers, Pencil, RotateCcw, Ruler, Search, Wallet, X } from "lucide-react";
 
 const RabPriceInput = memo(function RabPriceInput({
   value,
@@ -77,6 +80,9 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
   const [query, setQuery] = useState("");
   const [collapsedDivs, setCollapsedDivs] = useState<Record<string, boolean>>({});
   const [confirmResetPricesOpen, setConfirmResetPricesOpen] = useState(false);
+  const [editingRow, setEditingRow] = useState<RabRow | null>(null);
+  const [editField, setEditField] = useState<"materialPrice" | "laborPrice">("materialPrice");
+  const [editDraft, setEditDraft] = useState("0");
 
   const settings = project.rabSettings;
   const masonry = derived.masonry;
@@ -107,9 +113,37 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
     setCollapsedDivs((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const openMobilePriceEditor = (row: RabRow) => {
+    setEditingRow(row);
+    setEditField("materialPrice");
+    setEditDraft(String(row.materialUnit));
+  };
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+    <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
       <div className="mx-auto max-w-6xl space-y-4">
+        {/* Sticky Mobile Budget Header */}
+        <div className="sticky top-0 z-10 -mx-3 border-b border-white/10 bg-[#0f1216]/95 px-3 py-2.5 backdrop-blur-md md:hidden">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="text-[10.5px] font-medium text-muted-foreground">Total RAB ({budgetPct}% Pagu)</div>
+              <div className={cn("font-mono text-base font-bold tabular-nums", rab.overBudget ? "text-rose-300" : "text-emerald-300")}>
+                {fmtRp(rab.grandTotal)}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className={cn("rounded-lg px-2 py-0.5 font-mono text-[11px] font-bold tabular-nums", diffRp >= 0 ? "bg-emerald-500/15 text-emerald-300" : "bg-rose-500/15 text-rose-300")}>
+                {diffRp >= 0 ? `Sisa ${fmtRp(diffRp)}` : `Over ${fmtRp(Math.abs(diffRp))}`}
+              </div>
+            </div>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-black/50">
+            <div
+              className={cn("h-full rounded-full transition-all", rab.overBudget ? "bg-rose-400" : "bg-emerald-400")}
+              style={{ width: `${Math.min(100, budgetPct)}%` }}
+            />
+          </div>
+        </div>
         {/* Top Summary Cards */}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <KpiMetric
@@ -273,20 +307,20 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
         <div className="studio-surface overflow-hidden rounded-xl">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-[#161a21] px-3.5 py-2.5">
             <div className="text-xs font-semibold text-foreground">Daftar Rincian Pekerjaan (BOQ &amp; Harga Satuan Editable)</div>
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Cari uraian atau kode AHSP..."
-                className="h-8 w-56 rounded-lg border border-input bg-[#111418] pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+                className="min-h-11 w-full rounded-lg border border-input bg-[#111418] pl-8 pr-9 text-base text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none md:min-h-8 md:h-8 md:w-56 md:pr-7 md:text-xs"
               />
               {query && (
                 <button
                   type="button"
                   aria-label="Hapus pencarian"
                   onClick={() => setQuery("")}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  className="absolute right-2 top-1/2 flex min-h-8 min-w-8 -translate-y-1/2 items-center justify-center text-muted-foreground hover:text-foreground"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -294,7 +328,65 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          {/* Mobile BOQ Accordion + 2-Line Cards */}
+          <div className="divide-y divide-border md:hidden">
+            {filteredDivisions.map((div) => {
+              const collapsed = Boolean(collapsedDivs[div.id]) && !qLower;
+              return (
+                <div key={div.id}>
+                  <button
+                    type="button"
+                    onClick={() => toggleDiv(div.id)}
+                    aria-expanded={!collapsed}
+                    className="flex min-h-12 w-full items-center justify-between gap-2 bg-white/[0.04] px-3.5 py-2.5 text-left"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-foreground">
+                        {collapsed ? <ChevronRight className="h-4 w-4 shrink-0 text-primary" /> : <ChevronDown className="h-4 w-4 shrink-0 text-primary" />}
+                        <span className="truncate">Div. {div.kode} — {div.nama}</span>
+                      </div>
+                      <div className="mt-0.5 pl-5 font-mono text-[10.5px] text-muted-foreground">{div.rows.length} item</div>
+                    </div>
+                    <span className="shrink-0 rounded-lg bg-primary/15 px-2 py-1 font-mono text-xs font-bold text-primary tabular-nums">
+                      {fmtRp(div.subtotal)}
+                    </span>
+                  </button>
+                  {!collapsed && (
+                    <div className="divide-y divide-border/70">
+                      {div.rows.map((r) => (
+                        <div key={r.id} className="space-y-2 px-3.5 py-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground">{r.uraian}</div>
+                              <div className="mt-0.5 text-[10.5px] text-muted-foreground">{r.spek}</div>
+                            </div>
+                            <div className="shrink-0 text-right font-mono text-xs font-bold text-foreground tabular-nums">
+                              {fmtRp(r.subtotal)}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                              {fmtNum(r.qty, r.qty % 1 === 0 ? 0 : 2)} {r.unit} · {r.ahspCode}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => openMobilePriceEditor(r)}
+                              className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-primary/40 bg-primary/15 px-3 text-xs font-semibold text-[#f6ba86] active:scale-[0.97]"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              <span>Edit Harga</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[900px] text-xs">
               <thead className="bg-[#1b2029] text-left text-[10.5px] font-semibold text-muted-foreground">
                 <tr>
@@ -382,6 +474,109 @@ export function RabWorkspace({ derived, rab }: { derived: DerivedProjectModel; r
           setConfirmResetPricesOpen(false);
         }}
       />
+
+      {/* Mobile Numeric Price Editor Bottom Sheet */}
+      <MobileBottomSheet
+        open={Boolean(editingRow)}
+        onClose={() => setEditingRow(null)}
+        title={editingRow ? editingRow.uraian : "Edit Harga"}
+        subtitle={editingRow ? `${fmtNum(editingRow.qty, editingRow.qty % 1 === 0 ? 0 : 2)} ${editingRow.unit} · ${editingRow.ahspCode}` : undefined}
+        defaultSnap="half"
+        modalBackdrop
+      >
+        {editingRow && (() => {
+          const parsedVal = Math.max(0, Number(editDraft) || 0);
+          const nextMat = editField === "materialPrice" ? parsedVal : editingRow.materialUnit;
+          const nextLab = editField === "laborPrice" ? parsedVal : editingRow.laborUnit;
+          const previewSub = Math.round(editingRow.qty * (nextMat + nextLab + editingRow.equipUnit));
+          const applyFactor = (factor: number) => {
+            const next = Math.max(0, Math.round((parsedVal * factor) / 500) * 500);
+            setEditDraft(String(next));
+          };
+          return (
+            <div className="space-y-4 p-4 pb-8">
+              <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-black/30 p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditField("materialPrice");
+                    setEditDraft(String(editingRow.materialUnit));
+                  }}
+                  className={cn(
+                    "min-h-11 rounded-lg text-xs font-semibold transition",
+                    editField === "materialPrice" ? "bg-[#f2efe8] text-[#14171c]" : "text-muted-foreground",
+                  )}
+                >
+                  Material ({fmtRp(editingRow.materialUnit)})
+                </button>
+                <button
+                  type="button"
+                  disabled={settings.laborMode === "borongan_pct"}
+                  onClick={() => {
+                    setEditField("laborPrice");
+                    setEditDraft(String(editingRow.laborUnit));
+                  }}
+                  className={cn(
+                    "min-h-11 rounded-lg text-xs font-semibold transition disabled:opacity-40",
+                    editField === "laborPrice" ? "bg-[#f2efe8] text-[#14171c]" : "text-muted-foreground",
+                  )}
+                >
+                  Upah ({fmtRp(editingRow.laborUnit)})
+                </button>
+              </div>
+
+              <label className="block space-y-1.5">
+                <span className="text-xs font-semibold text-muted-foreground">
+                  {editField === "materialPrice" ? "Harga Material" : "Upah Tenaga"} (Rp / {editingRow.unit})
+                </span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={500}
+                  value={editDraft}
+                  onChange={(e) => setEditDraft(e.target.value)}
+                  className="min-h-12 w-full rounded-xl border border-input bg-[#111418] px-3 text-right font-mono text-base font-bold text-foreground tabular-nums focus:border-primary focus:outline-none"
+                />
+              </label>
+
+              <div className="grid grid-cols-4 gap-2">
+                {[
+                  [0.9, "-10%"],
+                  [0.95, "-5%"],
+                  [1.05, "+5%"],
+                  [1.1, "+10%"],
+                ].map(([f, lbl]) => (
+                  <button
+                    key={String(lbl)}
+                    type="button"
+                    onClick={() => applyFactor(Number(f))}
+                    className="min-h-11 rounded-xl border border-white/10 bg-white/[0.06] font-mono text-xs font-semibold text-foreground active:bg-white/15"
+                  >
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/25 px-3.5 py-2.5 text-xs">
+                <span className="text-muted-foreground">Pratinjau Subtotal</span>
+                <span className="font-mono text-sm font-bold text-primary tabular-nums">{fmtRp(previewSub)}</span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  updatePriceItem(editingRow.priceKey, editField, parsedVal);
+                  setEditingRow(null);
+                }}
+                className="min-h-12 w-full rounded-xl bg-primary text-sm font-bold text-primary-foreground active:scale-[0.98]"
+              >
+                Simpan Harga
+              </button>
+            </div>
+          );
+        })()}
+      </MobileBottomSheet>
     </div>
   );
 }

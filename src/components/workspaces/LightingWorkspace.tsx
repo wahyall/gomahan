@@ -139,7 +139,29 @@ export function LightingWorkspace({ lighting }: { lighting: LightingSimulationRe
           <div className="border-b border-border px-3.5 py-2.5 text-xs font-semibold">
             Intensitas Cahaya per Ruangan (Alami + Lampu vs Target SNI)
           </div>
-          <div className="overflow-x-auto">
+          <div className="grid grid-cols-1 gap-2 p-3 @lg:hidden">
+            {lighting.rooms.map((r) => (
+              <div key={r.roomId} className="rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-foreground">LT{r.levelIndex + 1} · {r.roomName}</span>
+                  <span
+                    className={cn(
+                      "rounded-lg px-2 py-0.5 text-[10.5px] font-bold",
+                      r.status === "TERANG" ? "bg-emerald-500/15 text-emerald-300" : r.status === "CUKUP" ? "bg-amber-500/15 text-amber-300" : "bg-rose-500/15 text-rose-300",
+                    )}
+                  >
+                    {r.status}
+                  </span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-3 gap-2 font-mono text-[11px] tabular-nums">
+                  <div><span className="text-muted-foreground">Total:</span> <strong className="text-foreground">{r.totalLux} lx</strong></div>
+                  <div><span className="text-muted-foreground">Target:</span> <strong className="text-foreground">{r.targetLux} lx</strong></div>
+                  <div className="text-right"><span className="text-muted-foreground">DF:</span> <strong className="text-foreground">{r.daylightFactorPct.toFixed(1)}%</strong></div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto @lg:block">
             <table className="w-full text-xs">
               <thead className="bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                 <tr>

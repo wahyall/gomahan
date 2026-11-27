@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import { fmtM, fmtNum } from "@/lib/utils/format";
@@ -27,7 +27,17 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
   const [sheet, setSheet] = useState<SheetId>("denah1");
   const [showMep, setShowMep] = useState(true);
   const [zoomPct, setZoomPct] = useState(100);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [scheduleOpen, setScheduleOpen] = useState(false);
+
+  const touchMapRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchStartRef = useRef<{ dist: number; zoomPct: number } | null>(null);
+  const lastTapRef = useRef<number>(0);
+
+  const resetZoom = () => {
+    setZoomPct(100);
+    setPan({ x: 0, y: 0 });
+  };
 
   const openingsList = useMemo(
     () =>
@@ -51,15 +61,18 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* CAD Drafting Toolbar */}
         <div className="no-print flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-[#151920] px-3 py-1.5">
-          <div className="flex items-center gap-1 rounded-lg bg-black/30 p-0.5">
-            <FileStack className="mx-1.5 h-3.5 w-3.5 text-primary" />
+          <div className="no-scrollbar flex max-w-full items-center gap-1 overflow-x-auto rounded-lg bg-black/30 p-0.5">
+            <FileStack className="mx-1.5 h-3.5 w-3.5 shrink-0 text-primary" />
             {SHEETS.map((s) => (
               <button
                 key={s.id}
                 type="button"
-                onClick={() => setSheet(s.id)}
+                onClick={() => {
+                  setSheet(s.id);
+                  resetZoom();
+                }}
                 className={cn(
-                  "flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium transition",
+                  "flex min-h-10 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium transition md:min-h-7 md:h-7",
                   sheet === s.id
                     ? "bg-[#f2efe8] font-semibold text-[#14171c] shadow-sm"
                     : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground",
@@ -68,7 +81,7 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
                 <span className={cn("rounded px-1 font-mono text-[9.5px] font-bold", sheet === s.id ? "bg-black/15" : "bg-black/30")}>
                   {s.kode}
                 </span>
-                <span className="hidden sm:inline">{s.label}</span>
+                <span>{s.label}</span>
               </button>
             ))}
           </div>
@@ -83,13 +96,13 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
                 : "Tampilkan atau sembunyikan jalur pipa air & kabel listrik"
             }
             className={cn(
-              "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40",
+              "flex min-h-10 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40 md:min-h-8 md:h-8",
               showMep && sheet !== "potongan" && sheet !== "struktur"
                 ? "border-primary/45 bg-primary/15 text-[#f6ba86]"
                 : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground",
             )}
           >
-            Overlay Pipa &amp; Listrik
+            MEP
           </button>
 
           {/* Zoom Controls */}
@@ -97,24 +110,24 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
             <button
               type="button"
               aria-label="Perkecil lembar"
-              onClick={() => setZoomPct((z) => Math.max(70, z - 15))}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+              onClick={() => setZoomPct((z) => Math.max(70, z - 20))}
+              className="flex min-h-10 min-w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground md:min-h-7 md:min-w-7 md:h-7 md:w-7"
             >
               <ZoomOut className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
-              onClick={() => setZoomPct(100)}
+              onClick={resetZoom}
               title="Reset zoom 100%"
-              className="min-w-11 rounded-md px-1.5 py-0.5 font-mono text-[10.5px] font-semibold text-foreground tabular-nums hover:bg-white/[0.06]"
+              className="min-h-10 min-w-11 rounded-md px-1.5 py-0.5 font-mono text-[10.5px] font-semibold text-foreground tabular-nums hover:bg-white/[0.06] md:min-h-0"
             >
-              {zoomPct}%
+              {Math.round(zoomPct)}%
             </button>
             <button
               type="button"
               aria-label="Perbesar lembar"
-              onClick={() => setZoomPct((z) => Math.min(180, z + 15))}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+              onClick={() => setZoomPct((z) => Math.min(350, z + 20))}
+              className="flex min-h-10 min-w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground md:min-h-7 md:min-w-7 md:h-7 md:w-7"
             >
               <ZoomIn className="h-3.5 w-3.5" />
             </button>
@@ -125,7 +138,7 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
               type="button"
               onClick={() => setScheduleOpen((v) => !v)}
               className={cn(
-                "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition xl:hidden",
+                "flex min-h-10 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition md:min-h-8 md:h-8 xl:hidden",
                 scheduleOpen ? "border-primary bg-primary text-primary-foreground" : "border-border bg-secondary text-foreground",
               )}
             >
@@ -134,18 +147,70 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
             <button
               type="button"
               onClick={() => window.print()}
-              className="flex h-8 items-center gap-1.5 rounded-lg bg-[#f2efe8] px-3 text-[11px] font-semibold text-[#14171c] shadow-sm transition hover:brightness-95"
+              className="flex min-h-10 items-center gap-1.5 rounded-lg bg-[#f2efe8] px-3 text-[11px] font-semibold text-[#14171c] shadow-sm transition hover:brightness-95 md:min-h-8 md:h-8"
             >
-              <Printer className="h-3.5 w-3.5 text-[#b9662a]" /> Cetak Lembar
+              <Printer className="h-3.5 w-3.5 text-[#b9662a]" /> Cetak
             </button>
           </div>
         </div>
 
-        {/* Drafting Table Background */}
-        <div className="min-h-0 flex-1 overflow-auto bg-[#181b21] p-4 sm:p-6">
+        {/* Drafting Table Background with Native Pinch-to-Zoom, Double-Tap & 1-Finger Pan */}
+        <div
+          onPointerDown={(e) => {
+            if (e.pointerType !== "touch") return;
+            touchMapRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (touchMapRef.current.size === 2) {
+              const pts = [...touchMapRef.current.values()];
+              const dist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+              pinchStartRef.current = { dist, zoomPct };
+            } else if (touchMapRef.current.size === 1) {
+              const now = performance.now();
+              if (now - lastTapRef.current < 280) {
+                lastTapRef.current = 0;
+                if (zoomPct > 110) {
+                  resetZoom();
+                } else {
+                  setZoomPct(220);
+                }
+              } else {
+                lastTapRef.current = now;
+              }
+            }
+          }}
+          onPointerMove={(e) => {
+            if (e.pointerType !== "touch") return;
+            const prev = touchMapRef.current.get(e.pointerId);
+            if (!prev) return;
+            const dx = e.clientX - prev.x;
+            const dy = e.clientY - prev.y;
+            touchMapRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (touchMapRef.current.size === 2 && pinchStartRef.current) {
+              const pts = [...touchMapRef.current.values()];
+              const dist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+              const ratio = dist / Math.max(10, pinchStartRef.current.dist);
+              setZoomPct(Math.round(Math.max(70, Math.min(350, pinchStartRef.current.zoomPct * ratio))));
+            } else if (touchMapRef.current.size === 1) {
+              setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+            }
+          }}
+          onPointerUp={(e) => {
+            if (e.pointerType !== "touch") return;
+            touchMapRef.current.delete(e.pointerId);
+            if (touchMapRef.current.size < 2) pinchStartRef.current = null;
+          }}
+          onPointerCancel={(e) => {
+            if (e.pointerType !== "touch") return;
+            touchMapRef.current.delete(e.pointerId);
+            if (touchMapRef.current.size < 2) pinchStartRef.current = null;
+          }}
+          className="min-h-0 flex-1 overflow-auto touch-none bg-[#181b21] p-3 sm:p-6 md:touch-auto"
+        >
           <div
-            className="mx-auto origin-top shadow-2xl ring-1 ring-black/50 transition-transform duration-150"
-            style={{ maxWidth: `${(1060 * zoomPct) / 100}px` }}
+            className="mx-auto origin-center shadow-2xl ring-1 ring-black/50 transition-transform duration-75"
+            style={{
+              maxWidth: "1060px",
+              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoomPct / 100})`,
+            }}
           >
             {sheet === "denah1" && <DenahFloorSvg derived={derived} struct={struct} levelIndex={0} showMep={showMep} />}
             {sheet === "denah2" && <DenahFloorSvg derived={derived} struct={struct} levelIndex={1} showMep={showMep} />}
@@ -155,11 +220,13 @@ export function DrawingsWorkspace({ derived, struct }: { derived: DerivedProject
         </div>
       </div>
 
-      {/* Right Schedule Sidebar (Always visible xl+, toggleable slide-over below xl) */}
+      {/* Right Schedule Sidebar on Desktop / Bottom Sheet on Mobile */}
       <aside
         className={cn(
-          "no-print min-h-0 w-[310px] shrink-0 flex-col overflow-y-auto border-l border-border bg-[#151920]",
-          scheduleOpen ? "absolute bottom-0 right-0 top-0 z-20 flex shadow-2xl xl:static xl:shadow-none" : "hidden xl:flex",
+          "no-print min-h-0 shrink-0 flex-col overflow-y-auto border-border bg-[#151920]",
+          scheduleOpen
+            ? "fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 flex max-h-[65dvh] rounded-t-3xl border-t shadow-2xl md:absolute md:inset-y-0 md:left-auto md:right-0 md:max-h-none md:w-[310px] md:rounded-none md:border-l md:border-t-0 xl:static xl:shadow-none"
+            : "hidden xl:flex xl:w-[310px] xl:border-l",
         )}
       >
         <div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-3.5 text-xs font-semibold text-foreground">

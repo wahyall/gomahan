@@ -216,7 +216,7 @@ export function StructureWorkspace({
                   placeholder="Contoh: Ir. Budi Santoso, ST (SKK Muda)"
                   value={sp.reviewerName}
                   onChange={(e) => patchStructuralParams({ reviewerName: e.target.value })}
-                  className="h-9 w-full rounded-lg border border-input bg-[#13161c] px-2.5 text-xs text-foreground outline-none focus:border-primary"
+                  className="min-h-11 w-full rounded-lg border border-input bg-[#13161c] px-2.5 text-base text-foreground outline-none focus:border-primary md:min-h-9 md:h-9 md:text-xs"
                 />
               </label>
             </div>
@@ -229,8 +229,24 @@ export function StructureWorkspace({
             <div className="border-b border-border px-3.5 py-2.5 text-xs font-semibold">
               Pemeriksaan Pondasi ({struct.foundations.length} Titik)
             </div>
-            <div className="max-h-64 overflow-y-auto">
-              <table className="w-full text-xs">
+            <div className="max-h-72 overflow-y-auto">
+              {/* Compact Cards on narrow/mobile viewports */}
+              <div className="grid grid-cols-1 gap-2 p-3 @lg:hidden">
+                {struct.foundations.map((f) => (
+                  <div key={f.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5 text-xs">
+                    <div className="min-w-0">
+                      <div className="font-mono font-bold text-foreground">{f.id} · <span className="font-sans font-medium text-muted-foreground">{f.sizeLabel}</span></div>
+                      <div className="mt-0.5 font-mono text-[11px] text-muted-foreground tabular-nums">
+                        Tegangan {f.bearingPressureKpa.toFixed(1)} / {f.allowableBearingKpa} kPa
+                      </div>
+                    </div>
+                    <span className={cn("shrink-0 rounded-lg px-2 py-1 text-[10.5px] font-bold", f.status === "AMAN" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300")}>
+                      {f.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <table className="hidden w-full text-xs @lg:table">
                 <thead className="sticky top-0 bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left">Titik</th>
@@ -268,8 +284,25 @@ export function StructureWorkspace({
                 </button>
               )}
             </div>
-            <div className="max-h-64 overflow-y-auto">
-              <table className="w-full text-xs">
+            <div className="max-h-72 overflow-y-auto">
+              <div className="grid grid-cols-1 gap-2 p-3 @lg:hidden">
+                {(showAllCols ? struct.columns : struct.columns.slice(0, 12)).map((c) => (
+                  <div key={c.id} className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5 text-xs">
+                    <div className="min-w-0">
+                      <div className="font-mono font-bold text-foreground">
+                        {c.id} <span className="font-normal text-muted-foreground">({Math.round(c.widthM * 100)}×{Math.round(c.depthM * 100)})</span>
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                        {c.rebarSpec} · Rasio {(c.utilizationRatio * 100).toFixed(0)}%
+                      </div>
+                    </div>
+                    <span className={cn("shrink-0 rounded-lg px-2 py-1 text-[10.5px] font-bold", c.status === "AMAN" ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300")}>
+                      {c.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <table className="hidden w-full text-xs @lg:table">
                 <thead className="sticky top-0 bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                   <tr>
                     <th className="px-3 py-2 text-left">Elemen</th>
@@ -303,7 +336,22 @@ export function StructureWorkspace({
             <span className="text-xs font-semibold">Daftar Potongan Besi (Bar Bending Schedule / BBS)</span>
             <span className="font-mono text-xs font-bold text-primary tabular-nums">Total: {fmtNum(struct.totalRebarKg, 1)} kg</span>
           </div>
-          <div className="overflow-x-auto">
+          <div className="grid grid-cols-1 gap-2 p-3 @lg:hidden">
+            {struct.bbs.map((b) => (
+              <div key={b.barMark} className="rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono font-bold text-primary">{b.barMark} · D{b.diameterMm}</span>
+                  <span className="font-mono font-bold text-foreground tabular-nums">{fmtNum(b.totalWeightKg, 1)} kg</span>
+                </div>
+                <div className="mt-0.5 font-medium text-foreground">{b.element}</div>
+                <div className="mt-1 flex items-center justify-between font-mono text-[11px] text-muted-foreground tabular-nums">
+                  <span>{b.shape}</span>
+                  <span>{b.count}× @ {b.cutLengthM.toFixed(2)}m ({fmtNum(b.totalLengthM, 1)}m)</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto @lg:block">
             <table className="w-full text-xs">
               <thead className="bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                 <tr>

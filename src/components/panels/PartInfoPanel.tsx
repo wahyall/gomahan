@@ -4,9 +4,11 @@ import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import type { StructuralReport } from "@/lib/structure/sniEngine";
 import type { RabSummary } from "@/lib/quantities/rabEngine";
 import { getPartInfo } from "@/lib/house/parts";
+import { useMobileLayout } from "@/lib/hooks/useMobileLayout";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { fmtNum, fmtRp } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
+import { MobileBottomSheet } from "@/components/mobile/MobileBottomSheet";
 import { Eye, EyeOff, Wallet, X } from "lucide-react";
 
 interface Props {
@@ -22,6 +24,7 @@ export function PartInfoPanel({ derived, struct, rab, className }: Props) {
   const view = useStudioStore((s) => s.view);
   const toggleHiddenPart = useStudioStore((s) => s.toggleHiddenPart);
   const updatePriceItem = useStudioStore((s) => s.updatePriceItem);
+  const isMobile = useMobileLayout();
 
   if (!selected || selected.kind !== "part") return null;
 
@@ -31,23 +34,8 @@ export function PartInfoPanel({ derived, struct, rab, className }: Props) {
   const relatedRows = rab.rows.filter((r) => info.rowIds.includes(r.id));
   const isHidden = view.hiddenParts.includes(info.id);
 
-  return (
-    <div className={cn("studio-glass pointer-events-auto absolute z-20 flex max-h-[72%] w-[345px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl", className ?? "bottom-3 right-3")}>
-      <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
-        <div className="min-w-0">
-          <div className="truncate text-[13px] font-bold text-foreground">{info.label}</div>
-          <div className="font-mono text-[10px] uppercase tracking-wider text-primary">{info.group}</div>
-        </div>
-        <button
-          type="button"
-          aria-label="Tutup panel detail elemen"
-          onClick={() => setSelected(null)}
-          className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/10 hover:text-foreground"
-        >
-          <X className="h-3.5 w-3.5" aria-hidden />
-        </button>
-      </div>
-
+  const body = (
+    <>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5 text-xs">
         <p className="leading-relaxed text-muted-foreground">{info.ringkas}</p>
         <ul className="space-y-1 text-[11px] text-foreground/90">
@@ -90,11 +78,12 @@ export function PartInfoPanel({ derived, struct, rab, className }: Props) {
                     <span>Harga (Rp/{r.unit})</span>
                     <input
                       type="number"
+                      inputMode="numeric"
                       min={0}
                       step={500}
                       value={r.materialUnit}
                       onChange={(e) => updatePriceItem(r.priceKey, "materialPrice", Math.max(0, Number(e.target.value) || 0))}
-                      className="h-7 w-28 rounded-lg border border-input bg-[#12151b] px-2 text-right font-mono text-[11px] text-foreground tabular-nums outline-none focus:border-primary"
+                      className="min-h-11 w-32 rounded-lg border border-input bg-[#12151b] px-2 text-right font-mono text-base text-foreground tabular-nums outline-none focus:border-primary md:min-h-7 md:h-7 md:w-28 md:text-[11px]"
                     />
                   </label>
                 </div>
@@ -108,12 +97,48 @@ export function PartInfoPanel({ derived, struct, rab, className }: Props) {
         <button
           type="button"
           onClick={() => toggleHiddenPart(info.id)}
-          className="flex h-8 w-full items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] text-[11px] font-semibold transition hover:bg-white/[0.12]"
+          className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.06] text-xs font-semibold transition hover:bg-white/[0.12] md:min-h-8 md:h-8 md:text-[11px]"
         >
           {isHidden ? <EyeOff className="h-3.5 w-3.5 text-amber-400" /> : <Eye className="h-3.5 w-3.5 text-primary" />}
           {isHidden ? "Tampilkan Kembali Elemen" : "Sembunyikan di 3D"}
         </button>
       </div>
+    </>
+  );
+
+  if (isMobile) {
+    return (
+      <MobileBottomSheet
+        open
+        onClose={() => setSelected(null)}
+        title={info.label}
+        subtitle={info.group}
+        defaultSnap="half"
+        modalBackdrop={false}
+      >
+        {body}
+      </MobileBottomSheet>
+    );
+  }
+
+  return (
+    <div className={cn("studio-glass pointer-events-auto absolute z-20 flex max-h-[72%] w-[345px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-2xl", className ?? "bottom-3 right-3")}>
+      <div className="flex items-center justify-between border-b border-white/[0.08] bg-black/20 px-3.5 py-2.5">
+        <div className="min-w-0">
+          <div className="truncate text-[13px] font-bold text-foreground">{info.label}</div>
+          <div className="font-mono text-[10px] uppercase tracking-wider text-primary">{info.group}</div>
+        </div>
+        <button
+          type="button"
+          aria-label="Tutup panel detail elemen"
+          onClick={() => setSelected(null)}
+          className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/10 hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" aria-hidden />
+        </button>
+      </div>
+
+      {body}
     </div>
   );
 }

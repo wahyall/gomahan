@@ -120,7 +120,7 @@ export function StudioRange({
   className?: string;
 }) {
   return (
-    <div className={cn("space-y-1.5", className)}>
+    <div className={cn("space-y-1.5 py-1", className)}>
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="font-medium text-muted-foreground">{label}</span>
         <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-foreground tabular-nums">
@@ -211,7 +211,7 @@ export function StudioSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 w-full rounded-lg border border-input bg-[#13161c] px-2.5 text-xs font-medium text-foreground outline-none transition hover:border-white/25 focus:border-primary"
+        className="min-h-11 w-full rounded-lg border border-input bg-[#13161c] px-2.5 text-base font-medium text-foreground outline-none transition hover:border-white/25 focus:border-primary md:min-h-9 md:h-9 md:text-xs"
       >
         {options.map(([k, txt]) => (
           <option key={k} value={k} className="bg-[#181c23] text-foreground">
@@ -263,9 +263,10 @@ export function StudioNumberField({
   return (
     <label className={cn("block space-y-1", className)}>
       <span className="block text-[11px] font-medium text-muted-foreground">{label}</span>
-      <div className="flex h-9 items-center overflow-hidden rounded-lg border border-input bg-[#13161c] px-2.5 focus-within:border-primary hover:border-white/25">
+      <div className="flex min-h-11 items-center overflow-hidden rounded-lg border border-input bg-[#13161c] px-2.5 focus-within:border-primary hover:border-white/25 md:min-h-9 md:h-9">
         <input
           type="number"
+          inputMode="decimal"
           min={min}
           max={max}
           step={step}
@@ -297,7 +298,7 @@ export function StudioNumberField({
               e.currentTarget.blur();
             }
           }}
-          className="w-full min-w-0 bg-transparent font-mono text-xs font-semibold text-foreground tabular-nums outline-none"
+          className="w-full min-w-0 bg-transparent font-mono text-base font-semibold text-foreground tabular-nums outline-none md:text-xs"
         />
         {unit && <span className="ml-1.5 shrink-0 font-mono text-[10.5px] text-muted-foreground">{unit}</span>}
       </div>

@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { UNIFIED_BUILD_CATALOG } from "@/features/buildMode/projectCatalog";
+import { useBuildModeStore } from "@/features/buildMode/store";
+import { useMobileLayout } from "@/lib/hooks/useMobileLayout";
 import { useStudioStore, type StudioPanelId, type WorkspaceId } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { CornerDownLeft, Search, X } from "lucide-react";
@@ -14,6 +17,8 @@ interface ActionItem {
 }
 
 export function CommandPalette() {
+  const isMobile = useMobileLayout();
+  const project = useStudioStore((s) => s.project);
   const open = useStudioStore((s) => s.commandPaletteOpen);
   const setOpen = useStudioStore((s) => s.setCommandPaletteOpen);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
@@ -194,8 +199,29 @@ export function CommandPalette() {
           patchSimulation({ hourOfDay: 12 });
         },
       },
+      ...project.levels.flatMap((lv) =>
+        lv.rooms.map((rm) => ({
+          id: `room-${rm.id}`,
+          label: `Pilih Ruang LT${lv.index + 1}: ${rm.name}`,
+          category: "Ruangan",
+          run: () => {
+            setWorkspace("build");
+            useBuildModeStore.getState().setActiveLevel(lv.index as 0 | 1);
+            useStudioStore.getState().setSelected({ kind: "room", id: rm.id, levelIndex: lv.index });
+          },
+        })),
+      ),
+      ...UNIFIED_BUILD_CATALOG.filter((c) => c.toolId !== "select").map((item) => ({
+        id: `cat-${item.id}`,
+        label: `Pasang ${item.name} (${item.specLabel})`,
+        category: "Katalog 3D",
+        run: () => {
+          setWorkspace("build");
+          useBuildModeStore.getState().selectCatalogItem(item);
+        },
+      })),
     ];
-  }, [openBuildPanel, patchSimulation, patchView, setBrickPreset, setGuideOpen, setWorkspace]);
+  }, [openBuildPanel, patchSimulation, patchView, project.levels, setBrickPreset, setGuideOpen, setWorkspace]);
 
   const filtered = useMemo(
     () =>
@@ -211,17 +237,20 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/65 px-4 pt-16 backdrop-blur-sm sm:pt-24"
+      className={cn(
+        "fixed inset-0 z-50 flex items-start justify-center bg-black/65 px-3 backdrop-blur-sm",
+        isMobile ? "pt-[max(0.75rem,env(safe-area-inset-top))]" : "px-4 pt-16 sm:pt-24",
+      )}
       onClick={() => setOpen(false)}
     >
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Command Palette"
+        aria-label={isMobile ? "Pencarian Cepat" : "Command Palette"}
         className="studio-glass w-full max-w-lg overflow-hidden rounded-2xl shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2.5 border-b border-white/[0.08] px-3.5 py-3">
+        <div className="flex items-center gap-2.5 border-b border-white/[0.08] px-3.5 py-2.5">
           <Search className="h-4 w-4 shrink-0 text-primary" />
           <input
             autoFocus
@@ -243,26 +272,26 @@ export function CommandPalette() {
                 setOpen(false);
               }
             }}
-            placeholder="Cari ruang kerja, material bata, atau simulasi..."
-            className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            placeholder={isMobile ? "Cari katalog, ruangan, atau simulasi..." : "Cari ruang kerja, material bata, atau simulasi..."}
+            className="min-h-10 w-full bg-transparent text-base text-foreground outline-none placeholder:text-muted-foreground md:min-h-0 md:text-sm"
           />
           <button
             type="button"
             aria-label="Tutup pencarian"
             onClick={() => setOpen(false)}
-            className="rounded-md p-1 text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/[0.08] hover:text-foreground md:min-h-0 md:min-w-0 md:p-1"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="max-h-80 overflow-y-auto p-1.5">
+        <div className="max-h-[60dvh] overflow-y-auto p-1.5 md:max-h-80">
           {filtered.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-muted-foreground">
               Tidak ditemukan perintah yang cocok dengan &ldquo;{query}&rdquo;.
             </div>
           ) : (
-            filtered.map((a, idx) => {
+            filtered.slice(0, 40).map((a, idx) => {
               const active = idx === clampedIndex;
               return (
                 <button
@@ -274,13 +303,13 @@ export function CommandPalette() {
                     setOpen(false);
                   }}
                   className={cn(
-                    "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-xs transition-colors",
+                    "flex min-h-11 w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-xs transition-colors md:min-h-0",
                     active ? "bg-primary/15 text-foreground" : "text-foreground/85 hover:bg-white/[0.06]",
                   )}
                 >
                   <div className="min-w-0 truncate font-medium">{a.label}</div>
                   <div className="flex shrink-0 items-center gap-1.5">
-                    {a.shortcut && (
+                    {!isMobile && a.shortcut && (
                       <kbd className="rounded bg-black/35 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{a.shortcut}</kbd>
                     )}
                     <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-muted-foreground">{a.category}</span>
@@ -291,12 +320,14 @@ export function CommandPalette() {
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-white/[0.08] bg-black/20 px-3.5 py-2 text-[10px] text-muted-foreground">
-          <span>Gunakan ↑ ↓ untuk memilih</span>
-          <span className="flex items-center gap-1">
-            <CornerDownLeft className="h-3 w-3" /> Enter buka · Esc tutup
-          </span>
-        </div>
+        {!isMobile && (
+          <div className="flex items-center justify-between border-t border-white/[0.08] bg-black/20 px-3.5 py-2 text-[10px] text-muted-foreground">
+            <span>Gunakan ↑ ↓ untuk memilih</span>
+            <span className="flex items-center gap-1">
+              <CornerDownLeft className="h-3 w-3" /> Enter buka · Esc tutup
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

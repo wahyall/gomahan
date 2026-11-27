@@ -15,8 +15,9 @@ import { parseVersionedProjectSave, validateProjectImport } from "@/lib/model/sc
 import type { BrickSpec, Level, Project } from "@/lib/model/types";
 import type { BrickInstance } from "@/lib/geometry/masonry";
 import { loadLatestProject, quarantineCorruptSave, saveAutosaveProject, saveProjectSnapshot } from "@/lib/store/db";
-import { useStudioStore } from "@/lib/store/useStudioStore";
+import { useStudioStore, type StudioPanelId } from "@/lib/store/useStudioStore";
 import { useBuildModeStore } from "@/features/buildMode/store";
+import { useMobileLayout } from "@/lib/hooks/useMobileLayout";
 import { TopBar } from "@/components/shell/TopBar";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { CommandPalette } from "@/components/shell/CommandPalette";
@@ -24,6 +25,19 @@ import { SnapshotModal } from "@/components/shell/SnapshotModal";
 import { StudioConfirmDialog } from "@/components/ui/StudioPrimitives";
 import { BuildWorkspace } from "@/components/build/BuildWorkspace";
 import { GuideDrawer } from "@/components/workspaces/GuideWorkspace";
+
+const MobileBottomNav = dynamic(
+  () => import("@/components/mobile/MobileBottomNav").then((m) => m.MobileBottomNav),
+  { ssr: false },
+);
+const MobileWorkspaceHeader = dynamic(
+  () => import("@/components/mobile/MobileWorkspaceHeader").then((m) => m.MobileWorkspaceHeader),
+  { ssr: false },
+);
+const MobileProjectMenuSheet = dynamic(
+  () => import("@/components/mobile/MobileProjectMenuSheet").then((m) => m.MobileProjectMenuSheet),
+  { ssr: false },
+);
 
 function WorkspaceLoading({ label }: { label: string }) {
   return (
@@ -137,6 +151,8 @@ export default function HomePage() {
   const loadProject = useStudioStore((s) => s.loadProject);
   const setSelected = useStudioStore((s) => s.setSelected);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
+  const studioPanel = useStudioStore((s) => s.studioPanel);
+  const isMobile = useMobileLayout();
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastSnapshotRef = useRef<string | null>(null);
@@ -147,6 +163,14 @@ export default function HomePage() {
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [snapshotsOpen, setSnapshotsOpen] = useState(false);
   const [pendingImport, setPendingImport] = useState<Project | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [lastSimPanel, setLastSimPanel] = useState<Exclude<StudioPanelId, "none">>("lighting");
+
+  useEffect(() => {
+    if (studioPanel !== "none") {
+      queueMicrotask(() => setLastSimPanel(studioPanel));
+    }
+  }, [studioPanel]);
 
   // Load latest IndexedDB autosave post-mount; quarantine truly corrupt saves before fallback
   useEffect(() => {
@@ -437,14 +461,21 @@ export default function HomePage() {
         onChange={handleFileChange}
       />
 
-      <TopBar
-        derived={derived}
-        rab={rab}
-        onExportJson={handleExportJson}
-        onImportJson={handleImportJson}
-        onSaveSnapshot={handleSaveSnapshot}
-        onOpenSnapshots={() => setSnapshotsOpen(true)}
-      />
+      {!isMobile ? (
+        <TopBar
+          derived={derived}
+          rab={rab}
+          onExportJson={handleExportJson}
+          onImportJson={handleImportJson}
+          onSaveSnapshot={handleSaveSnapshot}
+          onOpenSnapshots={() => setSnapshotsOpen(true)}
+        />
+      ) : (
+        workspace !== "build" &&
+        workspace !== "walk" && (
+          <MobileWorkspaceHeader onOpenProjectMenu={() => setMobileMenuOpen(true)} />
+        )
+      )}
 
       <main className="relative flex min-h-0 flex-1 overflow-hidden">
         {workspace === "build" && (
@@ -457,6 +488,7 @@ export default function HomePage() {
             flood={flood}
             onCanvasReady={handleCanvasReady}
             onSnapshotCapture={handleSnapshotCapture}
+            onOpenProjectMenu={() => setMobileMenuOpen(true)}
           />
         )}
         {workspace === "walk" && (
@@ -468,7 +500,14 @@ export default function HomePage() {
         )}
         {workspace === "drawings" && <DrawingsWorkspace derived={derived} struct={struct} />}
         {workspace === "rab" && <RabWorkspace derived={derived} rab={rab} />}
-        {workspace === "timeline" && <TimelineWorkspace derived={derived} struct={struct} schedule={schedule} />}
+        {workspace === "timeline" && (
+          <TimelineWorkspace
+            derived={derived}
+            struct={struct}
+            schedule={schedule}
+            defaultSubMode={isMobile ? "site" : "schedule"}
+          />
+        )}
         {workspace === "deliver" && (
           <DeliverWorkspace
             bundleBase={{ derived, struct, rab, schedule, lighting, airflow, flood }}
@@ -478,15 +517,38 @@ export default function HomePage() {
         )}
       </main>
 
-      <StatusBar
-        derived={derived}
-        struct={struct}
-        rab={rab}
-        lighting={lighting}
-        airflow={airflow}
-        flood={flood}
-        saveStatus={saveStatus}
-      />
+      {!isMobile ? (
+        <StatusBar
+          derived={derived}
+          struct={struct}
+          rab={rab}
+          lighting={lighting}
+          airflow={airflow}
+          flood={flood}
+          saveStatus={saveStatus}
+        />
+      ) : (
+        workspace !== "walk" && (
+          <MobileBottomNav
+            criticalCount={derived.validation.filter((v) => v.severity === "critical").length}
+            floodDanger={flood.lt1FloorFloodCm > 0 || flood.electricalHazardMcb || flood.electricalHazardOutlets}
+            lastSimPanel={lastSimPanel}
+          />
+        )
+      )}
+
+      {isMobile && (
+        <MobileProjectMenuSheet
+          open={mobileMenuOpen}
+          onClose={() => setMobileMenuOpen(false)}
+          derived={derived}
+          rab={rab}
+          onExportJson={handleExportJson}
+          onImportJson={handleImportJson}
+          onSaveSnapshot={handleSaveSnapshot}
+          onOpenSnapshots={() => setSnapshotsOpen(true)}
+        />
+      )}
 
       <CommandPalette />
       <GuideDrawer open={guideOpen} onClose={() => setGuideOpen(false)} derived={derived} />

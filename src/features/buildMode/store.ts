@@ -29,6 +29,15 @@ export type TerrainBrushMode = "raise" | "lower" | "flatten";
 export type WallPaintMode = "side" | "room";
 export type FurnitureSubcategory = "all" | "living" | "bedroom" | "kitchen" | "bath" | "outdoor";
 export type BuildRenderTier = "auto" | "high" | "medium" | "low";
+export type MobileDrawMode = "draw" | "orbit";
+
+const POINT_PLACEMENT_TOOLS = new Set<BuildToolId>([
+  "opening",
+  "stair",
+  "furniture",
+  "hvac",
+  "light",
+]);
 
 const INTERIOR_TOOLS = new Set<BuildToolId>([
   "wall_straight",
@@ -65,6 +74,12 @@ interface BuildModeViewState {
   placementRotationStep: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
   placementFlipSwing: 1 | -1;
   pendingRoofType: RoofType | null;
+  freePlacementEnabled: boolean;
+  multiPlaceEnabled: boolean;
+  mobileDrawMode: MobileDrawMode;
+  mobilePlacementActive: boolean;
+  mobileMoveEntityArmed: boolean;
+  mobileCatalogOpen: boolean;
   hover: BuildHoverState | null;
   previewHud: BuildPreviewHud | null;
   stats: BuildSceneStats | null;
@@ -97,6 +112,14 @@ interface BuildModeViewState {
   rotatePlacementStep: (delta: -1 | 1) => void;
   togglePlacementFlipSwing: () => void;
   setPendingRoofType: (roofType: RoofType | null) => void;
+  toggleFreePlacement: () => void;
+  setFreePlacementEnabled: (enabled: boolean) => void;
+  toggleMultiPlace: () => void;
+  setMultiPlaceEnabled: (enabled: boolean) => void;
+  setMobileDrawMode: (mode: MobileDrawMode) => void;
+  setMobilePlacementActive: (active: boolean) => void;
+  setMobileMoveEntityArmed: (armed: boolean) => void;
+  setMobileCatalogOpen: (open: boolean) => void;
   setHover: (hover: BuildHoverState | null) => void;
   setPreviewHud: (hud: BuildPreviewHud | null) => void;
   setStats: (stats: BuildSceneStats | null) => void;
@@ -123,6 +146,12 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
   placementRotationStep: 0,
   placementFlipSwing: 1,
   pendingRoofType: null,
+  freePlacementEnabled: false,
+  multiPlaceEnabled: false,
+  mobileDrawMode: "draw",
+  mobilePlacementActive: false,
+  mobileMoveEntityArmed: false,
+  mobileCatalogOpen: false,
   hover: null,
   previewHud: null,
   stats: null,
@@ -174,6 +203,9 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
         activeCategory: item.category,
         selectedSwatchHex: item.swatches?.[0]?.hex ?? null,
         pendingRoofType: item.toolId === "roof" ? (item.roofType ?? null) : null,
+        mobilePlacementActive: POINT_PLACEMENT_TOOLS.has(item.toolId),
+        mobileDrawMode: "draw",
+        mobileMoveEntityArmed: false,
         previewHud: null,
       };
     }),
@@ -195,6 +227,9 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
         activeCategory: found.category,
         selectedSwatchHex: swatchHex !== undefined ? swatchHex : (found.swatches?.[0]?.hex ?? null),
         pendingRoofType: found.toolId === "roof" ? (found.roofType ?? null) : null,
+        mobilePlacementActive: POINT_PLACEMENT_TOOLS.has(found.toolId),
+        mobileDrawMode: "draw",
+        mobileMoveEntityArmed: false,
         previewHud: null,
       };
     });
@@ -214,6 +249,14 @@ export const useBuildModeStore = create<BuildModeViewState>((set, get) => ({
       placementFlipSwing: s.placementFlipSwing === 1 ? -1 : 1,
     })),
   setPendingRoofType: (pendingRoofType) => set({ pendingRoofType }),
+  toggleFreePlacement: () => set((s) => ({ freePlacementEnabled: !s.freePlacementEnabled })),
+  setFreePlacementEnabled: (freePlacementEnabled) => set({ freePlacementEnabled }),
+  toggleMultiPlace: () => set((s) => ({ multiPlaceEnabled: !s.multiPlaceEnabled })),
+  setMultiPlaceEnabled: (multiPlaceEnabled) => set({ multiPlaceEnabled }),
+  setMobileDrawMode: (mobileDrawMode) => set({ mobileDrawMode }),
+  setMobilePlacementActive: (mobilePlacementActive) => set({ mobilePlacementActive }),
+  setMobileMoveEntityArmed: (mobileMoveEntityArmed) => set({ mobileMoveEntityArmed }),
+  setMobileCatalogOpen: (mobileCatalogOpen) => set({ mobileCatalogOpen }),
 
   setHover: (hover) =>
     set((s) => {

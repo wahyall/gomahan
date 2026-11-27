@@ -149,6 +149,9 @@ export class WalkScene {
   private readonly keysDown = new Set<string>();
   private virtualMove = { forward: 0, strafe: 0, sprint: false };
   private dragLookActive = false;
+  private activeLookPointerId: number | null = null;
+  private walkTouches = new Map<number, { x: number; y: number }>();
+  private lastWalkPinchDist = 0;
   private pointerDownPos = { x: 0, y: 0 };
   private lastDragPos = { x: 0, y: 0 };
   private pointerLocked = false;
@@ -182,7 +185,19 @@ export class WalkScene {
   private readonly onPointerDownBound = (e: PointerEvent) => this.handlePointerDown(e);
   private readonly onPointerMoveBound = (e: PointerEvent) => this.handlePointerMove(e);
   private readonly onPointerUpBound = (e: PointerEvent) => {
-    this.dragLookActive = false;
+    if (e.pointerType === "touch") {
+      this.walkTouches.delete(e.pointerId);
+      if (e.pointerId === this.activeLookPointerId) {
+        this.dragLookActive = false;
+        this.activeLookPointerId = null;
+      }
+      if (this.walkTouches.size < 2) {
+        this.lastWalkPinchDist = 0;
+      }
+    } else if (this.activeLookPointerId === null || e.pointerId === this.activeLookPointerId) {
+      this.dragLookActive = false;
+      this.activeLookPointerId = null;
+    }
     try {
       if (this.canvas.hasPointerCapture?.(e.pointerId)) {
         this.canvas.releasePointerCapture(e.pointerId);
@@ -344,6 +359,7 @@ export class WalkScene {
     canvas.addEventListener("pointerdown", this.onPointerDownBound);
     window.addEventListener("pointermove", this.onPointerMoveBound);
     window.addEventListener("pointerup", this.onPointerUpBound);
+    window.addEventListener("pointercancel", this.onPointerUpBound);
     canvas.addEventListener("wheel", this.onWheelBound, { passive: false });
     canvas.addEventListener("webglcontextlost", this.onContextLostBound);
     canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
@@ -898,7 +914,33 @@ export class WalkScene {
   }
 
   private handlePointerDown(e: PointerEvent): void {
+    if (e.pointerType === "touch") {
+      this.walkTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try {
+        this.canvas.setPointerCapture?.(e.pointerId);
+      } catch {
+        // ignore synthetic events
+      }
+      if (this.walkTouches.size >= 2) {
+        this.dragLookActive = false;
+        this.activeLookPointerId = null;
+        if (this.walkTouches.size === 2 && this.cameraMode === "third_person") {
+          const pts = [...this.walkTouches.values()];
+          this.lastWalkPinchDist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+        }
+        return;
+      }
+      if (this.activeLookPointerId === null) {
+        this.activeLookPointerId = e.pointerId;
+        this.dragLookActive = true;
+        this.pointerDownPos = { x: e.clientX, y: e.clientY };
+        this.lastDragPos = { x: e.clientX, y: e.clientY };
+      }
+      return;
+    }
+
     if (e.button !== 0 && e.button !== 2) return;
+    this.activeLookPointerId = e.pointerId;
     this.dragLookActive = true;
     this.pointerDownPos = { x: e.clientX, y: e.clientY };
     this.lastDragPos = { x: e.clientX, y: e.clientY };
@@ -910,7 +952,6 @@ export class WalkScene {
 
     // Request Pointer Lock smoothly on mouse click in 1st-person mode (never on touch screens)
     if (
-      e.pointerType !== "touch" &&
       e.button === 0 &&
       this.cameraMode === "first_person" &&
       document.pointerLockElement !== this.canvas
@@ -925,13 +966,34 @@ export class WalkScene {
   }
 
   private handlePointerMove(e: PointerEvent): void {
+    if (e.pointerType === "touch") {
+      if (!this.walkTouches.has(e.pointerId)) return;
+      this.walkTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.walkTouches.size >= 2) {
+        if (this.walkTouches.size === 2 && this.cameraMode === "third_person") {
+          const pts = [...this.walkTouches.values()];
+          const dist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+          const delta = dist - this.lastWalkPinchDist;
+          this.lastWalkPinchDist = dist;
+          this.thirdPersonDist = THREE.MathUtils.clamp(
+            this.thirdPersonDist - delta * 0.018,
+            WALK_CONFIG.thirdPerson.minDist,
+            WALK_CONFIG.thirdPerson.maxDist,
+          );
+          this.requestRender();
+        }
+        return;
+      }
+      if (!this.dragLookActive || this.activeLookPointerId !== e.pointerId) return;
+    }
+
     let dx = 0;
     let dy = 0;
 
     if (this.pointerLocked) {
       dx = e.movementX || 0;
       dy = e.movementY || 0;
-    } else if (this.dragLookActive) {
+    } else if (this.dragLookActive && (this.activeLookPointerId === null || e.pointerId === this.activeLookPointerId)) {
       dx = e.clientX - this.lastDragPos.x;
       dy = e.clientY - this.lastDragPos.y;
       this.lastDragPos = { x: e.clientX, y: e.clientY };
@@ -1004,6 +1066,10 @@ export class WalkScene {
     if (document.hidden) {
       this.keysDown.clear();
       this.dragLookActive = false;
+      this.activeLookPointerId = null;
+      this.walkTouches.clear();
+      this.lastWalkPinchDist = 0;
+      this.virtualMove = { forward: 0, strafe: 0, sprint: false };
       if (this.rafId !== null) {
         cancelAnimationFrame(this.rafId);
         this.rafId = null;
@@ -1292,6 +1358,7 @@ export class WalkScene {
     this.canvas.removeEventListener("pointerdown", this.onPointerDownBound);
     window.removeEventListener("pointermove", this.onPointerMoveBound);
     window.removeEventListener("pointerup", this.onPointerUpBound);
+    window.removeEventListener("pointercancel", this.onPointerUpBound);
     this.canvas.removeEventListener("wheel", this.onWheelBound);
     this.canvas.removeEventListener("webglcontextlost", this.onContextLostBound);
     this.canvas.removeEventListener("webglcontextrestored", this.onContextRestoredBound);

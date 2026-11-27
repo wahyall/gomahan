@@ -31,6 +31,35 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+export function canUseNativeFileShare(): boolean {
+  return typeof navigator !== "undefined" && typeof navigator.share === "function" && typeof File !== "undefined";
+}
+
+export async function shareOrDownloadBlob(
+  blob: Blob,
+  filename: string,
+  title: string,
+  text?: string,
+): Promise<"shared" | "downloaded" | "cancelled"> {
+  if (canUseNativeFileShare()) {
+    try {
+      const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
+      const canShareFiles = typeof navigator.canShare !== "function" || navigator.canShare({ files: [file] });
+      if (canShareFiles) {
+        await navigator.share({ files: [file], title, text });
+        return "shared";
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return "cancelled";
+      }
+      // Fall through to normal browser download if native share fails/unsupported for this MIME
+    }
+  }
+  downloadBlob(blob, filename);
+  return "downloaded";
+}
+
 function escCsv(raw: string): string {
   const str = String(raw);
   const safe = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
@@ -443,6 +472,38 @@ export async function exportPdfDrawingsAndReport(input: ExportBundleInput) {
   downloadBlob(blob, "01_Gambar_Struktur_RAB_5x17.pdf");
 }
 
+export async function sharePdfDrawingsAndReport(input: ExportBundleInput) {
+  const blob = await buildPdfDrawingsAndReportBlob(input);
+  return shareOrDownloadBlob(
+    blob,
+    "01_Gambar_Struktur_RAB_5x17.pdf",
+    `Gambar & RAB ${input.derived.project.name}`,
+    "Paket gambar kerja, struktur SNI, dan ringkasan RAB dari Rumah Studio 3D.",
+  );
+}
+
+export async function shareExcelWorkbook(input: ExportBundleInput) {
+  const blob = await buildExcelWorkbookBlob(input);
+  return shareOrDownloadBlob(
+    blob,
+    "02_RAB_BOQ_Jadwal_5x17.xlsx",
+    `RAB & Jadwal ${input.derived.project.name}`,
+    "Workbook Excel RAB BOQ, BBS besi, dan jadwal belanja material.",
+  );
+}
+
+export async function shareCanvasJpg(
+  canvas: HTMLCanvasElement | null,
+  filename = "04_Render_Rumah_5x17.jpg",
+  fallbackDataUrl?: string | null,
+): Promise<"shared" | "downloaded" | "cancelled" | "unavailable"> {
+  const dataUrl = canvas ? canvas.toDataURL("image/jpeg", 0.94) : fallbackDataUrl ?? null;
+  if (!dataUrl) return "unavailable";
+  const res = await fetch(dataUrl);
+  const blob = await res.blob();
+  return shareOrDownloadBlob(blob, filename, "Render 3D Rumah Studio", "Pratinjau 3D desain rumah.");
+}
+
 export function exportCanvasJpg(
   canvas: HTMLCanvasElement | null,
   filename = "04_Render_Rumah_5x17.jpg",
@@ -459,7 +520,7 @@ export function exportCanvasJpg(
   return true;
 }
 
-export async function exportContractorZipPackage(input: ExportBundleInput) {
+export async function buildContractorZipBlob(input: ExportBundleInput): Promise<Blob> {
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
   const pdfBlob = await buildPdfDrawingsAndReportBlob(input);
@@ -496,6 +557,16 @@ export async function exportContractorZipPackage(input: ExportBundleInput) {
   ].join("\n");
   zip.file("README.txt", readme);
 
-  const zipBlob = await zip.generateAsync({ type: "blob" });
+  return zip.generateAsync({ type: "blob" });
+}
+
+export async function exportContractorZipPackage(input: ExportBundleInput) {
+  const zipBlob = await buildContractorZipBlob(input);
   downloadBlob(zipBlob, `Paket_Kontraktor_Rumah_5x17_${input.isDraft ? "DRAFT" : "FINAL"}.zip`);
+}
+
+export async function shareContractorZipPackage(input: ExportBundleInput) {
+  const zipBlob = await buildContractorZipBlob(input);
+  const filename = `Paket_Kontraktor_Rumah_5x17_${input.isDraft ? "DRAFT" : "FINAL"}.zip`;
+  return shareOrDownloadBlob(zipBlob, filename, `Paket Kontraktor ${input.derived.project.name}`, "Paket lengkap PDF, Excel, CSV, Render & Checklist QC.");
 }

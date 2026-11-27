@@ -43,6 +43,8 @@ import dynamic from "next/dynamic";
 import { toast } from "sonner";
 import { StudioSidePanel } from "@/components/build/StudioSidePanel";
 import { PartInfoPanel } from "@/components/panels/PartInfoPanel";
+import { MobileBuildHud } from "@/components/mobile/MobileBuildHud";
+import { useMobileLayout } from "@/lib/hooks/useMobileLayout";
 
 const StageTimelineBar = dynamic(
   () => import("@/components/panels/StageTimelineBar").then((m) => m.StageTimelineBar),
@@ -81,6 +83,7 @@ interface BuildWorkspaceProps {
   flood: FloodSimulationResult;
   onCanvasReady?: (canvas: HTMLCanvasElement | null) => void;
   onSnapshotCapture?: (dataUrl: string) => void;
+  onOpenProjectMenu?: () => void;
 }
 
 const CATEGORIES: { id: BuildCategoryId; label: string; short: string }[] = [
@@ -289,7 +292,9 @@ export function BuildWorkspace({
   flood,
   onCanvasReady,
   onSnapshotCapture,
+  onOpenProjectMenu,
 }: BuildWorkspaceProps) {
+  const isMobile = useMobileLayout();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<BuildScene | null>(null);
   const onSnapshotRef = useRef(onSnapshotCapture);
@@ -329,6 +334,11 @@ export function BuildWorkspace({
   const placementRotationStep = useBuildModeStore((s) => s.placementRotationStep);
   const placementFlipSwing = useBuildModeStore((s) => s.placementFlipSwing);
   const pendingRoofType = useBuildModeStore((s) => s.pendingRoofType);
+  const freePlacementEnabled = useBuildModeStore((s) => s.freePlacementEnabled);
+  const multiPlaceEnabled = useBuildModeStore((s) => s.multiPlaceEnabled);
+  const mobileDrawMode = useBuildModeStore((s) => s.mobileDrawMode);
+  const mobilePlacementActive = useBuildModeStore((s) => s.mobilePlacementActive);
+  const mobileMoveEntityArmed = useBuildModeStore((s) => s.mobileMoveEntityArmed);
   const savedCameraSnapshot = useBuildModeStore((s) => s.savedCameraSnapshot);
   const rtLook = useBuildModeStore((s) => s.rtLook);
   const renderTier = useBuildModeStore((s) => s.renderTier);
@@ -506,6 +516,11 @@ export function BuildWorkspace({
       placementRotationStep,
       placementFlipSwing,
       pendingRoofType,
+      freePlacementEnabled,
+      multiPlaceEnabled,
+      mobilePlacementActive: isMobile && mobilePlacementActive,
+      mobileDrawMode,
+      mobileMoveEntityArmed,
     });
   }, [
     activeLevel,
@@ -525,6 +540,12 @@ export function BuildWorkspace({
     placementRotationStep,
     placementFlipSwing,
     pendingRoofType,
+    freePlacementEnabled,
+    multiPlaceEnabled,
+    isMobile,
+    mobilePlacementActive,
+    mobileDrawMode,
+    mobileMoveEntityArmed,
   ]);
 
   useEffect(() => {
@@ -835,8 +856,24 @@ export function BuildWorkspace({
             </div>
           )}
 
-          {/* TOP HUD: 3 cleanly separated edge zones */}
-          <div className="pointer-events-none absolute inset-x-0 top-2.5 z-20 flex flex-wrap items-start justify-between gap-2 px-3">
+          {isMobile ? (
+            <MobileBuildHud
+              derived={derived}
+              sceneRef={sceneRef}
+              selectedDetails={selectedDetails}
+              onOpenProjectMenu={() => onOpenProjectMenu?.()}
+              onOpenResetLot={() => setResetModalOpen(true)}
+              onOpenHelp={() => setHelpOpen(true)}
+              onRotateSelected={handleRotateSelected}
+              onDuplicateSelected={handleDuplicateSelected}
+              onDeleteSelected={handleDeleteSelected}
+              onCameraPreset={handleCameraPreset}
+              onFocusFoundation={handleFocusFoundation}
+            />
+          ) : (
+            <>
+              {/* TOP HUD: 3 cleanly separated edge zones */}
+              <div className="pointer-events-none absolute inset-x-0 top-2.5 z-20 flex flex-wrap items-start justify-between gap-2 px-3">
             {/* TOP-LEFT: Unified Simulation/Analysis Panel Switcher + Walk Mode */}
             <div className="pointer-events-auto order-1 flex max-w-full items-center gap-0.5 overflow-x-auto rounded-2xl p-1 studio-glass">
               {panelTabs.map((t) => {
@@ -1580,60 +1617,89 @@ export function BuildWorkspace({
 
       {/* FLOATING PLACEMENT PREVIEW HUD PILL */}
       <PreviewHudBanner />
+      </>
+      )}
 
       {/* ONBOARDING / SHORTCUTS CHEATSHEET */}
       {helpOpen && (
         <div
           data-build-modal="1"
-          className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
           onClick={dismissOnboarding}
         >
           <div
             role="dialog"
-            aria-label="Panduan Cepat Build & Walk Mode"
+            aria-label={isMobile ? "Panduan Gestur Sentuh Mobile" : "Panduan Cepat Build & Walk Mode"}
             onClick={(e) => e.stopPropagation()}
             className="studio-glass pointer-events-auto w-full max-w-md rounded-2xl p-4 text-xs shadow-2xl"
           >
           <div className="flex items-center justify-between gap-2">
             <div>
-              <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-primary">Panduan Cepat</div>
-              <h3 className="text-sm font-bold text-foreground">Kontrol Build &amp; Walk Mode</h3>
+              <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-primary">
+                {isMobile ? "Panduan Gestur Sentuh" : "Panduan Cepat"}
+              </div>
+              <h3 className="text-sm font-bold text-foreground">
+                {isMobile ? "3 Gestur Dasar Desain 3D" : "Kontrol Build & Walk Mode"}
+              </h3>
             </div>
             <button
               type="button"
               onClick={dismissOnboarding}
-              className="rounded-lg bg-[#f2efe8] px-3 py-1.5 text-xs font-semibold text-[#14171c] hover:brightness-95"
+              className="min-h-11 rounded-xl bg-[#f2efe8] px-4 py-1.5 text-xs font-bold text-[#14171c] hover:brightness-95 sm:min-h-0"
             >
               Mulai Desain
             </button>
           </div>
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="rounded-xl border border-white/[0.08] bg-black/20 p-2.5">
-              <div className="mb-1.5 text-[11px] font-semibold text-primary">Build Mode</div>
-              <ul className="space-y-1 text-[10.5px] text-muted-foreground">
-                <li><strong className="text-foreground">Klik Kanan / Q·E</strong>: Putar kamera</li>
-                <li><strong className="text-foreground">WASD / Tengah</strong>: Geser kamera</li>
-                <li><strong className="text-foreground">Scroll</strong>: Zoom ke arah kursor</li>
-                <li><strong className="text-foreground">V / Klik Objek</strong>: Pilih &amp; geser bebas</li>
-                <li><strong className="text-foreground">PgUp / PgDn</strong>: Pindah Lantai</li>
-                <li><strong className="text-foreground">R / K / I</strong>: Putar / Hapus / Pipet</li>
-              </ul>
+          {isMobile ? (
+            <div className="mt-3 space-y-2.5">
+              <div className="rounded-xl border border-white/[0.1] bg-black/25 p-3">
+                <div className="text-xs font-bold text-primary">1. 1 Jari = Putar Kamera 360°</div>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  Geser 1 jari di ruang kosong untuk mengorbit rumah. Ketuk objek untuk memilih, lalu gunakan tombol aksi di bawah.
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/[0.1] bg-black/25 p-3">
+                <div className="text-xs font-bold text-sky-300">2. 2 Jari = Cubit Zoom &amp; Geser</div>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  Cubit dengan 2 jari untuk zoom masuk/keluar, atau seret 2 jari bersamaan untuk menggeser posisi kamera.
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/[0.1] bg-black/25 p-3">
+                <div className="text-xs font-bold text-emerald-300">3. Ketuk + Bangun → Geser → Taruh</div>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  Pilih furnitur, pintu, atau dinding dari tombol <strong>+ Bangun</strong>. Geser pratinjau 3D di atas jari lalu tekan <strong>✓ Taruh</strong>.
+                </p>
+              </div>
             </div>
-            <div className="rounded-xl border border-white/[0.08] bg-black/20 p-2.5">
-              <div className="mb-1.5 text-[11px] font-semibold text-teal-300">Walk Mode Realistis</div>
-              <ul className="space-y-1 text-[10.5px] text-muted-foreground">
-                <li><strong className="text-foreground">Shift + V</strong>: Masuk Walk Mode</li>
-                <li><strong className="text-foreground">WASD + Shift</strong>: Jalan &amp; Lari</li>
-                <li><strong className="text-foreground">Klik Kanvas</strong>: Lihat 360°</li>
-                <li><strong className="text-foreground">V</strong>: 1st Person ↔ 3rd Person</li>
-                <li><strong className="text-foreground">E</strong>: Buka / Tutup pintu terdekat</li>
-                <li><strong className="text-foreground">Esc</strong>: Kembali ke Build Mode</li>
-              </ul>
+          ) : (
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border border-white/[0.08] bg-black/20 p-2.5">
+                <div className="mb-1.5 text-[11px] font-semibold text-primary">Build Mode</div>
+                <ul className="space-y-1 text-[10.5px] text-muted-foreground">
+                  <li><strong className="text-foreground">Klik Kanan / Q·E</strong>: Putar kamera</li>
+                  <li><strong className="text-foreground">WASD / Tengah</strong>: Geser kamera</li>
+                  <li><strong className="text-foreground">Scroll</strong>: Zoom ke arah kursor</li>
+                  <li><strong className="text-foreground">V / Klik Objek</strong>: Pilih &amp; geser bebas</li>
+                  <li><strong className="text-foreground">PgUp / PgDn</strong>: Pindah Lantai</li>
+                  <li><strong className="text-foreground">R / K / I</strong>: Putar / Hapus / Pipet</li>
+                </ul>
+              </div>
+              <div className="rounded-xl border border-white/[0.08] bg-black/20 p-2.5">
+                <div className="mb-1.5 text-[11px] font-semibold text-teal-300">Walk Mode Realistis</div>
+                <ul className="space-y-1 text-[10.5px] text-muted-foreground">
+                  <li><strong className="text-foreground">Shift + V</strong>: Masuk Walk Mode</li>
+                  <li><strong className="text-foreground">WASD + Shift</strong>: Jalan &amp; Lari</li>
+                  <li><strong className="text-foreground">Klik Kanvas</strong>: Lihat 360°</li>
+                  <li><strong className="text-foreground">V</strong>: 1st Person ↔ 3rd Person</li>
+                  <li><strong className="text-foreground">E</strong>: Buka / Tutup pintu terdekat</li>
+                  <li><strong className="text-foreground">Esc</strong>: Kembali ke Build Mode</li>
+                </ul>
+              </div>
             </div>
-          </div>
+          )}
           <div className="mt-3 flex items-center justify-between border-t border-white/[0.08] pt-2.5 text-[10.5px] text-muted-foreground">
             <span>Semua perubahan langsung memperbarui SNI, simulasi &amp; RAB.</span>
-            <button type="button" onClick={dismissOnboarding} className="font-semibold text-primary hover:underline">
+            <button type="button" onClick={dismissOnboarding} className="min-h-9 px-2 font-semibold text-primary hover:underline sm:min-h-0">
               Tutup &amp; ingat
             </button>
           </div>
@@ -1641,6 +1707,8 @@ export function BuildWorkspace({
         </div>
       )}
 
+      {!isMobile && (
+      <>
       {/* BOTTOM DOCK: TELEMETRY + DAYLIGHT PRESETS + UNIFIED CATALOG */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col gap-2 px-3 pb-2.5 lg:flex-row lg:items-end lg:justify-between">
         {/* Bottom-Left Lot Telemetry + Time of Day (shown cleanly on wide viewports) */}
@@ -2113,6 +2181,8 @@ export function BuildWorkspace({
           )}
         </div>
       </div>
+      </>
+      )}
 
       {/* FLOATING PART INSPECTION CARD (Structural / MEP element clicked in 3D) */}
       {selected?.kind === "part" && (

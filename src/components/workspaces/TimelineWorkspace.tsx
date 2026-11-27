@@ -14,12 +14,14 @@ export function TimelineWorkspace({
   derived,
   struct,
   schedule,
+  defaultSubMode = "schedule",
 }: {
   derived: DerivedProjectModel;
   struct: StructuralReport;
   schedule: ScheduleSummary;
+  defaultSubMode?: "schedule" | "site";
 }) {
-  const [subMode, setSubMode] = useState<"schedule" | "site">("schedule");
+  const [subMode, setSubMode] = useState<"schedule" | "site">(defaultSubMode);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
   const project = useStudioStore((s) => s.project);
@@ -59,7 +61,7 @@ export function TimelineWorkspace({
                     type="button"
                     onClick={() => setSubMode("schedule")}
                     className={cn(
-                      "rounded-lg px-2.5 py-1 text-[11px] font-semibold transition",
+                      "min-h-10 rounded-lg px-3 py-1 text-xs font-semibold transition md:min-h-0 md:px-2.5 md:text-[11px]",
                       subMode === "schedule" ? "bg-[#f2efe8] text-[#14171c] shadow-sm" : "text-muted-foreground hover:text-foreground",
                     )}
                   >
@@ -69,11 +71,11 @@ export function TimelineWorkspace({
                     type="button"
                     onClick={() => setSubMode("site")}
                     className={cn(
-                      "inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition",
+                      "inline-flex min-h-10 items-center gap-1 rounded-lg px-3 py-1 text-xs font-semibold transition md:min-h-0 md:px-2.5 md:text-[11px]",
                       subMode === "site" ? "bg-[#f2efe8] text-[#14171c] shadow-sm" : "text-muted-foreground hover:text-foreground",
                     )}
                   >
-                    <HardHat className="h-3 w-3" /> Mode Lapangan
+                    <HardHat className="h-3.5 w-3.5 md:h-3 md:w-3" /> Mode Lapangan
                   </button>
                 </div>
 
@@ -183,23 +185,25 @@ export function TimelineWorkspace({
                         <span className="text-[10px] text-muted-foreground">Rp</span>
                         <input
                           type="number"
+                          inputMode="numeric"
                           min={0}
                           step={500000}
                           aria-label={`Biaya aktual ${st.name}`}
                           value={st.actualCostIdr}
                           onChange={(e) => patchStageProgress(st.id, { actualCost: Math.max(0, Number(e.target.value) || 0) })}
-                          className="h-7 w-24 rounded-lg border border-input bg-[#111418] px-1.5 text-right font-mono text-[11px] tabular-nums focus:border-primary focus:outline-none"
+                          className="min-h-10 w-28 rounded-lg border border-input bg-[#111418] px-2 text-right font-mono text-base tabular-nums focus:border-primary focus:outline-none md:min-h-7 md:h-7 md:w-24 md:px-1.5 md:text-[11px]"
                         />
                       </div>
                       <div className="flex items-center justify-end gap-1">
                         <input
                           type="number"
+                          inputMode="numeric"
                           min={0}
                           max={100}
                           aria-label={`Progres ${st.name}`}
                           value={st.progressPct}
                           onChange={(e) => patchStageProgress(st.id, { progressPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) })}
-                          className="h-7 w-14 rounded-lg border border-input bg-[#111418] px-1.5 text-right font-mono text-[11px] tabular-nums focus:border-primary focus:outline-none"
+                          className="min-h-10 w-16 rounded-lg border border-input bg-[#111418] px-2 text-right font-mono text-base tabular-nums focus:border-primary focus:outline-none md:min-h-7 md:h-7 md:w-14 md:px-1.5 md:text-[11px]"
                         />
                         <span className="text-[10.5px] text-muted-foreground">%</span>
                       </div>
@@ -296,25 +300,34 @@ export function TimelineWorkspace({
             <div className="space-y-3">
               {schedule.stages.map((st) => {
                 const doneChecks = st.qcChecklist.filter((_, qi) => Boolean(doneMap[`${st.id}-${qi}`])).length;
+                const allQcDone = doneChecks === st.qcChecklist.length && st.qcChecklist.length > 0;
                 return (
-                  <StudioCard key={st.id} className="space-y-3">
+                  <StudioCard
+                    key={st.id}
+                    className={cn(
+                      "space-y-3 border-white/20 bg-[#151a22]",
+                      st.progressPct >= 100 && "border-emerald-500/45 bg-[#121e1a]",
+                    )}
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <div className="text-sm font-bold text-foreground">{st.order}. {st.name}</div>
-                        <div className="font-mono text-xs text-muted-foreground tabular-nums">
-                          Jadwal H+{st.startDay} s.d. H+{st.endDay} ({st.durationDays} hari) · QC {doneChecks}/{st.qcChecklist.length}
+                        <div className="text-sm font-bold text-white">{st.order}. {st.name}</div>
+                        <div className="font-mono text-xs text-slate-300 tabular-nums">
+                          H+{st.startDay} s.d. H+{st.endDay} ({st.durationDays} hr) · QC {doneChecks}/{st.qcChecklist.length}
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-bold text-primary tabular-nums">{st.progressPct}%</span>
+                        <span className={cn("font-mono text-base font-extrabold tabular-nums", st.progressPct >= 100 ? "text-emerald-300" : "text-primary")}>
+                          {st.progressPct}%
+                        </span>
                         <button
                           type="button"
                           onClick={() => patchStageProgress(st.id, { progressPct: st.progressPct >= 100 ? 0 : 100 })}
                           className={cn(
-                            "h-9 rounded-xl border px-3 text-xs font-semibold transition",
-                            st.progressPct >= 100
-                              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
-                              : "border-border bg-black/25 text-foreground hover:border-primary",
+                            "min-h-11 rounded-xl border px-3.5 text-xs font-bold transition active:scale-[0.97]",
+                            st.progressPct >= 100 || allQcDone
+                              ? "border-emerald-400/60 bg-emerald-500/20 text-emerald-200"
+                              : "border-white/20 bg-black/35 text-white hover:border-primary",
                           )}
                         >
                           {st.progressPct >= 100 ? "Selesai ✓" : "Tandai 100%"}
@@ -322,11 +335,30 @@ export function TimelineWorkspace({
                       </div>
                     </div>
 
-                    <div className="h-1.5 overflow-hidden rounded-full bg-black/40">
-                      <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${st.progressPct}%` }} />
+                    {/* 1-Hand Quick Progress Buttons (MOB-14 Outdoor High-Contrast) */}
+                    <div className="grid grid-cols-5 gap-1.5">
+                      {[0, 25, 50, 75, 100].map((pct) => (
+                        <button
+                          key={pct}
+                          type="button"
+                          onClick={() => patchStageProgress(st.id, { progressPct: pct })}
+                          className={cn(
+                            "min-h-11 rounded-xl border font-mono text-xs font-bold transition active:scale-[0.97]",
+                            st.progressPct === pct
+                              ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                              : "border-white/15 bg-black/35 text-slate-200 hover:border-white/30",
+                          )}
+                        >
+                          {pct}%
+                        </button>
+                      ))}
                     </div>
 
-                    <div className="space-y-1.5">
+                    <div className="h-2 overflow-hidden rounded-full bg-black/50">
+                      <div className={cn("h-full rounded-full transition-all", st.progressPct >= 100 ? "bg-emerald-400" : "bg-primary")} style={{ width: `${st.progressPct}%` }} />
+                    </div>
+
+                    <div className="space-y-2">
                       {st.qcChecklist.map((q, qi) => {
                         const key = `${st.id}-${qi}`;
                         const checked = Boolean(doneMap[key]);
@@ -336,14 +368,14 @@ export function TimelineWorkspace({
                             type="button"
                             onClick={() => toggleSiteChecklist(key)}
                             className={cn(
-                              "flex min-h-12 w-full items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left text-xs transition active:scale-[0.995]",
+                              "flex min-h-12 w-full items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left text-xs transition active:scale-[0.99]",
                               checked
-                                ? "border-emerald-500/25 bg-emerald-500/[0.06] text-muted-foreground"
-                                : "border-border bg-black/25 text-foreground hover:border-primary/60",
+                                ? "border-emerald-400/40 bg-emerald-500/15 text-emerald-100"
+                                : "border-white/20 bg-black/40 text-white hover:border-primary/60",
                             )}
                           >
-                            {checked ? <CheckSquare className="h-5 w-5 shrink-0 text-emerald-400" /> : <Square className="h-5 w-5 shrink-0 text-muted-foreground" />}
-                            <span className={checked ? "line-through" : "font-medium"}>{q}</span>
+                            {checked ? <CheckSquare className="h-6 w-6 shrink-0 text-emerald-400" /> : <Square className="h-6 w-6 shrink-0 text-slate-300" />}
+                            <span className={checked ? "line-through opacity-80" : "font-semibold"}>{q}</span>
                           </button>
                         );
                       })}

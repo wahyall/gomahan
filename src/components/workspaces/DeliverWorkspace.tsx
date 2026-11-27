@@ -7,11 +7,16 @@ import {
   exportExcelWorkbook,
   exportPdfDrawingsAndReport,
   exportTakeoffCsv,
+  shareCanvasJpg,
+  shareContractorZipPackage,
+  shareExcelWorkbook,
+  sharePdfDrawingsAndReport,
 } from "@/lib/export/exporters";
+import { useMobileLayout } from "@/lib/hooks/useMobileLayout";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 import { cn } from "@/lib/utils";
 import { SectionHeader, StudioCard, StudioSwitch } from "@/components/ui/StudioPrimitives";
-import { AlertTriangle, CheckCircle2, Download, FileArchive, FileSpreadsheet, FileText, Image as ImageIcon } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, FileArchive, FileSpreadsheet, FileText, Image as ImageIcon, Share2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface Props {
@@ -21,6 +26,7 @@ interface Props {
 }
 
 export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: Props) {
+  const isMobile = useMobileLayout();
   const project = useStudioStore((s) => s.project);
   const patchStructuralParams = useStudioStore((s) => s.patchStructuralParams);
   const setWorkspace = useStudioStore((s) => s.setWorkspace);
@@ -103,7 +109,7 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
                 type="text"
                 value={project.structuralParams.drawingRevision}
                 onChange={(e) => patchStructuralParams({ drawingRevision: e.target.value })}
-                className="h-9 w-full rounded-lg border border-input bg-[#111418] px-2.5 font-mono text-xs text-foreground focus:border-primary focus:outline-none"
+                className="min-h-11 w-full rounded-lg border border-input bg-[#111418] px-2.5 font-mono text-base text-foreground focus:border-primary focus:outline-none md:min-h-9 md:h-9 md:text-xs"
               />
             </label>
             <label className="block space-y-1">
@@ -113,7 +119,7 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
                 placeholder="Contoh: Ir. Budi Santoso, ST (SKK Muda)"
                 value={project.structuralParams.reviewerName}
                 onChange={(e) => patchStructuralParams({ reviewerName: e.target.value })}
-                className="h-9 w-full rounded-lg border border-input bg-[#111418] px-2.5 text-xs text-foreground focus:border-primary focus:outline-none"
+                className="min-h-11 w-full rounded-lg border border-input bg-[#111418] px-2.5 text-base text-foreground focus:border-primary focus:outline-none md:min-h-9 md:h-9 md:text-xs"
               />
             </label>
           </div>
@@ -135,13 +141,17 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
             desc="Cover proyek, denah LT1 & LT2 (5×17 m), ringkasan struktur SNI, daftar besi BBS, dan rekap divisi RAB."
             btnLabel={readyToIssue ? "Unduh PDF Final" : "Unduh PDF Draft"}
             onClick={() => void exportPdfDrawingsAndReport(makeBundle(!readyToIssue))}
+            shareLabel={isMobile ? "Bagikan ke WhatsApp / Aplikasi" : undefined}
+            onShare={() => void sharePdfDrawingsAndReport(makeBundle(!readyToIssue))}
           />
           <ExportCard
             icon={<FileSpreadsheet className="h-5 w-5 text-emerald-400" />}
             title="02. Workbook RAB & Jadwal Excel"
             desc="5 sheet berformula: Ringkasan RAB, BOQ AHSP, Takeoff Bata, Bar Bending Schedule, dan Jadwal Belanja."
             btnLabel="Unduh Excel (.xlsx)"
-            onClick={() => exportExcelWorkbook(makeBundle(!readyToIssue))}
+            onClick={() => void exportExcelWorkbook(makeBundle(!readyToIssue))}
+            shareLabel={isMobile ? "Bagikan Excel ke WhatsApp" : undefined}
+            onShare={() => void shareExcelWorkbook(makeBundle(!readyToIssue))}
           />
           <ExportCard
             icon={<Download className="h-5 w-5 text-sky-400" />}
@@ -161,14 +171,24 @@ export function DeliverWorkspace({ bundleBase, getSnapshotDataUrl, getCanvas }: 
                 toast.warning("Snapshot viewport 3D belum tersedia. Buka Build Studio terlebih dahulu.");
               }
             }}
+            shareLabel={isMobile ? "Bagikan Foto 3D" : undefined}
+            onShare={() => {
+              void shareCanvasJpg(getCanvas(), undefined, getSnapshotDataUrl()).then((res) => {
+                if (res === "unavailable") {
+                  toast.warning("Snapshot viewport 3D belum tersedia. Buka Build Studio terlebih dahulu.");
+                }
+              });
+            }}
           />
           <ExportCard
             icon={<FileArchive className="h-5 w-5 text-primary" />}
             title="05. Paket Kontraktor Lengkap (ZIP)"
             desc="Gabungan PDF + Excel + CSV + Render JPG + Checklist QC Mandor dalam satu arsip siap kirim."
             btnLabel={readyToIssue ? "Unduh Paket ZIP FINAL" : "Unduh Paket ZIP (DRAFT)"}
-            primary
-            onClick={() => exportContractorZipPackage(makeBundle(!readyToIssue))}
+            primary={!isMobile}
+            onClick={() => void exportContractorZipPackage(makeBundle(!readyToIssue))}
+            shareLabel="Bagikan Paket ZIP ke WhatsApp"
+            onShare={() => void shareContractorZipPackage(makeBundle(!readyToIssue))}
           />
         </div>
       </div>
@@ -213,6 +233,8 @@ function ExportCard({
   desc,
   btnLabel,
   onClick,
+  shareLabel,
+  onShare,
   primary,
 }: {
   icon: React.ReactNode;
@@ -220,28 +242,41 @@ function ExportCard({
   desc: string;
   btnLabel: string;
   onClick: () => void;
+  shareLabel?: string;
+  onShare?: () => void;
   primary?: boolean;
 }) {
   return (
-    <StudioCard highlight={primary} className="flex flex-col justify-between">
+    <StudioCard highlight={primary || Boolean(shareLabel)} className="flex flex-col justify-between">
       <div>
         <div className="flex items-center gap-2 text-sm font-bold text-foreground">
           {icon} {title}
         </div>
         <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{desc}</p>
       </div>
-      <button
-        type="button"
-        onClick={onClick}
-        className={cn(
-          "mt-4 flex h-9 items-center justify-center gap-1.5 rounded-xl text-xs font-semibold transition active:scale-[0.985]",
-          primary
-            ? "bg-[#f2efe8] text-[#14171c] hover:brightness-95"
-            : "border border-border bg-black/25 text-foreground hover:border-primary/60",
+      <div className="mt-4 flex flex-col gap-2">
+        {shareLabel && onShare && (
+          <button
+            type="button"
+            onClick={onShare}
+            className="flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-3 text-xs font-bold text-slate-950 transition active:scale-[0.985]"
+          >
+            <Share2 className="h-4 w-4" /> {shareLabel}
+          </button>
         )}
-      >
-        <Download className="h-3.5 w-3.5" /> {btnLabel}
-      </button>
+        <button
+          type="button"
+          onClick={onClick}
+          className={cn(
+            "flex min-h-11 items-center justify-center gap-1.5 rounded-xl text-xs font-semibold transition active:scale-[0.985] md:min-h-9 md:h-9",
+            primary
+              ? "bg-[#f2efe8] text-[#14171c] hover:brightness-95"
+              : "border border-border bg-black/25 text-foreground hover:border-primary/60",
+          )}
+        >
+          <Download className="h-3.5 w-3.5" /> {btnLabel}
+        </button>
+      </div>
     </StudioCard>
   );
 }

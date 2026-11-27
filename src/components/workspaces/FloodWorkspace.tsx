@@ -307,7 +307,29 @@ export function FloodWorkspace({ derived, flood }: { derived: DerivedProjectMode
           <div className="flex items-center gap-2 border-b border-border px-3.5 py-2.5 text-xs font-semibold">
             <Waves className="h-4 w-4 text-cyan-400" /> Proyeksi Ketinggian Genangan pada Banjir {flood.streetFloodCm} cm
           </div>
-          <div className="overflow-x-auto">
+          <div className="grid grid-cols-1 gap-2 p-3 @lg:hidden">
+            {flood.zoneImpacts.map((z) => (
+              <div key={z.zoneName} className="rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-foreground">{z.zoneName}</span>
+                  <span
+                    className={cn(
+                      "rounded-lg px-2 py-0.5 text-[10.5px] font-bold",
+                      z.status === "KERING" ? "bg-emerald-500/15 text-emerald-300" : z.status === "TERGENANG" ? "bg-amber-500/15 text-amber-300" : "bg-rose-500/15 text-rose-300",
+                    )}
+                  >
+                    {z.status}
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center justify-between font-mono text-[11px] text-muted-foreground tabular-nums">
+                  <span>Peil +{z.floorPeilCm} cm</span>
+                  <span className="font-bold text-foreground">Genangan {z.waterDepthInsideCm} cm</span>
+                </div>
+                <div className="mt-1 text-[10.5px] text-muted-foreground">{z.entryCause}</div>
+              </div>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto @lg:block">
             <table className="w-full text-xs">
               <thead className="bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                 <tr>

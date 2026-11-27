@@ -62,11 +62,14 @@ export class BuildCameraController {
   private readonly _up = new THREE.Vector3(0, 1, 0);
   private readonly _wheelNdc = new THREE.Vector2(0, 0);
 
-  // Touch pinch / 2-finger orbit & pan state
+  // Touch pinch / 2-finger pan & 1-finger orbit state
   private activeTouches = new Map<number, { x: number; y: number }>();
   private lastPinchDist = 0;
   private lastTouchMid: { x: number; y: number } | null = null;
-  private lastTouchAngle = 0;
+  private twoFingerStartDist = 0;
+  private twoFingerStartMid: { x: number; y: number } | null = null;
+  private twoFingerMode: "none" | "pinch" | "pan" = "none";
+  private cameraLocked = false;
 
   private readonly onKeyDownBound: (e: KeyboardEvent) => void;
   private readonly onKeyUpBound: (e: KeyboardEvent) => void;
@@ -102,6 +105,10 @@ export class BuildCameraController {
       this.dragMode = "none";
       this.cursorInside = false;
       this.activeTouches.clear();
+      this.twoFingerMode = "none";
+      this.twoFingerStartMid = null;
+      this.lastTouchMid = null;
+      this.cameraLocked = false;
     };
 
     window.addEventListener("keydown", this.onKeyDownBound);
@@ -110,6 +117,7 @@ export class BuildCameraController {
     domElement.addEventListener("pointerdown", this.onPointerDownBound);
     window.addEventListener("pointermove", this.onPointerMoveBound);
     window.addEventListener("pointerup", this.onPointerUpBound);
+    window.addEventListener("pointercancel", this.onPointerUpBound);
     domElement.addEventListener("pointerleave", this.onPointerLeaveBound);
     domElement.addEventListener("wheel", this.onWheelBound, { passive: false });
     domElement.addEventListener("contextmenu", this.onContextMenuBound);
@@ -122,9 +130,18 @@ export class BuildCameraController {
     this.domElement.removeEventListener("pointerdown", this.onPointerDownBound);
     window.removeEventListener("pointermove", this.onPointerMoveBound);
     window.removeEventListener("pointerup", this.onPointerUpBound);
+    window.removeEventListener("pointercancel", this.onPointerUpBound);
     this.domElement.removeEventListener("pointerleave", this.onPointerLeaveBound);
     this.domElement.removeEventListener("wheel", this.onWheelBound);
     this.domElement.removeEventListener("contextmenu", this.onContextMenuBound);
+  }
+
+  public setCameraLocked(locked: boolean): void {
+    this.cameraLocked = locked;
+  }
+
+  public get activeTouchCount(): number {
+    return this.activeTouches.size;
   }
 
   public get activeCamera(): THREE.Camera {
@@ -294,11 +311,17 @@ export class BuildCameraController {
       this.activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.activeTouches.size === 2) {
         const pts = [...this.activeTouches.values()];
-        this.lastPinchDist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
-        this.lastTouchMid = { x: (pts[0]!.x + pts[1]!.x) * 0.5, y: (pts[0]!.y + pts[1]!.y) * 0.5 };
-        this.lastTouchAngle = Math.atan2(pts[1]!.y - pts[0]!.y, pts[1]!.x - pts[0]!.x);
+        const dist = Math.hypot(pts[1]!.x - pts[0]!.x, pts[1]!.y - pts[0]!.y);
+        const mid = { x: (pts[0]!.x + pts[1]!.x) * 0.5, y: (pts[0]!.y + pts[1]!.y) * 0.5 };
+        this.lastPinchDist = dist;
+        this.lastTouchMid = mid;
+        this.twoFingerStartDist = dist;
+        this.twoFingerStartMid = mid;
+        this.twoFingerMode = "none";
       } else {
         this.lastTouchMid = null;
+        this.twoFingerStartMid = null;
+        this.twoFingerMode = "none";
       }
       return;
     }
@@ -321,34 +344,37 @@ export class BuildCameraController {
       const dy = e.clientY - prev.y;
       this.activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.activeTouches.size === 1) {
-        this.panByPixels(dx, dy);
+        if (this.cameraLocked) return;
+        this.goalYaw -= dx * 0.0065;
+        const minPitch = this.allowUnderground ? -1.05 : 0.14;
+        this.goalPitch = Math.max(minPitch, Math.min(1.5, this.goalPitch + dy * 0.0055));
       } else if (this.activeTouches.size === 2) {
         const pts = [...this.activeTouches.values()];
         const p0 = pts[0]!;
         const p1 = pts[1]!;
         const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-        const delta = dist - this.lastPinchDist;
-        this.lastPinchDist = dist;
-        this.goalDistance = Math.max(3.4, Math.min(36, this.goalDistance - delta * 0.04));
+        const mid = { x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5 };
 
-        // Twist angle -> yaw orbit + vertical midpoint drag -> tilt/pan
-        const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
-        let dAngle = angle - this.lastTouchAngle;
-        while (dAngle > Math.PI) dAngle -= Math.PI * 2;
-        while (dAngle < -Math.PI) dAngle += Math.PI * 2;
-        this.lastTouchAngle = angle;
-        if (Math.abs(dAngle) < 0.45) {
-          this.goalYaw -= dAngle * 1.1;
+        if (this.twoFingerMode === "none" && this.twoFingerStartMid) {
+          const pinchSpan = Math.abs(dist - this.twoFingerStartDist);
+          const panSpan = Math.hypot(mid.x - this.twoFingerStartMid.x, mid.y - this.twoFingerStartMid.y);
+          if (pinchSpan > 12 || panSpan > 14) {
+            this.twoFingerMode = pinchSpan >= panSpan ? "pinch" : "pan";
+          }
         }
 
-        const mid = { x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5 };
-        if (this.lastTouchMid) {
+        if (this.twoFingerMode === "pinch" || this.twoFingerMode === "none") {
+          const delta = dist - this.lastPinchDist;
+          this.goalDistance = Math.max(3.4, Math.min(36, this.goalDistance - delta * 0.045));
+        }
+
+        if (this.twoFingerMode === "pan" && this.lastTouchMid) {
           const mdx = mid.x - this.lastTouchMid.x;
           const mdy = mid.y - this.lastTouchMid.y;
-          this.panByPixels(mdx, mdy * 0.55);
-          const minPitch = this.allowUnderground ? -1.05 : 0.14;
-          this.goalPitch = Math.max(minPitch, Math.min(1.5, this.goalPitch - mdy * 0.0028));
+          this.panByPixels(mdx, mdy);
         }
+
+        this.lastPinchDist = dist;
         this.lastTouchMid = mid;
       }
       return;
@@ -398,8 +424,15 @@ export class BuildCameraController {
     }
     if (e.pointerType === "touch") {
       this.activeTouches.delete(e.pointerId);
-      this.lastPinchDist = 0;
-      this.lastTouchMid = null;
+      this.twoFingerMode = "none";
+      this.twoFingerStartMid = null;
+      if (this.activeTouches.size < 2) {
+        this.lastPinchDist = 0;
+        this.lastTouchMid = null;
+      }
+      if (this.activeTouches.size === 0) {
+        this.cameraLocked = false;
+      }
       return;
     }
     this.rightDragPending = false;

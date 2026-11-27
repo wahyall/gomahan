@@ -271,7 +271,35 @@ export function AirflowWorkspace({ derived, airflow }: { derived: DerivedProject
           <div className="border-b border-border px-3.5 py-2.5 text-xs font-semibold">
             Metrik Kenyamanan Termal per Zona (ASHRAE 55 / SNI)
           </div>
-          <div className="overflow-x-auto">
+          <div className="grid grid-cols-1 gap-2 p-3 @lg:hidden">
+            {airflow.zones.map((z) => (
+              <div key={z.roomId} className="rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-foreground">LT{z.levelIndex + 1} · {z.roomName}</span>
+                  <span
+                    className={cn(
+                      "rounded-lg px-2 py-0.5 text-[10.5px] font-bold",
+                      z.comfortStatus === "SEJUK AC"
+                        ? "bg-sky-500/15 text-sky-300"
+                        : z.comfortStatus === "NYAMAN"
+                          ? "bg-emerald-500/15 text-emerald-300"
+                          : z.comfortStatus === "HANGAT"
+                            ? "bg-amber-500/15 text-amber-300"
+                            : "bg-rose-500/15 text-rose-300",
+                    )}
+                  >
+                    {z.comfortStatus}
+                  </span>
+                </div>
+                <div className="mt-1.5 grid grid-cols-3 gap-2 font-mono text-[11px] tabular-nums">
+                  <div><span className="text-muted-foreground">Terasa:</span> <strong className="text-foreground">{z.effectiveTempC.toFixed(1)}°C</strong></div>
+                  <div><span className="text-muted-foreground">ACH:</span> <strong className="text-foreground">{z.ach.toFixed(1)}</strong></div>
+                  <div className="text-right"><span className="text-muted-foreground">CO₂:</span> <strong className="text-foreground">{z.co2Ppm}</strong></div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="hidden overflow-x-auto @lg:block">
             <table className="w-full text-xs">
               <thead className="bg-[#1a1f28] text-[10.5px] font-semibold text-muted-foreground">
                 <tr>

@@ -26,33 +26,33 @@ export function StageTimelineBar() {
   return (
     <div className="no-print safe-pb shrink-0 border-t border-border bg-[#13171d] px-3 py-2 [@media(max-height:480px)]:hidden">
       <div className="flex items-center gap-2.5">
-        <div className="flex items-center gap-1 rounded-lg bg-black/25 p-0.5">
+        <div className="flex items-center gap-1.5 rounded-lg bg-black/25 p-1">
           <button
             type="button"
             onClick={() => {
               if (!playing && stage === 0) patchView({ stage: 1 });
               setPlaying(!playing);
             }}
-            className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground transition hover:brightness-110"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:brightness-110 sm:min-h-7 sm:min-w-7 sm:h-7 sm:w-7"
             title={playing ? "Jeda Simulasi Tahapan" : `Putar Urutan Pembangunan ${totalStages} Tahap`}
           >
-            {playing ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+            {playing ? <Pause className="h-4 w-4 sm:h-3 sm:w-3" /> : <Play className="h-4 w-4 sm:h-3 sm:w-3" />}
           </button>
           <button
             type="button"
             onClick={() => patchView({ stage: Math.max(0, stage - 1) })}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/[0.08] hover:text-foreground sm:min-h-7 sm:min-w-7 sm:h-7 sm:w-7"
             title="Tahap Sebelumnya"
           >
-            <SkipBack className="h-3 w-3" />
+            <SkipBack className="h-4 w-4 sm:h-3 sm:w-3" />
           </button>
           <button
             type="button"
             onClick={() => patchView({ stage: stage >= totalStages ? 0 : stage + 1 })}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-white/[0.08] hover:text-foreground sm:min-h-7 sm:min-w-7 sm:h-7 sm:w-7"
             title="Tahap Berikutnya"
           >
-            <SkipForward className="h-3 w-3" />
+            <SkipForward className="h-4 w-4 sm:h-3 sm:w-3" />
           </button>
         </div>
 
@@ -81,7 +81,7 @@ export function StageTimelineBar() {
           type="button"
           onClick={() => patchView({ stage: 0 })}
           className={cn(
-            "flex h-8 shrink-0 flex-col justify-center rounded-lg border px-2.5 text-left leading-none transition",
+            "flex min-h-11 shrink-0 flex-col justify-center rounded-lg border px-3 text-left leading-none transition sm:min-h-8 sm:h-8 sm:px-2.5",
             stage === 0
               ? "border-[#f2efe8] bg-[#f2efe8] text-[#14171c]"
               : "border-white/[0.08] bg-black/25 text-muted-foreground hover:text-foreground",
@@ -96,7 +96,7 @@ export function StageTimelineBar() {
             type="button"
             onClick={() => patchView({ stage: st.no })}
             className={cn(
-              "flex h-8 shrink-0 flex-col justify-center rounded-lg border px-2.5 text-left leading-none transition",
+              "flex min-h-11 shrink-0 flex-col justify-center rounded-lg border px-3 text-left leading-none transition sm:min-h-8 sm:h-8 sm:px-2.5",
               stage === st.no
                 ? "border-primary bg-primary text-primary-foreground"
                 : "border-white/[0.08] bg-black/25 text-muted-foreground hover:border-white/20 hover:text-foreground",

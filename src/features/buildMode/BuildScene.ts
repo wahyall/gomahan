@@ -135,7 +135,21 @@ export interface BuildViewOptions {
   placementRotationStep: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
   placementFlipSwing?: 1 | -1;
   pendingRoofType?: RoofType | null;
+  freePlacementEnabled?: boolean;
+  multiPlaceEnabled?: boolean;
+  mobilePlacementActive?: boolean;
+  mobileDrawMode?: "draw" | "orbit";
+  mobileMoveEntityArmed?: boolean;
 }
+
+type PointerCoords = {
+  clientX: number;
+  clientY: number;
+  altKey?: boolean;
+  shiftKey?: boolean;
+};
+
+const POINT_PLACEMENT_TOOLS = new Set<BuildToolId>(["opening", "stair", "furniture", "hvac", "light"]);
 
 let seq = 0;
 function uid(prefix: string): string {
@@ -356,6 +370,11 @@ export class BuildScene {
     placementRotationStep: 0,
     placementFlipSwing: 1,
     pendingRoofType: null,
+    freePlacementEnabled: false,
+    multiPlaceEnabled: false,
+    mobilePlacementActive: false,
+    mobileDrawMode: "draw",
+    mobileMoveEntityArmed: false,
   };
 
   // Interactive Tool Drag / Move State
@@ -457,6 +476,8 @@ export class BuildScene {
   private lastWorldPos = { x: 2.5, z: 8.5, inBounds: false };
   private pointerDownPos = { x: 0, y: 0 };
   private rightDownPos: { x: number; y: number } | null = null;
+  private mobileGhostDragging = false;
+  private stagedClientPos: { x: number; y: number } | null = null;
 
   private readonly validMat = new THREE.MeshBasicMaterial({ color: "#2ed68d", transparent: true, opacity: 0.45, depthWrite: false });
   private readonly invalidMat = new THREE.MeshBasicMaterial({ color: "#ef5350", transparent: true, opacity: 0.52, depthWrite: false });
@@ -495,7 +516,7 @@ export class BuildScene {
   /** OPT-14: scratch face normal for raycast hits — was `new THREE.Vector3()` per candidate. */
   private readonly _hitNormal = new THREE.Vector3();
   private previewRafId: number | null = null;
-  private pendingPreviewEvent: PointerEvent | null = null;
+  private pendingPreviewEvent: PointerCoords | null = null;
   private pendingPreviewHits: THREE.Intersection[] | undefined = undefined;
 
   private resizeObserver: ResizeObserver | null = null;
@@ -776,6 +797,7 @@ export class BuildScene {
     canvas.addEventListener("pointermove", this.onPointerMoveBound);
     canvas.addEventListener("pointerdown", this.onPointerDownBound);
     canvas.addEventListener("pointerup", this.onPointerUpBound);
+    canvas.addEventListener("pointercancel", this.onPointerUpBound);
     canvas.addEventListener("pointerleave", this.onPointerLeaveBound);
     canvas.addEventListener("webglcontextlost", this.onContextLostBound);
     canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
@@ -819,6 +841,7 @@ export class BuildScene {
     this.canvas.removeEventListener("pointermove", this.onPointerMoveBound);
     this.canvas.removeEventListener("pointerdown", this.onPointerDownBound);
     this.canvas.removeEventListener("pointerup", this.onPointerUpBound);
+    this.canvas.removeEventListener("pointercancel", this.onPointerUpBound);
     this.canvas.removeEventListener("pointerleave", this.onPointerLeaveBound);
     this.canvas.removeEventListener("webglcontextlost", this.onContextLostBound);
     this.canvas.removeEventListener("webglcontextrestored", this.onContextRestoredBound);
@@ -1291,6 +1314,9 @@ transformed.y = rainY;`,
     this.draggingMesh = null;
     this.dragPendingCommit = null;
     this.isBrushDown = false;
+    this.mobileGhostDragging = false;
+    this.stagedClientPos = null;
+    this.cameraCtrl.setCameraLocked(false);
     this.brushStrokeCells.clear();
     this.terrainScratch = null;
     if (this.liveTerrainTempMesh) {
@@ -1317,7 +1343,7 @@ transformed.y = rainY;`,
     }
   }
 
-  private scheduleToolPreview(e: PointerEvent, precomputedHits?: THREE.Intersection[]): void {
+  private scheduleToolPreview(e: PointerCoords, precomputedHits?: THREE.Intersection[]): void {
     this.pendingPreviewEvent = e;
     this.pendingPreviewHits = precomputedHits;
     if (this.previewRafId !== null) return;
@@ -1331,6 +1357,81 @@ transformed.y = rainY;`,
       this.updateToolPreview(ev, hits);
       this.requestRender();
     });
+  }
+
+  private getDefaultMobileStageClientPos(): PointerCoords {
+    const rect = this.getCanvasRect();
+    if (this.stagedClientPos) {
+      return {
+        clientX: this.stagedClientPos.x,
+        clientY: this.stagedClientPos.y,
+        altKey: Boolean(this.viewOpts.freePlacementEnabled),
+        shiftKey: Boolean(this.viewOpts.multiPlaceEnabled),
+      };
+    }
+    const tgt = this.cameraCtrl.getCurrentTarget();
+    this._v1.set(tgt.x, this.getActiveFloorY(), tgt.z).project(this.cameraCtrl.activeCamera);
+    const clientX = rect.left + (this._v1.x * 0.5 + 0.5) * rect.width;
+    const clientY = rect.top + (-this._v1.y * 0.5 + 0.5) * rect.height;
+    return {
+      clientX: THREE.MathUtils.clamp(clientX, rect.left + 24, rect.right - 24),
+      clientY: THREE.MathUtils.clamp(clientY, rect.top + 24, rect.bottom - 24),
+      altKey: Boolean(this.viewOpts.freePlacementEnabled),
+      shiftKey: Boolean(this.viewOpts.multiPlaceEnabled),
+    };
+  }
+
+  private syncLastWorldPosFromClient(clientX: number, clientY: number): void {
+    if (!this.derived) return;
+    const rect = this.getCanvasRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    this.pointerNdc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
+    const hit = this.raycaster.ray.intersectPlane(this.activeFloorPlane, this.hitPoint);
+    if (!hit) return;
+    const fineCs = 0.25;
+    const fineCols = Math.round(this.derived.project.site.width / fineCs);
+    const fineRows = Math.round(this.derived.project.site.depth / fineCs);
+    const fineGx = Math.floor(hit.x / fineCs);
+    const fineGz = Math.floor(hit.z / fineCs);
+    const inBounds = fineGx >= 0 && fineGx < fineCols && fineGz >= 0 && fineGz < fineRows;
+    this.lastWorldPos = { x: hit.x, z: hit.z, inBounds };
+  }
+
+  public startMobilePlacement(): void {
+    if (!this.derived || !POINT_PLACEMENT_TOOLS.has(this.viewOpts.activeTool)) return;
+    this.stagedClientPos = null;
+    const pos = this.getDefaultMobileStageClientPos();
+    this.stagedClientPos = { x: pos.clientX, y: pos.clientY };
+    this.syncLastWorldPosFromClient(pos.clientX, pos.clientY);
+    this.updateToolPreview(pos);
+    this.requestRender();
+  }
+
+  public refreshMobilePlacement(): void {
+    if (!this.derived || !this.viewOpts.mobilePlacementActive || !POINT_PLACEMENT_TOOLS.has(this.viewOpts.activeTool)) return;
+    const pos = this.getDefaultMobileStageClientPos();
+    this.stagedClientPos = { x: pos.clientX, y: pos.clientY };
+    this.syncLastWorldPosFromClient(pos.clientX, pos.clientY);
+    this.updateToolPreview(pos);
+    this.requestRender();
+  }
+
+  public confirmMobilePlacement(): boolean {
+    if (!this.derived || !POINT_PLACEMENT_TOOLS.has(this.viewOpts.activeTool)) return false;
+    const pos = this.getDefaultMobileStageClientPos();
+    this.syncLastWorldPosFromClient(pos.clientX, pos.clientY);
+    const placed = this.commitPointPlacement(pos, Boolean(this.viewOpts.multiPlaceEnabled));
+    if (placed && this.viewOpts.multiPlaceEnabled) {
+      const rect = this.getCanvasRect();
+      const nextX = Math.min(rect.right - 28, pos.clientX + 26);
+      const nextPos: PointerCoords = { ...pos, clientX: nextX };
+      this.stagedClientPos = { x: nextX, y: pos.clientY };
+      this.syncLastWorldPosFromClient(nextX, pos.clientY);
+      this.updateToolPreview(nextPos);
+      this.requestRender();
+    }
+    return placed;
   }
 
   public setSelected(selected: SelectionTarget): void {
@@ -1709,6 +1810,10 @@ transformed.y = rainY;`,
       this.viewOpts.activeTool !== opts.activeTool ||
       this.viewOpts.selectedCatalogId !== opts.selectedCatalogId ||
       (this.viewOpts.selectedSwatchHex ?? null) !== (opts.selectedSwatchHex ?? null);
+    const placementVisualChanged =
+      this.viewOpts.placementRotationStep !== opts.placementRotationStep ||
+      this.viewOpts.placementFlipSwing !== opts.placementFlipSwing ||
+      Boolean(this.viewOpts.freePlacementEnabled) !== Boolean(opts.freePlacementEnabled);
 
     this.viewOpts = opts;
     this.neighborsGroup.visible = opts.neighborsVisible && (this.studioView?.showNeighbors ?? true);
@@ -1719,6 +1824,15 @@ transformed.y = rainY;`,
     if (toolChanged) {
       this.cancelActivePreview();
       if (this.derived) this.updateSelectionRing(this.derived, this.selected);
+      if (opts.mobilePlacementActive && POINT_PLACEMENT_TOOLS.has(opts.activeTool)) {
+        queueMicrotask(() => {
+          if (!this.disposed) this.startMobilePlacement();
+        });
+      }
+    } else if (placementVisualChanged && opts.mobilePlacementActive && POINT_PLACEMENT_TOOLS.has(opts.activeTool)) {
+      queueMicrotask(() => {
+        if (!this.disposed) this.refreshMobilePlacement();
+      });
     }
     if ((bricksChanged || roofPreviewChanged) && this.derived && this.struct) {
       const previewRoofType =
@@ -2666,7 +2780,7 @@ transformed.y = rainY;`,
     return this.canvasRect;
   }
 
-  private collectRayHits(e: PointerEvent): THREE.Intersection[] {
+  private collectRayHits(e: PointerCoords): THREE.Intersection[] {
     const rect = this.getCanvasRect();
     if (rect.width <= 0 || rect.height <= 0) return [];
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
@@ -2689,7 +2803,7 @@ transformed.y = rainY;`,
   }
 
   private raycastHit(
-    e: PointerEvent,
+    e: PointerCoords,
     ignoreParts = true,
     precomputedHits?: THREE.Intersection[],
   ): {
@@ -3063,7 +3177,7 @@ transformed.y = rainY;`,
   }
 
   private raycastSurfaceForPlacement(
-    e: PointerEvent,
+    e: PointerCoords,
     lvIdx: 0 | 1,
     mountKind: "wall" | "ceiling" | "surface",
     wallOffset: number,
@@ -3080,7 +3194,7 @@ transformed.y = rainY;`,
     wallSnap?: ReturnType<typeof snapOpeningToProjectWalls>;
     altBypass: boolean;
   } {
-    const altBypass = e.altKey || this.altHeld;
+    const altBypass = Boolean(e.altKey || this.altHeld || this.viewOpts.freePlacementEnabled);
     if (!this.derived) {
       return { x: 2.5, y: defaultElev, z: 8.5, valid: false, surfaceLabel: "Luar area", altBypass };
     }
@@ -3232,7 +3346,7 @@ transformed.y = rainY;`,
     };
   }
 
-  private updateToolPreview(e: PointerEvent, precomputedHits?: THREE.Intersection[]): void {
+  private updateToolPreview(e: PointerCoords, precomputedHits?: THREE.Intersection[]): void {
     if (!this.derived) return;
     this.clearPreviewMeshes();
 
@@ -3303,7 +3417,7 @@ transformed.y = rainY;`,
       const hitRes = this.raycastHit(e, true, precomputedHits);
       if (tool === "wall_paint") {
         if (hitRes?.sel.kind === "wall") {
-          const target = this.resolveWallPaintTarget(hitRes, e.shiftKey);
+          const target = this.resolveWallPaintTarget(hitRes, Boolean(e.shiftKey));
           this._hoverBox.setFromObject(hitRes.obj);
           this._hoverBox.getSize(this._hoverSize);
           this._hoverBox.getCenter(this._hoverCenter);
@@ -3648,10 +3762,199 @@ transformed.y = rainY;`,
     this.actions.onPreviewHud(null);
   }
 
+  private commitPointPlacement(e: PointerCoords, keepTool: boolean): boolean {
+    if (!this.derived) return false;
+    const project = this.derived.project;
+    const cs = 0.5;
+    const cols = Math.round(project.site.width / cs);
+    const rows = Math.round(project.site.depth / cs);
+    const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
+    const lv = project.levels[lvIdx];
+    if (!lv || this.viewOpts.activeLevel === 2) {
+      simsAudio.play("warning");
+      return false;
+    }
+    const tool = this.viewOpts.activeTool;
+    const item = this.getActiveCatalogItem();
+
+    if (tool === "opening") {
+      const [ow, oh] = item.sizeM ?? [0.9, 2.15, 0.14];
+      const kind = item.openingKind ?? "door";
+      const sill = kind === "window" ? 0.9 : kind === "vent" ? 2.45 : 0;
+      const snap = snapOpeningToProjectWalls(lv.walls, this.lastWorldPos.x, this.lastWorldPos.z, ow, undefined, sill, oh);
+      if (!snap || !snap.valid) {
+        simsAudio.play("warning");
+        return false;
+      }
+      const created = createOpeningForWall(uid("op"), kind, snap.offsetM, ow, oh, sill, item.name);
+      created.swing = this.viewOpts.placementFlipSwing ?? 1;
+      this.actions.onAddOpening(lvIdx, snap.wall.id, created);
+      simsAudio.play("place");
+      this.actions.onPlacementCommitted?.(tool, keepTool);
+      return true;
+    }
+
+    if (tool === "stair") {
+      const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.lastWorldPos.x / cs)));
+      const gz = Math.max(0, Math.min(rows - 1, Math.floor(this.lastWorldPos.z / cs)));
+      const [wC, lC] = item.footprintCells ?? [2, 8];
+      const rq = (this.viewOpts.placementRotationStep % 4) as 0 | 1 | 2 | 3;
+      const check = validateProjectStairPlacement(
+        lv.stairs,
+        lvIdx,
+        gx,
+        gz,
+        wC,
+        lC,
+        rq,
+        cols,
+        rows,
+        cs,
+        lv.walls,
+        project.buildExtras?.pools ?? [],
+      );
+      if (!check.valid) {
+        simsAudio.play("warning");
+        return false;
+      }
+      this.actions.onAddStair(
+        lvIdx,
+        {
+          id: uid("stair"),
+          name: item.name,
+          start: check.start,
+          end: check.end,
+          width: wC * cs,
+          floorHeight: lv.height,
+          riserCount: 18,
+          treadDepth: 0.25,
+          shape: "straight",
+          landingDepth: 1.0,
+        },
+        check.voidPoly,
+      );
+      simsAudio.play("place");
+      this.actions.onPlacementCommitted?.(tool, keepTool);
+      return true;
+    }
+
+    if (tool === "furniture" || tool === "hvac" || tool === "light") {
+      const mountKind = this.getMountKind(tool, item.hvacMeta?.type, item.lightMeta?.type);
+      const wallOffset =
+        item.hvacMeta?.type === "ac_split" ? 0.12 : item.hvacMeta?.type === "wall_fan" ? 0.03 : 0.05;
+      const defaultElev =
+        tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
+      const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
+      const [sx, , sz] = item.sizeM ?? [0.5, 0.5, 0.5];
+      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationStep * (Math.PI / 4);
+      const fpCheck = placed.valid
+        ? validateObjectFootprint({
+            project,
+            levelIndex: lvIdx,
+            x: placed.x,
+            y: placed.y,
+            z: placed.z,
+            sizeX: sx,
+            sizeZ: sz,
+            rotationY: rot,
+            mountKind,
+            tool,
+            catalogId: item.materialId,
+            category: item.furnitureCategory,
+            hostFurniture: placed.hostFurniture,
+            wallSnap: placed.wallSnap,
+            altBypass: placed.altBypass,
+          })
+        : { valid: false };
+      if (!placed.valid || !fpCheck.valid) {
+        simsAudio.play("warning");
+        return false;
+      }
+      if (tool === "furniture") {
+        const [fx, fy, fz] = item.sizeM ?? [1.0, 0.8, 0.8];
+        this.actions.onAddFurniture(lvIdx, {
+          id: uid("furn"),
+          catalogId: item.materialId ?? "sofa_l",
+          name: item.name,
+          category: item.furnitureCategory ?? "seating",
+          position: { x: placed.x, y: placed.y, z: placed.z },
+          size: { x: fx, y: fy, z: fz },
+          rotationY: rot,
+          colorHex: this.viewOpts.selectedSwatchHex ?? item.swatchHex,
+          accentHex: item.accentHex,
+        });
+      } else if (tool === "hvac" && item.hvacMeta) {
+        this.actions.onAddHvac(lvIdx, {
+          id: uid("hv"),
+          name: item.name,
+          type: item.hvacMeta.type,
+          position: { x: placed.x, y: placed.y, z: placed.z },
+          rotationY: rot,
+          pkRating: item.hvacMeta.pkRating,
+          flowRateM3h: item.hvacMeta.flowRateM3h,
+          coolingCapacityW: item.hvacMeta.coolingCapacityW,
+          powerW: item.hvacMeta.powerW,
+          setpointC: item.hvacMeta.setpointC,
+          speedLevel: 2,
+          on: true,
+        });
+      } else if (tool === "light" && item.lightMeta) {
+        this.actions.onAddLight(lvIdx, {
+          id: uid("lgt"),
+          name: item.name,
+          type: item.lightMeta.type,
+          position: { x: placed.x, y: placed.y, z: placed.z },
+          rotationY: placed.rotationY !== undefined ? placed.rotationY : rot,
+          lumens: item.lightMeta.lumens,
+          colorTempK: item.lightMeta.colorTempK,
+          beamAngleDeg: item.lightMeta.beamAngleDeg,
+          dimmer: 1,
+          on: true,
+        });
+      }
+      simsAudio.play("place");
+      this.actions.onPlacementCommitted?.(tool, keepTool);
+      return true;
+    }
+
+    return false;
+  }
+
   private handlePointerMove(e: PointerEvent): void {
     if (!this.derived || !this.hoverTileMesh) return;
     const rect = this.getCanvasRect();
     if (rect.width <= 0 || rect.height <= 0) return;
+
+    if (e.pointerType === "touch") {
+      if (this.cameraCtrl.activeTouchCount >= 2) {
+        if (
+          this.dragStartVertex ||
+          this.dragStartCell ||
+          this.sledgeDragStart ||
+          this.isBrushDown ||
+          this.mobileGhostDragging ||
+          this.pushPullDragState ||
+          this.openingDragState ||
+          this.draggingEntity
+        ) {
+          this.cancelActivePreview();
+        }
+        return;
+      }
+      if (this.mobileGhostDragging && this.viewOpts.mobilePlacementActive && POINT_PLACEMENT_TOOLS.has(this.viewOpts.activeTool)) {
+        const stageY = Math.max(rect.top + 24, e.clientY - 44);
+        this.stagedClientPos = { x: e.clientX, y: stageY };
+        this.syncLastWorldPosFromClient(e.clientX, stageY);
+        this.scheduleToolPreview({
+          clientX: e.clientX,
+          clientY: stageY,
+          altKey: Boolean(this.viewOpts.freePlacementEnabled),
+          shiftKey: Boolean(this.viewOpts.multiPlaceEnabled),
+        });
+        this.requestRender();
+        return;
+      }
+    }
 
     this.pointerNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointerNdc, this.cameraCtrl.activeCamera);
@@ -3684,7 +3987,7 @@ transformed.y = rainY;`,
     if (this.pushPullDragState) {
       const pp = this.pushPullDragState;
       const rawProj = (hit.x - pp.startWorldX) * pp.nx + (hit.z - pp.startWorldZ) * pp.nz;
-      const snapped = e.altKey || this.altHeld ? Math.round(rawProj * 20) / 20 : Math.round(rawProj * 4) / 4;
+      const snapped = e.altKey || this.altHeld || this.viewOpts.freePlacementEnabled ? Math.round(rawProj * 20) / 20 : Math.round(rawProj * 4) / 4;
       pp.deltaM = snapped;
       this.clearPreviewMeshes();
       const prevBox = new THREE.Mesh(
@@ -3888,7 +4191,7 @@ transformed.y = rainY;`,
 
     this.actions.onHoverCell(fineGx, fineGz, hit.x, hit.z, inBounds);
     let sharedHits: THREE.Intersection[] | undefined;
-    if (this.viewOpts.activeTool === "select" && !this.dragPendingCommit && this.actions.onHoverPart) {
+    if (this.viewOpts.activeTool === "select" && !this.dragPendingCommit && this.actions.onHoverPart && e.pointerType !== "touch") {
       const nowMs = performance.now();
       if (nowMs - this.lastHoverMs > 70) {
         this.lastHoverMs = nowMs;
@@ -3898,6 +4201,9 @@ transformed.y = rainY;`,
       }
     } else {
       this.actions.onHoverPart?.(null, 0, 0);
+    }
+    if (e.pointerType === "touch" && this.viewOpts.activeTool === "select" && !this.draggingEntity) {
+      return;
     }
     this.scheduleToolPreview(e, sharedHits);
     this.requestRender();
@@ -3923,13 +4229,38 @@ transformed.y = rainY;`,
     if (e.button !== 0 || !this.derived) return;
     this.pointerDownPos = { x: e.clientX, y: e.clientY };
 
+    const isTouch = e.pointerType === "touch";
+    const tool = this.viewOpts.activeTool;
+
+    if (isTouch) {
+      if (this.cameraCtrl.activeTouchCount >= 2) {
+        this.cancelActivePreview();
+        return;
+      }
+      if (this.viewOpts.mobilePlacementActive && POINT_PLACEMENT_TOOLS.has(tool)) {
+        const rect = this.getCanvasRect();
+        const stageY = Math.max(rect.top + 24, e.clientY - 44);
+        this.mobileGhostDragging = true;
+        this.cameraCtrl.setCameraLocked(true);
+        this.stagedClientPos = { x: e.clientX, y: stageY };
+        this.syncLastWorldPosFromClient(e.clientX, stageY);
+        this.updateToolPreview({
+          clientX: e.clientX,
+          clientY: stageY,
+          altKey: Boolean(this.viewOpts.freePlacementEnabled),
+          shiftKey: Boolean(this.viewOpts.multiPlaceEnabled),
+        });
+        return;
+      }
+      this.syncLastWorldPosFromClient(e.clientX, e.clientY);
+    }
+
     const cs = 0.5;
     const cols = Math.round(this.derived.project.site.width / cs);
     const rows = Math.round(this.derived.project.site.depth / cs);
     const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.lastWorldPos.x / cs)));
     const gz = Math.max(0, Math.min(rows - 1, Math.floor(this.lastWorldPos.z / cs)));
     const curVert = worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, cs, cols, rows);
-    const tool = this.viewOpts.activeTool;
 
     if (tool === "select") {
       // Check Push-Pull Arrow Gizmo first when a wall is selected
@@ -3943,15 +4274,6 @@ transformed.y = rainY;`,
             const lvIdx = this.selected.levelIndex as 0 | 1;
             const w = this.derived.project.levels[lvIdx]?.walls.find((x) => x.id === this.selected?.id);
             if (w) {
-              const dx = w.end.x - w.start.x;
-              const dz = w.end.z - w.start.z;
-              const len = Math.hypot(dx, dz) || 1;
-              const nx = -dz / len;
-              const nz = dx / len;
-              const baseY =
-                lvIdx === 0
-                  ? this.derived.project.site.peil.floor1PeilM
-                  : this.derived.project.site.peil.floor1PeilM + (this.derived.project.levels[0]?.height ?? 3.6);
               this.pushPullDragState = {
                 lvIdx,
                 wallId: w.id,
@@ -3959,14 +4281,18 @@ transformed.y = rainY;`,
                 startWorldZ: this.lastWorldPos.z,
                 midX: (w.start.x + w.end.x) * 0.5,
                 midZ: (w.start.z + w.end.z) * 0.5,
-                nx,
-                nz,
-                len,
+                nx: -(w.end.z - w.start.z) / (Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) || 1),
+                nz: (w.end.x - w.start.x) / (Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) || 1),
+                len: Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z) || 1,
                 height: w.height,
                 thickness: w.thickness,
-                baseY,
+                baseY:
+                  lvIdx === 0
+                    ? this.derived.project.site.peil.floor1PeilM
+                    : this.derived.project.site.peil.floor1PeilM + (this.derived.project.levels[0]?.height ?? 3.6),
                 deltaM: 0,
               };
+              if (isTouch) this.cameraCtrl.setCameraLocked(true);
               try {
                 this.canvas.setPointerCapture?.(e.pointerId);
               } catch {
@@ -3981,6 +4307,10 @@ transformed.y = rainY;`,
       const hitRes = this.raycastHit(e, true);
       if (hitRes && hitRes.sel.kind === "opening") {
         const sel = hitRes.sel;
+        const alreadySelected = this.selected?.kind === "opening" && this.selected.id === sel.id;
+        if (isTouch && !this.viewOpts.mobileMoveEntityArmed && !alreadySelected) {
+          return;
+        }
         const lvIdx = sel.levelIndex as 0 | 1;
         const w = this.derived.project.levels[lvIdx]?.walls.find((x) => x.id === sel.wallId);
         const op = w?.openings.find((o) => o.id === sel.id);
@@ -4001,6 +4331,7 @@ transformed.y = rainY;`,
             nextYaw: 0,
             valid: true,
           };
+          if (isTouch) this.cameraCtrl.setCameraLocked(true);
           try {
             this.canvas.setPointerCapture?.(e.pointerId);
           } catch {
@@ -4013,6 +4344,11 @@ transformed.y = rainY;`,
 
       if (hitRes && (hitRes.sel.kind === "furniture" || hitRes.sel.kind === "hvac" || hitRes.sel.kind === "light")) {
         const sel = hitRes.sel;
+        const alreadySelected =
+          this.selected !== null && "id" in this.selected && this.selected.kind === sel.kind && this.selected.id === sel.id;
+        if (isTouch && !this.viewOpts.mobileMoveEntityArmed && !alreadySelected) {
+          return;
+        }
         const lvIdx = sel.levelIndex as 0 | 1;
         const lv = this.derived.project.levels[lvIdx];
         const curItem =
@@ -4038,6 +4374,7 @@ transformed.y = rainY;`,
             origMeshRotY: hitRes.obj.rotation.y,
             yRenderOffset: hitRes.obj.position.y - curItem.position.y,
           };
+          if (isTouch) this.cameraCtrl.setCameraLocked(true);
           try {
             this.canvas.setPointerCapture?.(e.pointerId);
           } catch {
@@ -4045,15 +4382,23 @@ transformed.y = rainY;`,
           }
         }
         this.actions.onSelect(sel);
-      } else {
+      } else if (!isTouch) {
         const fallback = hitRes ?? this.raycastHit(e, false);
         this.actions.onSelect(fallback ? fallback.sel : null);
       }
       return;
     }
 
+    if (isTouch && this.viewOpts.mobileDrawMode === "orbit") {
+      return;
+    }
+
     if (tool === "sledgehammer") {
-      this.sledgeDragStart = { x: this.lastWorldPos.x, z: this.lastWorldPos.z };
+      if (!isTouch) {
+        this.sledgeDragStart = { x: this.lastWorldPos.x, z: this.lastWorldPos.z };
+      } else if (this.viewOpts.mobileDrawMode === "draw") {
+        this.sledgeDragStart = { x: this.lastWorldPos.x, z: this.lastWorldPos.z };
+      }
       return;
     }
 
@@ -4062,6 +4407,7 @@ transformed.y = rainY;`,
         simsAudio.play("warning");
         return;
       }
+      if (isTouch) this.cameraCtrl.setCameraLocked(true);
       const wallCs = 0.25;
       const wallCols = Math.round(this.derived.project.site.width / wallCs);
       const wallRows = Math.round(this.derived.project.site.depth / wallCs);
@@ -4073,8 +4419,10 @@ transformed.y = rainY;`,
       }
       const lvIdx = Math.min(1, this.viewOpts.activeLevel) as 0 | 1;
       if (this.viewOpts.floorBrushMode === "rect") {
+        if (isTouch) this.cameraCtrl.setCameraLocked(true);
         this.dragStartCell = { gx, gz };
       } else if (this.viewOpts.floorBrushMode === "tile" && this.lastWorldPos.inBounds && !this.isCellBlocked(lvIdx, gx, gz)) {
+        if (isTouch) this.cameraCtrl.setCameraLocked(true);
         this.isBrushDown = true;
         const item = this.getActiveCatalogItem();
         this.brushStrokeCells.set(`${lvIdx}:${gx}:${gz}`, {
@@ -4089,8 +4437,10 @@ transformed.y = rainY;`,
         simsAudio.play("warning");
         return;
       }
+      if (isTouch) this.cameraCtrl.setCameraLocked(true);
       this.dragStartCell = { gx, gz };
     } else if (tool === "terrain" && this.lastWorldPos.inBounds) {
+      if (isTouch) this.cameraCtrl.setCameraLocked(true);
       this.isBrushDown = true;
       const base = this.derived.project.buildExtras?.terrainHeights ?? [];
       this.terrainScratch = applyTerrainBrushToHeights(
@@ -4110,12 +4460,21 @@ transformed.y = rainY;`,
 
   private handlePointerUp(e: PointerEvent): void {
     this.requestRender();
+    const isTouch = e.pointerType === "touch";
+    if (isTouch && this.cameraCtrl.activeTouchCount <= 1) {
+      this.cameraCtrl.setCameraLocked(false);
+    }
     try {
       if (this.canvas.hasPointerCapture?.(e.pointerId)) {
         this.canvas.releasePointerCapture(e.pointerId);
       }
     } catch {
       // ignore
+    }
+
+    if (isTouch && this.mobileGhostDragging) {
+      this.mobileGhostDragging = false;
+      return;
     }
 
     // Brief right-click cancels tool or deselects without moving camera (BM-16)
@@ -4141,7 +4500,7 @@ transformed.y = rainY;`,
       this.clearPreviewMeshes();
       this.actions.onPreviewHud(null);
       if (Math.abs(pp.deltaM) >= 0.05) {
-        this.actions.onPushPullWall?.(pp.lvIdx, pp.wallId, pp.deltaM, e.altKey || this.altHeld);
+        this.actions.onPushPullWall?.(pp.lvIdx, pp.wallId, pp.deltaM, Boolean(e.altKey || this.altHeld || this.viewOpts.freePlacementEnabled));
         simsAudio.play("place");
       }
       return;
@@ -4237,7 +4596,7 @@ transformed.y = rainY;`,
         worldToGridVertex(this.lastWorldPos.x, this.lastWorldPos.z, wallCs, wallCols, wallRows),
         wallCols,
         wallRows,
-        tool === "wall_diagonal" || e.altKey,
+        tool === "wall_diagonal" || e.altKey || this.altHeld || Boolean(this.viewOpts.freePlacementEnabled),
       );
       if (endV.gx !== this.dragStartVertex.gx || endV.gz !== this.dragStartVertex.gz) {
         const isFence = tool === "fence";
@@ -4332,7 +4691,7 @@ transformed.y = rainY;`,
       if (poolOk) {
         this.actions.onAddPool({ id: uid("pool"), gx1, gz1, gx2, gz2, depth: 1.25 });
         this.cancelActivePreview();
-        this.actions.onPlacementCommitted?.(tool, e.shiftKey);
+        this.actions.onPlacementCommitted?.(tool, Boolean(e.shiftKey || this.viewOpts.multiPlaceEnabled));
       } else {
         simsAudio.play("warning");
         this.cancelActivePreview();
@@ -4379,7 +4738,7 @@ transformed.y = rainY;`,
     }
 
     const dist = Math.hypot(e.clientX - this.pointerDownPos.x, e.clientY - this.pointerDownPos.y);
-    if (dist > 6) return;
+    if (dist > (isTouch ? 10 : 6)) return;
 
     // Room floor flood fill click
     if (tool === "floor_tile" && this.viewOpts.floorBrushMode === "fill") {
@@ -4408,145 +4767,12 @@ transformed.y = rainY;`,
       return;
     }
 
-    // Snap Opening to Project Wall
-    if (tool === "opening") {
-      const [ow, oh] = item.sizeM ?? [0.9, 2.15, 0.14];
-      const kind = item.openingKind ?? "door";
-      const sill = kind === "window" ? 0.9 : kind === "vent" ? 2.45 : 0;
-      const snap = snapOpeningToProjectWalls(lv.walls, this.lastWorldPos.x, this.lastWorldPos.z, ow, undefined, sill, oh);
-      if (!snap || !snap.valid) {
-        simsAudio.play("warning");
+    // Point-placed tools (Opening, Stair, Furniture, HVAC, Light)
+    if (POINT_PLACEMENT_TOOLS.has(tool)) {
+      if (isTouch && this.viewOpts.mobilePlacementActive) {
         return;
       }
-      const created = createOpeningForWall(uid("op"), kind, snap.offsetM, ow, oh, sill, item.name);
-      created.swing = this.viewOpts.placementFlipSwing ?? 1;
-      this.actions.onAddOpening(lvIdx, snap.wall.id, created);
-      simsAudio.play("place");
-      return;
-    }
-
-    // Place Stair + Auto Void Slab
-    if (tool === "stair") {
-      const gx = Math.max(0, Math.min(cols - 1, Math.floor(this.lastWorldPos.x / cs)));
-      const gz = Math.max(0, Math.min(rows - 1, Math.floor(this.lastWorldPos.z / cs)));
-      const [wC, lC] = item.footprintCells ?? [2, 8];
-      const rq = (this.viewOpts.placementRotationStep % 4) as 0 | 1 | 2 | 3;
-      const check = validateProjectStairPlacement(
-        lv.stairs,
-        lvIdx,
-        gx,
-        gz,
-        wC,
-        lC,
-        rq,
-        cols,
-        rows,
-        cs,
-        lv.walls,
-        project.buildExtras?.pools ?? [],
-      );
-      if (!check.valid) {
-        simsAudio.play("warning");
-        return;
-      }
-      this.actions.onAddStair(
-        lvIdx,
-        {
-          id: uid("stair"),
-          name: item.name,
-          start: check.start,
-          end: check.end,
-          width: wC * cs,
-          floorHeight: lv.height,
-          riserCount: 18,
-          treadDepth: 0.25,
-          shape: "straight",
-          landingDepth: 1.0,
-        },
-        check.voidPoly,
-      );
-      simsAudio.play("place");
-      this.actions.onPlacementCommitted?.(tool, e.shiftKey);
-      return;
-    }
-
-    // Place Furniture / HVAC / Light on real 3D surfaces (wall, ceiling, floor, or tabletop)
-    if (tool === "furniture" || tool === "hvac" || tool === "light") {
-      const mountKind = this.getMountKind(tool, item.hvacMeta?.type, item.lightMeta?.type);
-      const wallOffset =
-        item.hvacMeta?.type === "ac_split" ? 0.12 : item.hvacMeta?.type === "wall_fan" ? 0.03 : 0.05;
-      const defaultElev =
-        tool === "hvac" ? item.hvacMeta?.defaultElevationM ?? 0 : tool === "light" ? item.lightMeta?.defaultElevationM ?? 2.9 : 0;
-      const placed = this.raycastSurfaceForPlacement(e, lvIdx, mountKind, wallOffset, defaultElev);
-      const [sx, , sz] = item.sizeM ?? [0.5, 0.5, 0.5];
-      const rot = placed.rotationY !== undefined ? placed.rotationY : this.viewOpts.placementRotationStep * (Math.PI / 4);
-      const fpCheck = placed.valid
-        ? validateObjectFootprint({
-            project,
-            levelIndex: lvIdx,
-            x: placed.x,
-            y: placed.y,
-            z: placed.z,
-            sizeX: sx,
-            sizeZ: sz,
-            rotationY: rot,
-            mountKind,
-            tool,
-            catalogId: item.materialId,
-            category: item.furnitureCategory,
-            hostFurniture: placed.hostFurniture,
-            wallSnap: placed.wallSnap,
-            altBypass: placed.altBypass,
-          })
-        : { valid: false };
-      if (!placed.valid || !fpCheck.valid) {
-        simsAudio.play("warning");
-        return;
-      }
-      if (tool === "furniture") {
-        const [fx, fy, fz] = item.sizeM ?? [1.0, 0.8, 0.8];
-        this.actions.onAddFurniture(lvIdx, {
-          id: uid("furn"),
-          catalogId: item.materialId ?? "sofa_l",
-          name: item.name,
-          category: item.furnitureCategory ?? "seating",
-          position: { x: placed.x, y: placed.y, z: placed.z },
-          size: { x: fx, y: fy, z: fz },
-          rotationY: rot,
-          colorHex: this.viewOpts.selectedSwatchHex ?? item.swatchHex,
-          accentHex: item.accentHex,
-        });
-      } else if (tool === "hvac" && item.hvacMeta) {
-        this.actions.onAddHvac(lvIdx, {
-          id: uid("hv"),
-          name: item.name,
-          type: item.hvacMeta.type,
-          position: { x: placed.x, y: placed.y, z: placed.z },
-          rotationY: rot,
-          pkRating: item.hvacMeta.pkRating,
-          flowRateM3h: item.hvacMeta.flowRateM3h,
-          coolingCapacityW: item.hvacMeta.coolingCapacityW,
-          powerW: item.hvacMeta.powerW,
-          setpointC: item.hvacMeta.setpointC,
-          speedLevel: 2,
-          on: true,
-        });
-      } else if (tool === "light" && item.lightMeta) {
-        this.actions.onAddLight(lvIdx, {
-          id: uid("lgt"),
-          name: item.name,
-          type: item.lightMeta.type,
-          position: { x: placed.x, y: placed.y, z: placed.z },
-          rotationY: placed.rotationY !== undefined ? placed.rotationY : rot,
-          lumens: item.lightMeta.lumens,
-          colorTempK: item.lightMeta.colorTempK,
-          beamAngleDeg: item.lightMeta.beamAngleDeg,
-          dimmer: 1,
-          on: true,
-        });
-      }
-      simsAudio.play("place");
-      this.actions.onPlacementCommitted?.(tool, e.shiftKey);
+      this.commitPointPlacement(e, Boolean(e.shiftKey || this.viewOpts.multiPlaceEnabled));
       return;
     }
 
