@@ -1,8 +1,7 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
 import { BuildCameraController } from "@/features/buildMode/BuildCameraController";
 import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import {
@@ -180,6 +179,11 @@ export class BuildScene {
   private canvasRect: DOMRect | null = null;
   private readonly simGroup = new THREE.Group();
   private readonly dimsGroup = new THREE.Group();
+  /** OPT-08: labels live in their own always-built group — toggling `showLabels`
+   * flips `.visible` in O(1) instead of a full 40–150 ms `rebuildFromProject()`. */
+  private readonly labelsGroup = new THREE.Group();
+  private readonly labelsLt1Group = new THREE.Group();
+  private readonly labelsLt2Group = new THREE.Group();
   private readonly overlayGroup = new THREE.Group();
   private readonly previewGroup = new THREE.Group();
   private readonly selectedRing: THREE.Mesh;
@@ -234,6 +238,15 @@ export class BuildScene {
   private rainTex: THREE.CanvasTexture | null = null;
   private rainArray: Float32Array | null = null;
   private rainActiveCount = 0;
+  /** OPT-12: shared uniform driving the GPU rain fall cycle in the vertex shader. */
+  private readonly rainTime = { value: 0 };
+  // OPT-22: dev-only GPU/CPU pass profiler (`?perf=1` or development) — publishes
+  // window.__GOMAHAN_PERF__ (frame CPU ms, GPU ms via EXT_disjoint_timer_query_webgl2,
+  // calls, programs, and memory counters).
+  private readonly perfEnabled: boolean;
+  private perfGpuExt: { TIME_ELAPSED_EXT: number } | null = null;
+  private perfGpuQuery: WebGLQuery | null = null;
+  private perfCpuMs = 0;
   private lightningTimer = 0;
   private lightningEnergy = 0;
   private simElapsedS = 0;
@@ -302,7 +315,15 @@ export class BuildScene {
   private contactDecalResources: [THREE.BufferGeometry[], THREE.BufferGeometry[]] = [[], []];
   private contactDecalIndexMap = new Map<string, { lvIdx: 0 | 1; index: number; w: number; d: number; yRenderOffset: number }>();
   private lastCutawayYaw = Number.NaN;
-  private lastCutawayKey = "";
+  // OPT-12: cutaway gating now compares primitive fields — the old 7-segment
+  // template-string key allocated a fresh string on every orbit frame.
+  private lastCutVis = "";
+  private lastCutLevel = -1;
+  private lastCutExploded = -1;
+  private lastCutBrickMeshes = -1;
+  private lastCutActive = -1;
+  private lastCutTx = Number.NaN;
+  private lastCutTz = Number.NaN;
 
   private readonly _m4 = new THREE.Matrix4();
   private readonly _q = new THREE.Quaternion();
@@ -402,8 +423,8 @@ export class BuildScene {
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
   private atmospherePass: AtmospherePass | null = null;
-  private bloomPass: UnrealBloomPass | null = null;
-  private outputPass: OutputPass | null = null;
+  private bloomPass: DualKawaseBloomPass | null = null;
+  private outputPass: FinalOutputPass | null = null;
   private postActive = false;
   /** Cinematic "ray-traced look" stack: HDR MSAA → Baked AO → sun shafts → bloom → ACES. */
   private rayTracingEnabled = true;
@@ -465,6 +486,14 @@ export class BuildScene {
   private readonly activeFloorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.5);
   private readonly floorPreviewGeo = new THREE.BoxGeometry(0.5, 0.03, 0.5);
   private readonly floorPreviewPool = new THREE.InstancedMesh(this.floorPreviewGeo, this.validMat, 500);
+  /** OPT-11: static unit-primitive preview pool — the 12 tool previews rescale / rotate /
+   * re-material these instead of allocating + disposing Box/Cone/Ring geometries on
+   * every pointermove (zero geometry allocation, zero GC, zero GPU buffer churn). */
+  private readonly previewUnitBox = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), this.validMat);
+  private readonly previewUnitCone = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.24, 10), this.validMat);
+  private readonly previewUnitRing = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.25, 24), this.validMat);
+  /** OPT-14: scratch face normal for raycast hits — was `new THREE.Vector3()` per candidate. */
+  private readonly _hitNormal = new THREE.Vector3();
   private previewRafId: number | null = null;
   private pendingPreviewEvent: PointerEvent | null = null;
   private pendingPreviewHits: THREE.Intersection[] | undefined = undefined;
@@ -510,7 +539,7 @@ export class BuildScene {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", stencil: false });
     const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
     this.mobileViewport = mobileViewport;
-    // Software rasterizers (SwiftShader / llvmpipe) must never receive the cinematic stack:
+    // Software rasterizers (SwiftShader/llvmpipe) must never receive the cinematic stack:
     // detect them once so CI containers and VMs stay responsive instead of wedging on frame one.
     let softwareGpu = false;
     try {
@@ -522,6 +551,14 @@ export class BuildScene {
       softwareGpu = false;
     }
     this.softwareGpu = softwareGpu;
+    this.perfEnabled =
+      !softwareGpu &&
+      typeof window !== "undefined" &&
+      (process.env.NODE_ENV === "development" || new URLSearchParams(window.location.search).has("perf"));
+    if (this.perfEnabled) {
+      const gl = this.renderer.getContext() as WebGL2RenderingContext;
+      this.perfGpuExt = gl.getExtension("EXT_disjoint_timer_query_webgl2") as { TIME_ELAPSED_EXT: number } | null;
+    }
     this.activeTier = softwareGpu ? "low" : mobileViewport ? "medium" : "high";
     const rawDpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
     this.baseDpr = softwareGpu ? Math.min(1, rawDpr) : mobileViewport ? Math.min(1.5, rawDpr) : Math.min(2, Math.max(1.5, rawDpr));
@@ -701,7 +738,17 @@ export class BuildScene {
     this.floorPreviewPool.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.floorPreviewPool.visible = false;
     this.floorPreviewPool.frustumCulled = false;
+    // OPT-11: unit-primitive preview pool — cone and ring ride alongside the box;
+    // clearPreviewMeshes detaches without disposing (userData.isPooledPreview).
+    for (const pm of [this.previewUnitBox, this.previewUnitCone, this.previewUnitRing]) {
+      pm.userData.isPooledPreview = true;
+      pm.visible = false;
+      pm.frustumCulled = false;
+    }
+    // Swing arrow cone composes yaw*tilt through a YXZ euler (OPT-11 sibling setup).
+    this.previewUnitCone.rotation.order = "YXZ";
     (this.raycaster as unknown as { firstHitOnly?: boolean }).firstHitOnly = true;
+    this.labelsGroup.add(this.labelsLt1Group, this.labelsLt2Group);
     this.scene.add(
       this.envGroup,
       this.neighborsGroup,
@@ -709,6 +756,7 @@ export class BuildScene {
       this.propsContainer,
       this.simGroup,
       this.dimsGroup,
+      this.labelsGroup,
       this.overlayGroup,
       this.previewGroup,
       this.selectedRing,
@@ -923,7 +971,7 @@ export class BuildScene {
     return false;
   }
 
-  /** OPT-18: mark <body> as 3D-active so `.studio-glass` drops its compositor blur
+  /** OPT-18: mark <body> as 3d-active so `.studio-glass` drops its compositor blur
    * while the camera is actually moving; released ~150 ms after it rests. */
   private update3dActiveFlag(active: boolean, now: number): void {
     if (active) {
@@ -993,8 +1041,9 @@ export class BuildScene {
 
   /**
    * Cinematic "ray-tracing like" real-time pipeline (`3d-sky-rays` + Baked AO + HDR bloom):
-   * linear HDR MSAA buffer → screen-space sun shafts with
-   * vignette/dither → UnrealBloom → single ACES tone-map + sRGB in OutputPass.
+   * linear HDR MSAA buffer → screen-space sun shafts → progressive Dual-Kawase HDR
+   * bloom (half-res pyramid, OPT-04) → fused bloom-composite + vignette + dither +
+   * single ACES tone-map + sRGB in `FinalOutputPass` (OPT-03 fusion).
    */
   private setupPostPipeline(): void {
     if (this.composer || this.disposed) return;
@@ -1003,6 +1052,9 @@ export class BuildScene {
     const h = Math.max(1, parent?.clientHeight ?? this.canvas.clientHeight);
     const target = new THREE.WebGLRenderTarget(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr), {
       type: THREE.HalfFloatType,
+      // OPT-21: no stencil pass exists in this app — dropping the stencil plane
+      // saves depth-stencil bandwidth on every composer buffer clear.
+      stencilBuffer: false,
       // MSAA resolve on HalfFloat targets wedges software rasterizers (SwiftShader) into
       // ghost-white frames — real GPUs keep 4x AA, software falls back to a clean resolve.
       samples: this.softwareGpu ? 0 : 4,
@@ -1010,8 +1062,9 @@ export class BuildScene {
     this.composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, this.cameraCtrl.activeCamera);
     this.atmospherePass = new AtmospherePass();
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.2, 0.7, 1.45);
-    this.outputPass = new OutputPass();
+    this.bloomPass = new DualKawaseBloomPass(new THREE.Vector2(w, h));
+    this.outputPass = new FinalOutputPass();
+    this.outputPass.finalUniforms.tBloom.value = this.bloomPass.bloomTexture;
     this.composer.addPass(this.renderPass);
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
@@ -1022,6 +1075,7 @@ export class BuildScene {
     this.composer.setPixelRatio(this.currentDpr);
     this.lastAppliedSize = { w, h, dpr: this.currentDpr };
     this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    this.outputPass.finalUniforms.uAspect.value = w / h;
     if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
       (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__ = {
         composer: this.composer,
@@ -1047,7 +1101,10 @@ export class BuildScene {
     }
   }
 
-  /** Project the sun into screen space and drive the god-ray uniforms every frame. */
+  /** Project the sun into screen space and drive the god-ray uniforms every frame,
+   * then gate the pass chain: OPT-03 kills the whole atmosphere pass when the sun
+   * is off-screen/behind the camera, OPT-04 skips the bloom pyramid when no HDR
+   * source exists (sun down, interior lights off, no lightning strike). */
   private updateAtmosphere(cam: THREE.Camera): void {
     const ap = this.atmospherePass;
     if (!ap) return;
@@ -1056,19 +1113,35 @@ export class BuildScene {
     if (this._v1.z > -1) {
       // Sun sits behind the camera: no shafts, no mirrored source flash.
       ap.atmosphereUniforms.uSunFade.value = 0;
-      return;
+    } else {
+      this._v1.copy(this.sunLight.position).project(cam);
+      const ux = this._v1.x * 0.5 + 0.5;
+      const uy = this._v1.y * 0.5 + 0.5;
+      ap.atmosphereUniforms.uSunUv.value.set(ux, uy);
+      const aspect = ap.atmosphereUniforms.uAspect.value;
+      // Overscan margin: keep a little energy while the sun is just outside the frame
+      const d = Math.hypot((ux - 0.5) * aspect, uy - 0.5);
+      ap.atmosphereUniforms.uSunFade.value = THREE.MathUtils.clamp(1 - (d - 0.85) / 0.95, 0, 1);
+      ap.atmosphereUniforms.uIntensity.value = this.godRayStrength;
+      ap.atmosphereUniforms.uSunColor.value.copy(this.sunLight.color);
+      ap.atmosphereUniforms.uTime.value = this.simElapsedS;
     }
-    this._v1.copy(this.sunLight.position).project(cam);
-    const ux = this._v1.x * 0.5 + 0.5;
-    const uy = this._v1.y * 0.5 + 0.5;
-    ap.atmosphereUniforms.uSunUv.value.set(ux, uy);
-    const aspect = ap.atmosphereUniforms.uAspect.value;
-    // Overscan margin: keep a little energy while the sun is just outside the frame
-    const d = Math.hypot((ux - 0.5) * aspect, uy - 0.5);
-    ap.atmosphereUniforms.uSunFade.value = THREE.MathUtils.clamp(1 - (d - 0.85) / 0.95, 0, 1);
-    ap.atmosphereUniforms.uIntensity.value = this.godRayStrength;
-    ap.atmosphereUniforms.uSunColor.value.copy(this.sunLight.color);
-    ap.atmosphereUniforms.uTime.value = this.simElapsedS;
+
+    // OPT-03: with vignette/dither fused into FinalOutputPass there is nothing left
+    // for this pass to do without visible sun shafts — drop the full-resolution
+    // HalfFloat read/write entirely (~50% of orbit angles and 100% of night).
+    ap.enabled = ap.atmosphereUniforms.uSunFade.value > 0.001;
+
+    // OPT-04 early bypass: with the sun below the horizon, every interior light off
+    // and no lightning strike, no pixel can pass the 1.45 bloom threshold — the whole
+    // 7-pass bloom pyramid is skipped for free.
+    if (this.bloomPass) {
+      this.bloomPass.enabled =
+        Boolean(this.sunCore?.visible) || this.poolLitState || this.lightningEnergy > 0.02;
+    }
+    if (this.outputPass) {
+      this.outputPass.finalUniforms.uTime.value = this.simElapsedS;
+    }
   }
 
   private applyQualityTier(tier: "high" | "medium" | "low", explicitHigh = false): void {
@@ -1170,6 +1243,27 @@ export class BuildScene {
       depthWrite: false,
       alphaTest: 0.02,
     });
+    // OPT-12: rain is 100% vertex-shader driven — the old loop advanced ~1800
+    // particles on the CPU and re-uploaded the whole position buffer every frame.
+    // y = mod(baseY - uRainTime * 13.5, 13.5) reproduces the fall + wrap exactly;
+    // z rides the same cycle with the same 2.6 m slant per fall.
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uRainTime = this.rainTime;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+uniform float uRainTime;`,
+        )
+        .replace(
+          "#include <begin_vertex>",
+          `#include <begin_vertex>
+float rainY = mod(transformed.y - uRainTime * 13.5, 13.5);
+transformed.z += 2.6 * (13.5 - rainY) / 13.5;
+transformed.y = rainY;`,
+        );
+    };
+    mat.customProgramCacheKey = () => "rain-gpu-v1";
     this.rainPoints = new THREE.Points(geo, mat);
     this.rainPoints.frustumCulled = false;
     this.rainPoints.visible = false;
@@ -1211,6 +1305,10 @@ export class BuildScene {
   private clearPreviewMeshes(): void {
     this.hoverHighlightMesh.visible = false;
     this.floorPreviewPool.visible = false;
+    // OPT-11: pooled unit primitives hide, never dispose.
+    this.previewUnitBox.visible = false;
+    this.previewUnitCone.visible = false;
+    this.previewUnitRing.visible = false;
     for (const c of [...this.previewGroup.children]) {
       this.previewGroup.remove(c);
       if (c.userData?.isCachedGhost || c.userData?.isPooledPreview) continue;
@@ -1268,6 +1366,8 @@ export class BuildScene {
     if (lighting) this.lighting = lighting;
     if (airflow) this.airflow = airflow;
     if (flood) this.flood = flood;
+    // OPT-08: `showLabels`/`showDims` toggle group visibility — never a house rebuild.
+    this.updateLabelsDimsVisibility();
 
     const { project } = derived;
     const sim = project.simulation;
@@ -1398,7 +1498,9 @@ export class BuildScene {
     }
 
     if (this.rainPoints) {
-      this.rainPoints.visible = Boolean(this.studioView?.showRain) && sim.rainIntensityMmH > 0;
+      // OPT-12: GPU rain hides entirely under prefers-reduced-motion (the CPU loop
+      // used to freeze the particles in place instead).
+      this.rainPoints.visible = Boolean(this.studioView?.showRain) && sim.rainIntensityMmH > 0 && !this.reducedMotion;
       const density = Math.min(1, sim.rainIntensityMmH / 120);
       this.rainActiveCount = Math.round(1800 * density);
       this.rainPoints.geometry.setDrawRange(0, this.rainActiveCount);
@@ -1419,8 +1521,6 @@ export class BuildScene {
     const svXray = this.studioView?.xrayRebar ?? false;
     const svAir = this.studioView?.showAir ?? false;
     const svListrik = this.studioView?.showListrik ?? false;
-    const svLabels = this.studioView?.showLabels ?? false;
-    const svDims = this.studioView?.showDims ?? false;
     const svHidden = this.studioView?.hiddenParts ?? [];
 
     const pb = this.prevBuildRefs;
@@ -1465,8 +1565,6 @@ export class BuildScene {
       pb.xrayRebar !== svXray ||
       pb.showAir !== svAir ||
       pb.showListrik !== svListrik ||
-      (pb as { showLabels?: boolean }).showLabels !== svLabels ||
-      (pb as { showDims?: boolean }).showDims !== svDims ||
       hiddenChanged;
 
     if (buildChanged) {
@@ -1502,7 +1600,6 @@ export class BuildScene {
           showListrik: svListrik,
           hiddenParts: svHidden,
         },
-        { showLabels: svLabels, showDims: svDims },
       );
       if (previewRoofType) {
         const previewProject = {
@@ -1661,9 +1758,26 @@ export class BuildScene {
     return lt1 + h0 + h1;
   }
 
+  /** OPT-08 visibility-only fast path for `showLabels` / `showDims`: O(1) group
+   * flips (LT2 labels follow the same level gating as the house level roots). */
+  private updateLabelsDimsVisibility(): void {
+    const sv = this.studioView;
+    const showLabels = sv?.showLabels ?? false;
+    const showDims = sv?.showDims ?? false;
+    const lv = this.explodeTarget > 0.05 ? 2 : this.viewOpts.activeLevel;
+    const labelsChanged = this.labelsGroup.visible !== showLabels || this.dimsGroup.visible !== showDims;
+    this.labelsGroup.visible = showLabels;
+    this.labelsLt1Group.visible = true;
+    this.labelsLt2Group.visible = lv >= 1;
+    this.dimsGroup.visible = showDims;
+    if (labelsChanged && !this.disposed) this.requestRender();
+  }
+
   private rebuildFromProject(derived: DerivedProjectModel, struct: StructuralReport): void {
     this.houseContainer.clear();
     this.dimsGroup.clear();
+    this.labelsLt1Group.clear();
+    this.labelsLt2Group.clear();
     for (const batch of this.brickBatches) {
       batch.im.dispose();
     }
@@ -1721,25 +1835,30 @@ export class BuildScene {
     this.houseAnimatedFans = built.animatedFans;
     this.rebuildAnimatedFanList();
     this.lastCutawayYaw = Number.NaN;
-    this.lastCutawayKey = "";
+    this.lastCutVis = "";
+    this.lastCutLevel = -1;
+    this.lastCutExploded = -1;
+    this.lastCutBrickMeshes = -1;
+    this.lastCutActive = -1;
+    this.lastCutTx = Number.NaN;
+    this.lastCutTz = Number.NaN;
 
     const { project, roof } = derived;
     const lt1Y = project.site.peil.floor1PeilM;
     const lt2Y = lt1Y + (project.levels[0]?.height ?? 3.6);
-    if (sv?.showLabels) {
-      for (const fl of derived.floors) {
-        if (fl.levelIndex === 1 && this.viewOpts.activeLevel === 0) continue;
-        const ly = fl.levelIndex === 0 ? lt1Y + 1.4 : lt2Y + 1.4;
-        for (const r of fl.rooms) {
-          const sp = this.makeLabelSprite(r.room.name, `${r.netAreaM2.toFixed(1)} m²`);
-          sp.position.set(r.centroid.x, ly, r.centroid.z);
-          this.dimsGroup.add(sp);
-        }
+    // OPT-08: labels & dims are ALWAYS built — the `showLabels`/`showDims` toggles
+    // now flip group visibility in O(1) (updateLabelsDimsVisibility) instead of
+    // triggering a full 40–150 ms house rebuild + BVH + Baked AO regeneration.
+    for (const fl of derived.floors) {
+      const ly = fl.levelIndex === 0 ? lt1Y + 1.4 : lt2Y + 1.4;
+      for (const r of fl.rooms) {
+        const sp = this.makeLabelSprite(r.room.name, `${r.netAreaM2.toFixed(1)} m²`);
+        sp.position.set(r.centroid.x, ly, r.centroid.z);
+        (fl.levelIndex === 0 ? this.labelsLt1Group : this.labelsLt2Group).add(sp);
       }
     }
-    if (sv?.showDims) {
-      this.build3dDimensions(project.site.width, project.site.depth, roof.ridgeElevationM + lt1Y);
-    }
+    this.build3dDimensions(project.site.width, project.site.depth, roof.ridgeElevationM + lt1Y);
+    this.updateLabelsDimsVisibility();
 
     this.applyExplode(this.explodeCurrent);
     this.cameraCtrl.setBounds({
@@ -1833,21 +1952,19 @@ export class BuildScene {
       p.obj.position.copy(p.base).addScaledVector(p.off, e);
       p.obj.updateMatrix();
     }
+    // OPT-12: explode only translates instances — write the X/Y/Z elements of each
+    // column-major matrix directly instead of Quaternion+Matrix4.compose per instance
+    // (~6x faster on the ~15k brick instances during the explode animation).
     for (const im of this.explodeInstanced) {
+      const arr = im.im.instanceMatrix.array as Float32Array;
       for (let i = 0; i < im.n; i++) {
-        this._q.set(im.quat[i * 4]!, im.quat[i * 4 + 1]!, im.quat[i * 4 + 2]!, im.quat[i * 4 + 3]!);
-        this._v1.set(
-          im.pos[i * 3]! + im.off[i * 3]! * e,
-          im.pos[i * 3 + 1]! + im.off[i * 3 + 1]! * e,
-          im.pos[i * 3 + 2]! + im.off[i * 3 + 2]! * e,
-        );
-        this._s1.set(im.scl[i * 3]!, im.scl[i * 3 + 1]!, im.scl[i * 3 + 2]!);
-        this._m4.compose(this._v1, this._q, this._s1);
-        im.im.setMatrixAt(i, this._m4);
+        const mi = i * 16;
+        arr[mi + 12] = im.pos[i * 3]! + im.off[i * 3]! * e;
+        arr[mi + 13] = im.pos[i * 3 + 1]! + im.off[i * 3 + 1]! * e;
+        arr[mi + 14] = im.pos[i * 3 + 2]! + im.off[i * 3 + 2]! * e;
       }
       im.im.instanceMatrix.needsUpdate = true;
     }
-    this._s1.set(1, 1, 1);
     this.markShadowDirty();
   }
 
@@ -2144,6 +2261,8 @@ export class BuildScene {
   private applyLevelAndWallVisibility(): void {
     const exploded = this.explodeTarget > 0.05;
     const lv = exploded ? 2 : this.viewOpts.activeLevel;
+    // OPT-08: keep always-built labels in sync with level/explode visibility too.
+    this.updateLabelsDimsVisibility();
     const hasRoofPreview = Boolean(
       this.viewOpts.pendingRoofType &&
         this.derived &&
@@ -2189,10 +2308,36 @@ export class BuildScene {
     const showBricksOverlay = this.viewOpts.showBricksOverlay;
     const showFinishing = showBricksOverlay ? false : (this.studioView?.showFinishing ?? true);
     const showBrickMeshes = exploded || showBricksOverlay || !showFinishing || cutActive;
-    const key = `${this.viewOpts.wallVisibility}:${this.viewOpts.activeLevel}:${exploded ? 1 : 0}:${showBrickMeshes ? 1 : 0}:${cutActive ? 1 : 0}:${Math.round(tgt.x * 10)},${Math.round(tgt.z * 10)}`;
-    if (!force && key === this.lastCutawayKey && Math.abs(viewAngle - this.lastCutawayYaw) < 0.04) return;
+    // OPT-12: primitive-field gating — the old 7-segment template string allocated
+    // a fresh key on EVERY orbit frame just to early-out of this function.
+    const cutVis = this.viewOpts.wallVisibility;
+    const cutLevel = this.viewOpts.activeLevel;
+    const explodedI = exploded ? 1 : 0;
+    const brickMeshesI = showBrickMeshes ? 1 : 0;
+    const cutActiveI = cutActive ? 1 : 0;
+    const tx = Math.round(tgt.x * 10);
+    const tz = Math.round(tgt.z * 10);
+    if (
+      !force &&
+      cutVis === this.lastCutVis &&
+      cutLevel === this.lastCutLevel &&
+      explodedI === this.lastCutExploded &&
+      brickMeshesI === this.lastCutBrickMeshes &&
+      cutActiveI === this.lastCutActive &&
+      tx === this.lastCutTx &&
+      tz === this.lastCutTz &&
+      Math.abs(viewAngle - this.lastCutawayYaw) < 0.04
+    ) {
+      return;
+    }
     this.lastCutawayYaw = viewAngle;
-    this.lastCutawayKey = key;
+    this.lastCutVis = cutVis;
+    this.lastCutLevel = cutLevel;
+    this.lastCutExploded = explodedI;
+    this.lastCutBrickMeshes = brickMeshesI;
+    this.lastCutActive = cutActiveI;
+    this.lastCutTx = tx;
+    this.lastCutTz = tz;
 
     for (const ch of this.neighborsGroup.children) {
       if (exploded || this.viewOpts.wallVisibility === "up") {
@@ -2570,7 +2715,7 @@ export class BuildScene {
       if (!vis) continue;
 
       const faceNormalWorld = h.face
-        ? new THREE.Vector3().copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize()
+        ? this._hitNormal.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize()
         : undefined;
 
       const customTileMeta = h.object.userData?.customTileMeta as { levelIndex: 0 | 1; materialId: string } | undefined;
@@ -3128,8 +3273,13 @@ export class BuildScene {
       const maxZ = Math.min(project.site.depth, Math.max(this.sledgeDragStart.z, wz));
       const wM = Math.max(0.25, maxX - minX);
       const dM = Math.max(0.25, maxZ - minZ);
-      const box = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.25, dM), this.invalidMat);
+      // OPT-11: rescale the pooled unit box instead of allocating a BoxGeometry.
+      const box = this.previewUnitBox;
+      box.material = this.invalidMat;
+      box.scale.set(wM, 0.25, dM);
+      box.rotation.y = 0;
       box.position.set((minX + maxX) * 0.5, baseY + 0.14, (minZ + maxZ) * 0.5);
+      box.visible = true;
       this.previewGroup.add(box);
       const tileCount = (project.buildExtras?.floorTiles ?? []).filter((t) => {
         const cx = (t.gx + 0.5) * cs;
@@ -3242,9 +3392,13 @@ export class BuildScene {
       const valid = len >= 0.24;
       if (valid) {
         const h = tool === "fence" ? 1.2 : lvH;
-        const m = new THREE.Mesh(new THREE.BoxGeometry(len + 0.12, h, 0.14), this.validMat);
+        // OPT-11: pooled unit box — no per-move BoxGeometry allocation.
+        const m = this.previewUnitBox;
+        m.material = this.validMat;
+        m.scale.set(len + 0.12, h, 0.14);
         m.position.set(this.dragStartVertex.gx * wallCs + dx * 0.5, baseY + h * 0.5, this.dragStartVertex.gz * wallCs + dz * 0.5);
         m.rotation.y = -Math.atan2(dz, dx);
+        m.visible = true;
         this.previewGroup.add(m);
       }
       this.actions.onPreviewHud({
@@ -3263,8 +3417,13 @@ export class BuildScene {
       const dM = (z2 - z1) * wallCs;
       const valid = x2 - x1 >= 2 && z2 - z1 >= 2;
       if (wM >= 0.25 && dM >= 0.25) {
-        const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.14, dM), valid ? this.validMat : this.invalidMat);
+        // OPT-11: pooled unit box — no per-move BoxGeometry allocation.
+        const m = this.previewUnitBox;
+        m.material = valid ? this.validMat : this.invalidMat;
+        m.scale.set(wM, 0.14, dM);
+        m.rotation.y = 0;
         m.position.set((x1 + x2) * 0.5 * wallCs, baseY + 0.08, (z1 + z2) * 0.5 * wallCs);
+        m.visible = true;
         this.previewGroup.add(m);
       }
       this.actions.onPreviewHud({
@@ -3311,8 +3470,13 @@ export class BuildScene {
         const maxZ = Math.max(this.dragStartCell.gz, gz);
         const wM = (maxX - minX + 1) * cs;
         const dM = (maxZ - minZ + 1) * cs;
-        const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.03, dM), this.validMat);
+        // OPT-11: pooled unit box — no per-move BoxGeometry allocation.
+        const m = this.previewUnitBox;
+        m.material = this.validMat;
+        m.scale.set(wM, 0.03, dM);
+        m.rotation.y = 0;
         m.position.set((minX + maxX + 1) * 0.5 * cs, baseY + 0.035, (minZ + maxZ + 1) * 0.5 * cs);
+        m.visible = true;
         this.previewGroup.add(m);
         this.actions.onPreviewHud({ label: `Lantai ${wM.toFixed(1)} × ${dM.toFixed(1)} m`, valid: true });
         return;
@@ -3333,14 +3497,26 @@ export class BuildScene {
         return;
       }
       const swing = this.viewOpts.placementFlipSwing ?? 1;
-      const m = new THREE.Mesh(new THREE.BoxGeometry(ow, oh, 0.22), snap.valid ? this.validMat : this.invalidMat);
-      m.position.set(snap.worldX, baseY + sill + oh * 0.5, snap.worldZ);
+      // OPT-11: pooled unit box + swing-arrow cone (siblings; the cone composes
+      // yaw*tilt through its YXZ euler and offsets into the box's rotated frame).
+      const m = this.previewUnitBox;
+      m.material = snap.valid ? this.validMat : this.invalidMat;
+      m.scale.set(ow, oh, 0.22);
       m.rotation.y = snap.yaw;
-      const dirArrow = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.24, 10), snap.valid ? this.validMat : this.invalidMat);
-      dirArrow.rotation.x = swing >= 0 ? Math.PI / 2 : -Math.PI / 2;
-      dirArrow.position.set(0, -oh * 0.25, swing >= 0 ? 0.28 : -0.28);
-      m.add(dirArrow);
-      this.previewGroup.add(m);
+      m.position.set(snap.worldX, baseY + sill + oh * 0.5, snap.worldZ);
+      m.visible = true;
+      const swingZ = swing >= 0 ? 0.28 : -0.28;
+      const arrow = this.previewUnitCone;
+      arrow.material = snap.valid ? this.validMat : this.invalidMat;
+      arrow.scale.set(1, 1, 1);
+      arrow.rotation.set(swing >= 0 ? Math.PI / 2 : -Math.PI / 2, snap.yaw, 0);
+      arrow.position.set(
+        snap.worldX + swingZ * Math.sin(snap.yaw),
+        baseY + sill + oh * 0.5 - oh * 0.25,
+        snap.worldZ + swingZ * Math.cos(snap.yaw),
+      );
+      arrow.visible = true;
+      this.previewGroup.add(m, arrow);
       this.actions.onPreviewHud({
         label: snap.valid ? `${item.name} (Klik Pasang · R flip arah)` : snap.reason ?? "Tidak muat",
         valid: snap.valid,
@@ -3366,8 +3542,13 @@ export class BuildScene {
         project.buildExtras?.pools ?? [],
       );
       const fp = getStairSpan(wC, lC, rq);
-      const m = new THREE.Mesh(new THREE.BoxGeometry(fp.spanCols * cs, 1.4, fp.spanRows * cs), res.valid ? this.validMat : this.invalidMat);
+      // OPT-11: pooled unit box — no per-move BoxGeometry allocation.
+      const m = this.previewUnitBox;
+      m.material = res.valid ? this.validMat : this.invalidMat;
+      m.scale.set(fp.spanCols * cs, 1.4, fp.spanRows * cs);
+      m.rotation.y = 0;
       m.position.set((gx + fp.spanCols * 0.5) * cs, baseY + 0.7, (gz + fp.spanRows * 0.5) * cs);
+      m.visible = true;
       this.previewGroup.add(m);
       this.actions.onPreviewHud({ label: res.valid ? `${item.name} (${rq * 90}° · R putar)` : res.reason ?? "Tak valid", valid: res.valid });
       return;
@@ -3384,8 +3565,13 @@ export class BuildScene {
         this.viewOpts.activeLevel === 0
           ? validatePoolPlacement(project, minX, minZ, maxX, maxZ, cs)
           : { valid: false, reason: "Kolam hanya untuk Lantai 1" };
-      const m = new THREE.Mesh(new THREE.BoxGeometry(wM, 0.22, dM), check.valid ? this.cyanMat : this.invalidMat);
+      // OPT-11: pooled unit box — no per-move BoxGeometry allocation.
+      const m = this.previewUnitBox;
+      m.material = check.valid ? this.cyanMat : this.invalidMat;
+      m.scale.set(wM, 0.22, dM);
+      m.rotation.y = 0;
       m.position.set((minX + maxX + 1) * 0.5 * cs, baseY + 0.08, (minZ + maxZ + 1) * 0.5 * cs);
+      m.visible = true;
       this.previewGroup.add(m);
       this.actions.onPreviewHud({
         label: check.valid ? `Kolam ${wM.toFixed(1)} × ${dM.toFixed(1)} m` : check.reason ?? "Kolam tidak valid",
@@ -3395,9 +3581,12 @@ export class BuildScene {
     }
 
     if (tool === "terrain" && this.lastWorldPos.inBounds) {
-      const ring = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.25, 24), this.validMat);
-      ring.rotation.x = -Math.PI / 2;
+      // OPT-11: pooled unit ring — no per-move RingGeometry allocation.
+      const ring = this.previewUnitRing;
+      ring.material = this.validMat;
+      ring.rotation.set(-Math.PI / 2, 0, 0);
       ring.position.set(wx, baseY + 0.06, wz);
+      ring.visible = true;
       this.previewGroup.add(ring);
       const map = { raise: "Naikkan Tanah", lower: "Turunkan Tanah", flatten: "Ratakan Tanah" } as const;
       this.actions.onPreviewHud({ label: map[this.viewOpts.terrainBrushMode], valid: true });
@@ -4423,6 +4612,7 @@ export class BuildScene {
       if (sizeChanged || dprChanged) this.composer.setSize(w, h);
     }
     if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
+    if (this.outputPass) this.outputPass.finalUniforms.uAspect.value = w / h;
     // A real resize just reset the drawing buffer; paint one frame right now so the
     // user never sees the cleared (black) canvas waiting for the next RAF.
     if (this.hasRenderedOnce && !this.contextLost && !this.disposed) {
@@ -4467,7 +4657,7 @@ export class BuildScene {
       // OPT-09: `animatedFans.length > 0` alone kept the loop awake 100% of the
       // session; only an on-screen, effectively-visible fan keeps it rendering now.
       const fansActive = this.anyFanVisibleInFrustum();
-      const rainActive = Boolean(this.rainPoints && this.rainPoints.visible && this.rainArray && !this.reducedMotion);
+      const rainActive = Boolean(this.rainPoints && this.rainPoints.visible && !this.reducedMotion);
       const lightningActive = this.lightningEnergy > 0.01 && !this.reducedMotion;
       const floodActive = Boolean(this.studioView?.showFloodWater && this.flood && this.flood.streetFloodCm > 0 && !this.reducedMotion);
       const airActive = Boolean(this.airParticlesMesh && this.airflow && this.airParticleStates.length > 0 && this.derived);
@@ -4513,20 +4703,11 @@ export class BuildScene {
         }
       }
 
-      if (rainActive && this.rainPoints && this.rainArray) {
-        const speed = 13.5 * clampedDt;
-        const slant = 2.6 * clampedDt;
-        for (let i = 0; i < this.rainActiveCount; i++) {
-          let y = this.rainArray[i * 3 + 1]! - speed;
-          let z = this.rainArray[i * 3 + 2]! + slant;
-          if (y < 0) {
-            y = 13.5;
-            z = (Math.random() - 0.5) * 26 + 8.5;
-          }
-          this.rainArray[i * 3 + 1] = y;
-          this.rainArray[i * 3 + 2] = z;
-        }
-        (this.rainPoints.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+      if (rainActive && this.rainPoints) {
+        // OPT-12: rain is fully vertex-shader driven — the CPU loop that advanced
+        // ~1800 particles and re-uploaded the whole position buffer every frame is
+        // gone; only the shared fall-cycle uniform and lightning cadence remain.
+        this.rainTime.value = this.simElapsedS;
 
         if (this.rainActiveCount > 1200) {
           this.lightningTimer -= clampedDt;
@@ -4563,6 +4744,10 @@ export class BuildScene {
         const proj = this.derived.project;
         const lt1Y = proj.site.peil.floor1PeilM;
         const lt2Y = lt1Y + (proj.levels[0]?.height ?? 3.6);
+        // OPT-12: direct column-major matrix writes (Y-rotation by the flow angle)
+        // instead of atan2 + Quaternion + Matrix4.compose per particle — only
+        // elements [0,2,8,10,12..14] ever change.
+        const matArr = this.airParticlesMesh.instanceMatrix.array as Float32Array;
         for (let i = 0; i < this.airParticleStates.length; i++) {
           const p = this.airParticleStates[i]!;
           const gx = Math.max(0, Math.min(af.gridW - 1, Math.floor(p.x / 0.2)));
@@ -4582,10 +4767,26 @@ export class BuildScene {
             p.y = (p.lv === 0 ? lt1Y : lt2Y) + 0.7 + Math.random() * 1.7;
             p.life = 0;
           }
-          this._v1.set(p.x, p.y, p.z);
-          this._q.setFromAxisAngle(this._up, Math.atan2(vx, vz));
-          this._m4.compose(this._v1, this._q, this._s1);
-          this.airParticlesMesh.setMatrixAt(i, this._m4);
+          const invLen = 1 / Math.max(1e-5, Math.hypot(vx, vz));
+          const c = vz * invLen;
+          const s = vx * invLen;
+          const mi = i * 16;
+          matArr[mi] = c;
+          matArr[mi + 1] = 0;
+          matArr[mi + 2] = -s;
+          matArr[mi + 3] = 0;
+          matArr[mi + 4] = 0;
+          matArr[mi + 5] = 1;
+          matArr[mi + 6] = 0;
+          matArr[mi + 7] = 0;
+          matArr[mi + 8] = s;
+          matArr[mi + 9] = 0;
+          matArr[mi + 10] = c;
+          matArr[mi + 11] = 0;
+          matArr[mi + 12] = p.x;
+          matArr[mi + 13] = p.y;
+          matArr[mi + 14] = p.z;
+          matArr[mi + 15] = 1;
           const tNorm = Math.max(0, Math.min(1, (temp - 23) / 10));
           this._col.setRGB(0.2 + tNorm * 0.78, 0.76 - tNorm * 0.25, 0.96 - tNorm * 0.72);
           this.airParticlesMesh.setColorAt(i, this._col);
@@ -4598,12 +4799,19 @@ export class BuildScene {
       // Lock sky dome center to camera (`3d-sky-background`) so orbiting never introduces dome translation parallax
       this.skyMesh.position.copy(this.cameraCtrl.activeCamera.position);
       const cam = this.cameraCtrl.activeCamera;
+      // OPT-22: dev-only frame profiler (?perf=1 / development).
+      const perfT0 = this.perfEnabled ? performance.now() : 0;
+      if (this.perfEnabled) this.beginPerfGpuQuery();
       if (this.postActive && this.composer) {
         if (this.renderPass) this.renderPass.camera = cam;
         this.updateAtmosphere(cam);
         this.composer.render();
       } else {
         this.renderer.render(this.scene, cam);
+      }
+      if (this.perfEnabled) {
+        this.endPerfGpuQuery();
+        this.perfCpuMs = performance.now() - perfT0;
       }
       this.hasRenderedOnce = true;
 
@@ -4635,9 +4843,53 @@ export class BuildScene {
           };
           (window as unknown as { __RUMAH_BUILD_STATS__?: BuildSceneStats }).__RUMAH_BUILD_STATS__ = snap;
           this.actions.onStats?.(snap);
+          if (this.perfEnabled) this.emitPerfStats(avg);
         }
       }
     };
     this.rafId = requestAnimationFrame(tick);
+  }
+
+  /** OPT-22: begin the frame-level GPU timer query (one in flight at a time). */
+  private beginPerfGpuQuery(): void {
+    if (!this.perfGpuExt || this.perfGpuQuery) return;
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    this.perfGpuQuery = gl.createQuery();
+    gl.beginQuery(this.perfGpuExt.TIME_ELAPSED_EXT, this.perfGpuQuery);
+  }
+
+  /** OPT-22: close the frame-level GPU timer query. */
+  private endPerfGpuQuery(): void {
+    if (!this.perfGpuExt || !this.perfGpuQuery) return;
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    gl.endQuery(this.perfGpuExt.TIME_ELAPSED_EXT);
+  }
+
+  /** OPT-22: publish `window.__GOMAHAN_PERF__` (CPU frame ms, GPU frame ms via
+   * EXT_disjoint_timer_query_webgl2 when the extension exists, renderer counters). */
+  private emitPerfStats(fps: number): void {
+    let gpuMs: number | null = null;
+    const q = this.perfGpuQuery;
+    if (this.perfGpuExt && q) {
+      const gl = this.renderer.getContext() as WebGL2RenderingContext & { QUERY_RESULT_DISJOINT?: number };
+      if (gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) {
+        if (!gl.QUERY_RESULT_DISJOINT || !gl.getQueryParameter(q, gl.QUERY_RESULT_DISJOINT)) {
+          gpuMs = gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6;
+        }
+        gl.deleteQuery(q);
+        this.perfGpuQuery = null;
+      }
+    }
+    const info = this.renderer.info;
+    (window as unknown as { __GOMAHAN_PERF__?: Record<string, number | null> }).__GOMAHAN_PERF__ = {
+      cpuMs: Number(this.perfCpuMs.toFixed(3)),
+      gpuMs: gpuMs === null ? null : Number(gpuMs.toFixed(3)),
+      fps,
+      calls: info.render.calls,
+      programs: info.programs?.length ?? 0,
+      triangles: info.render.triangles,
+      geometries: info.memory.geometries,
+      textures: info.memory.textures,
+    };
   }
 }
