@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
+import { DEFAULT_BLOOM_STRENGTH, DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
 import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import type { BuildQualityTier } from "@/features/buildMode/BuildScene";
 import { WalkAvatar } from "@/features/walkMode/WalkAvatar";
@@ -350,7 +350,7 @@ export class WalkScene {
 
     // Pre-allocate 4 reusable floor-local SpotLights (avoids 14-28 shader light loops & per-rebuild allocations)
     for (let i = 0; i < 4; i++) {
-      const spot = new THREE.SpotLight(0xffe7bd, 0, 3.85, Math.PI * 0.34, 0.78, 1.4);
+      const spot = new THREE.SpotLight(0xffe7bd, 0, 4.4, Math.PI * 0.34, 0.82, 0.45);
       this.lightsGroup.add(spot, spot.target);
       this.spotLightPool.push(spot);
     }
@@ -554,7 +554,7 @@ export class WalkScene {
     ap.enabled = ap.atmosphereUniforms.uSunFade.value > 0.001;
 
     // OPT-04 early bypass: sun down + every pooled interior light off → no pixel can
-    // pass the 1.45 bloom threshold → the whole 7-pass bloom pyramid is skipped.
+    // pass the 1.75 bloom threshold → the whole 7-pass bloom pyramid is skipped.
     if (this.bloomPass) {
       let anyLightOn = false;
       for (const spot of this.spotLightPool) {
@@ -567,6 +567,7 @@ export class WalkScene {
     }
     if (this.outputPass) {
       this.outputPass.finalUniforms.uTime.value = this.simElapsedS;
+      this.outputPass.finalUniforms.uBloomStrength.value = this.bloomPass?.enabled ? DEFAULT_BLOOM_STRENGTH : 0;
     }
   }
 
@@ -613,7 +614,7 @@ export class WalkScene {
       this.sunLight.position.set(2.5 + sx * 24, Math.max(3, sy * 24), 8.5 + sz * 24);
       this.fillLight.position.set(2.5 - sx * 18, 12, 8.5 - sz * 18);
       this.fillLight.intensity = isNight ? 0.14 : isStorm ? 0.35 : 0.4;
-      this.sunLight.intensity = isNight ? 0.18 : isStorm ? 1.15 : 2.75;
+      this.sunLight.intensity = isNight ? 0.18 : isStorm ? 0.95 : 2.4;
       this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff5e0);
       this.hemiLight.intensity = isNight ? 0.26 : isStorm ? 0.7 : 0.5;
 
@@ -758,7 +759,7 @@ export class WalkScene {
       lvIdx === 0
         ? this.derived.project.site.peil.floor1PeilM
         : this.derived.project.site.peil.floor1PeilM + (this.derived.project.levels[0]?.height ?? 3.6);
-    const simNightBoost = simNight ? 2.2 : 1.05;
+    const simNightBoost = simNight ? 1.65 : 1.0;
 
     const candidates = lv
       ? lv.lights
@@ -783,10 +784,14 @@ export class WalkScene {
       const fwdOff = l.type === "wall" ? 1.15 : 0;
       const halfAngle = Math.min(Math.PI * 0.42, Math.max(0.35, ((l.beamAngleDeg * 0.5) * Math.PI) / 180));
       spot.color.setHex(l.colorTempK <= 3200 ? 0xffcb85 : 0xffe7bd);
-      spot.intensity = (l.lumens / 450) * l.dimmer * 2.4 * simNightBoost;
-      spot.distance = Math.min(4.1, lv.height + 0.35);
+      spot.intensity = (l.lumens / 650) * l.dimmer * 1.15 * simNightBoost;
+      spot.distance = Math.min(4.4, lv.height + 0.6);
       spot.angle = halfAngle;
-      spot.position.set(l.position.x, baseY + Math.min(lv.height - 0.25, l.position.y) - 0.05, l.position.z);
+      spot.position.set(
+        l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.24 : 0),
+        baseY + Math.min(lv.height - 0.25, l.position.y) - 0.05,
+        l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.24 : 0),
+      );
       spot.target.position.set(l.position.x + Math.sin(rotY) * fwdOff, baseY, l.position.z + Math.cos(rotY) * fwdOff);
       spot.target.updateMatrixWorld();
     }

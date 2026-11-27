@@ -111,13 +111,13 @@ export function buildFurnitureMesh(
       isCloth || isVehicle
         ? new THREE.MeshPhysicalMaterial({
             color: new THREE.Color(item.colorHex),
-            roughness: isCloth ? 0.86 : 0.24,
-            metalness: isVehicle ? 0.58 : 0.02,
+            roughness: isCloth ? 0.86 : 0.34,
+            metalness: isVehicle ? 0.42 : 0.02,
             sheen: isCloth ? 0.65 : 0,
             sheenRoughness: 0.68,
-            clearcoat: isVehicle ? 0.92 : 0,
-            clearcoatRoughness: isVehicle ? 0.12 : 0,
-            envMapIntensity: isVehicle ? 1.15 : 0.45,
+            clearcoat: isVehicle ? 0.45 : 0,
+            clearcoatRoughness: isVehicle ? 0.24 : 0,
+            envMapIntensity: isVehicle ? 0.68 : 0.45,
           })
         : new THREE.MeshStandardMaterial({
             color: new THREE.Color(item.colorHex),
@@ -420,7 +420,7 @@ export function buildFurnitureMesh(
           new THREE.MeshStandardMaterial({
             color: 0xfff8d6,
             emissive: 0xfff3b0,
-            emissiveIntensity: 1.5,
+            emissiveIntensity: 0.95,
             roughness: 0.2,
           }),
       );
@@ -430,7 +430,7 @@ export function buildFurnitureMesh(
           new THREE.MeshStandardMaterial({
             color: 0x991b1b,
             emissive: 0xef4444,
-            emissiveIntensity: 1.3,
+            emissiveIntensity: 0.85,
             roughness: 0.25,
           }),
       );
@@ -557,7 +557,7 @@ export function buildFurnitureMesh(
           new THREE.MeshStandardMaterial({
             color: 0xfff8d6,
             emissive: 0xfff3b0,
-            emissiveIntensity: 1.4,
+            emissiveIntensity: 0.9,
           }),
       );
       const buildBike = (detail: 0 | 1 | 2) => {

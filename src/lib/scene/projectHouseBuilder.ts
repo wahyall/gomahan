@@ -641,7 +641,7 @@ export function buildProjectLightObject(
     const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de;
     const clampedY = Math.min(lvHeight - 0.25, Math.max(0.25, l.position.y));
     if (l.type === "garden") {
-      const pt = new THREE.PointLight(lightHex, (l.lumens / 500) * l.dimmer * 1.4, 2.6, 1.6);
+      const pt = new THREE.PointLight(lightHex, (l.lumens / 600) * l.dimmer * 1.0, 3.0, 0.6);
       pt.position.set(l.position.x, clampedY, l.position.z);
       wrap.add(pt);
     } else {
@@ -650,16 +650,16 @@ export function buildProjectLightObject(
       const fwdOff = l.type === "wall" ? 1.15 : 0;
       const spot = new THREE.SpotLight(
         lightHex,
-        (l.lumens / 450) * l.dimmer * 2.5,
-        Math.min(3.85, lvHeight + 0.15),
+        (l.lumens / 650) * l.dimmer * 1.15,
+        Math.min(4.4, lvHeight + 0.6),
         halfAngle,
-        0.78,
-        1.4,
+        0.82,
+        0.45,
       );
       spot.position.set(
-        l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.1 : 0),
+        l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.24 : 0),
         clampedY - 0.04,
-        l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.1 : 0),
+        l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.24 : 0),
       );
       spot.target.position.set(
         l.position.x + Math.sin(rotY) * fwdOff,
@@ -1009,7 +1009,7 @@ export function buildProjectHouse(
           new THREE.MeshStandardMaterial({
             color: 0xffe7b2,
             emissive: 0xffc46b,
-            emissiveIntensity: 1.8,
+            emissiveIntensity: 1.15,
             roughness: 0.38,
             metalness: 0.1,
           }),

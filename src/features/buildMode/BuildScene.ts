@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
+import { DEFAULT_BLOOM_STRENGTH, DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
 import { BuildCameraController } from "@/features/buildMode/BuildCameraController";
 import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import {
@@ -657,12 +657,12 @@ export class BuildScene {
     // Pre-allocate fixed hardware light pool per level (max 7 Spot + 7 Point slots, at most 7 active per level)
     for (const lvIdx of [0, 1] as const) {
       for (let i = 0; i < 7; i++) {
-        const spot = new THREE.SpotLight(0xfff3de, 0, 3.85, 0.7, 0.78, 1.4);
+        const spot = new THREE.SpotLight(0xfff3de, 0, 4.4, 0.7, 0.82, 0.45);
         spot.visible = false;
         this.lightPoolLevelRoots[lvIdx].add(spot, spot.target);
         this.spotLightPools[lvIdx].push(spot);
 
-        const pt = new THREE.PointLight(0xffcb85, 0, 2.6, 1.6);
+        const pt = new THREE.PointLight(0xffcb85, 0, 3.0, 0.6);
         pt.visible = false;
         this.lightPoolLevelRoots[lvIdx].add(pt);
         this.pointLightPools[lvIdx].push(pt);
@@ -1133,7 +1133,7 @@ export class BuildScene {
     ap.enabled = ap.atmosphereUniforms.uSunFade.value > 0.001;
 
     // OPT-04 early bypass: with the sun below the horizon, every interior light off
-    // and no lightning strike, no pixel can pass the 1.45 bloom threshold — the whole
+    // and no lightning strike, no pixel can pass the 1.75 bloom threshold — the whole
     // 7-pass bloom pyramid is skipped for free.
     if (this.bloomPass) {
       this.bloomPass.enabled =
@@ -1141,6 +1141,7 @@ export class BuildScene {
     }
     if (this.outputPass) {
       this.outputPass.finalUniforms.uTime.value = this.simElapsedS;
+      this.outputPass.finalUniforms.uBloomStrength.value = this.bloomPass?.enabled ? DEFAULT_BLOOM_STRENGTH : 0;
     }
   }
 
@@ -1466,7 +1467,7 @@ transformed.y = rainY;`,
       this.fillLight.intensity = this.fillLightBase;
       this.fillLight.color.setHex(0xb2cff0);
       this.fillLightTinted = false;
-      this.sunLight.intensity = isNight ? 0.18 : isStorm ? 1.15 : 2.75;
+      this.sunLight.intensity = isNight ? 0.18 : isStorm ? 0.95 : 2.4;
       this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff4de);
       this.hemiLight.intensity = isNight ? 0.26 : isStorm ? 0.7 : 0.5;
 
@@ -2136,7 +2137,7 @@ transformed.y = rainY;`,
             const pt = points[pointIdx++];
             if (!pt) continue;
             pt.color.setHex(lightHex);
-            pt.intensity = (l.lumens / 500) * l.dimmer * 1.4;
+            pt.intensity = (l.lumens / 600) * l.dimmer * 1.0;
             pt.position.set(l.position.x, clampedY, l.position.z);
           } else {
             const spot = spots[spotIdx++];
@@ -2145,13 +2146,13 @@ transformed.y = rainY;`,
             const rotY = l.rotationY ?? 0;
             const fwdOff = l.type === "wall" ? 1.15 : 0;
             spot.color.setHex(lightHex);
-            spot.intensity = (l.lumens / 450) * l.dimmer * 2.5;
-            spot.distance = Math.min(3.85, lv.height + 0.15);
+            spot.intensity = (l.lumens / 650) * l.dimmer * 1.15;
+            spot.distance = Math.min(4.4, lv.height + 0.6);
             spot.angle = halfAngle;
             spot.position.set(
-              l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.1 : 0),
+              l.position.x + Math.sin(rotY) * (l.type === "wall" ? 0.24 : 0),
               clampedY - 0.04,
-              l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.1 : 0),
+              l.position.z + Math.cos(rotY) * (l.type === "wall" ? 0.24 : 0),
             );
             spot.target.position.set(
               l.position.x + Math.sin(rotY) * fwdOff,

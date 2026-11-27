@@ -47,12 +47,13 @@ const OUTPUT_VERT = /* glsl */ `
   }
 `;
 
-/** Prefilter: luminance soft-knee threshold + Karis-weighted tent average. */
+/** Prefilter: luminance soft-knee threshold + Karis-weighted tent average + HDR spike compression. */
 const PREFILTER_FRAG = /* glsl */ `
   uniform sampler2D tDiffuse;
   uniform vec2 uTexel;
   uniform float uThreshold;
   uniform float uKnee;
+  uniform float uMaxBloom;
   varying vec2 vUv;
 
   float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -76,10 +77,24 @@ const PREFILTER_FRAG = /* glsl */ `
     c = texture2D(tDiffuse, vUv + o * vec2( 0.5,  0.5)).rgb; w = 1.0 * karisW(c); acc += c * w; wsum += w;
     vec3 avg = acc / max(wsum, 1e-4);
 
-    // Soft-knee HDR threshold (UnrealBloom parity: linear ramp of width uKnee)
+    // Physically-based soft-knee HDR excess extraction: pixels below threshold
+    // contribute 0, and pixels above extract ONLY their excess energy above
+    // threshold instead of passing the entire un-subtracted HDR value.
     float l = luma(avg);
-    float brightness = clamp((l - uThreshold) / max(uKnee, 1e-4) + 0.5, 0.0, 1.0);
-    gl_FragColor = vec4(avg * brightness, 1.0);
+    float knee = max(uKnee, 1e-4);
+    float soft = clamp(l - uThreshold + knee, 0.0, 2.0 * knee);
+    soft = (soft * soft) / (4.0 * knee);
+    float contrib = max(soft, l - uThreshold) / max(l, 1e-4);
+    vec3 bloom = avg * max(contrib, 0.0);
+
+    // Soft Reinhard-style HDR compression caps extreme GGX specular glints so
+    // vehicles, glass panes, or close light bounces never bloom into white blobs.
+    float bl = luma(bloom);
+    if (bl > 0.0) {
+      float compressed = (bl * uMaxBloom) / (bl + uMaxBloom);
+      bloom *= compressed / bl;
+    }
+    gl_FragColor = vec4(bloom, 1.0);
   }
 `;
 
@@ -99,10 +114,11 @@ const DOWNSAMPLE_FRAG = /* glsl */ `
   }
 `;
 
-/** 3×3 tent additive upsample back up the pyramid. */
+/** 3×3 tent additive upsample back up the pyramid with scatter decay. */
 const UPSAMPLE_FRAG = /* glsl */ `
   uniform sampler2D tDiffuse;
   uniform vec2 uTexel;
+  uniform float uScatter;
   varying vec2 vUv;
 
   void main() {
@@ -116,11 +132,12 @@ const UPSAMPLE_FRAG = /* glsl */ `
     sum += texture2D(tDiffuse, vUv + o * vec2( 1.0, -1.0));
     sum += texture2D(tDiffuse, vUv + o * vec2(-1.0,  1.0));
     sum += texture2D(tDiffuse, vUv + o * vec2( 1.0,  1.0));
-    gl_FragColor = sum / 16.0;
+    gl_FragColor = (sum / 16.0) * uScatter;
   }
 `;
 
 const BLOOM_LAYERS = 4; // 1/2, 1/4, 1/8, 1/16
+export const DEFAULT_BLOOM_STRENGTH = 0.1;
 
 export class DualKawaseBloomPass extends Pass {
   /** Half-res accumulated bloom texture — sampled by `FinalOutputPass`. */
@@ -132,7 +149,7 @@ export class DualKawaseBloomPass extends Pass {
   private readonly upQuad: FullScreenQuad;
   private readonly rtSizes: { w: number; h: number }[] = [];
 
-  constructor(resolution: THREE.Vector2, threshold = 1.45, knee = 0.01) {
+  constructor(resolution: THREE.Vector2, threshold = 1.75, knee = 0.45, maxBloom = 2.2, scatter = 0.65) {
     super();
     this.needsSwap = false; // the main chain buffer flows through untouched
     this.enabled = true;
@@ -160,7 +177,12 @@ export class DualKawaseBloomPass extends Pass {
       uTexel: { value: texel },
     });
     const prefilterMat = new THREE.ShaderMaterial({
-      uniforms: { ...mkUniforms(new THREE.Vector2()), uThreshold: { value: threshold }, uKnee: { value: knee } },
+      uniforms: {
+        ...mkUniforms(new THREE.Vector2()),
+        uThreshold: { value: threshold },
+        uKnee: { value: knee },
+        uMaxBloom: { value: maxBloom },
+      },
       vertexShader: QUAD_VERT,
       fragmentShader: PREFILTER_FRAG,
       depthTest: false,
@@ -176,7 +198,7 @@ export class DualKawaseBloomPass extends Pass {
       blending: THREE.NoBlending,
     });
     const upMat = new THREE.ShaderMaterial({
-      uniforms: mkUniforms(new THREE.Vector2()),
+      uniforms: { ...mkUniforms(new THREE.Vector2()), uScatter: { value: scatter } },
       vertexShader: QUAD_VERT,
       fragmentShader: UPSAMPLE_FRAG,
       depthTest: false,
@@ -227,9 +249,9 @@ export class DualKawaseBloomPass extends Pass {
     for (let i = BLOOM_LAYERS - 2; i >= 0; i--) {
       const src = this.renderTargets[i + 1]!;
       const dst = this.renderTargets[i]!;
-      const dstSize = this.rtSizes[i]!;
+      const srcSize = this.rtSizes[i + 1]!;
       upMat.uniforms.tDiffuse!.value = src.texture;
-      this.setTexel(upMat, dstSize.w, dstSize.h, 0.5);
+      this.setTexel(upMat, srcSize.w, srcSize.h, 1.0);
       renderer.setRenderTarget(dst);
       this.upQuad.render(renderer);
     }
@@ -272,7 +294,7 @@ const FinalOutputShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     tBloom: { value: null as THREE.Texture | null },
-    uBloomStrength: { value: 0.2 },
+    uBloomStrength: { value: DEFAULT_BLOOM_STRENGTH },
     uVignette: { value: 0.16 },
     uDither: { value: 0.0022 },
     uTime: { value: 0 },

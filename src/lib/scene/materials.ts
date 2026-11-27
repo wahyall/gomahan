@@ -745,13 +745,13 @@ export function createEnvironmentMap(renderer: THREE.WebGLRenderer, hourOfDay: n
   };
 
   if (!isNight) {
-    addCard(9, 7, [7, 11, 6], 0xfff3dc, isStorm ? 1.4 : 3.6);
-    addCard(10, 5, [-8, 6, -5], 0xa4d0f7, isStorm ? 0.9 : 1.7);
-    addCard(7, 4, [0, 5, -9], 0xffe4b8, isStorm ? 0.6 : 1.9);
+    addCard(9, 7, [7, 11, 6], 0xfff3dc, isStorm ? 1.05 : 1.85);
+    addCard(10, 5, [-8, 6, -5], 0xa4d0f7, isStorm ? 0.75 : 1.15);
+    addCard(7, 4, [0, 5, -9], 0xffe4b8, isStorm ? 0.55 : 1.25);
     addCard(14, 14, [0, -6, 0], 0x7b6f5c, 0.35);
   } else {
-    addCard(6, 6, [0, 8, 0], 0x3f5e8f, 0.9);
-    addCard(8, 5, [0, 2, 7], 0xffd59e, 0.85);
+    addCard(6, 6, [0, 8, 0], 0x3f5e8f, 0.75);
+    addCard(8, 5, [0, 2, 7], 0xffd59e, 0.65);
   }
 
   const rt = pmrem.fromScene(envScene, 0.02);
@@ -1049,13 +1049,13 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
     color: 0xdcf0f7,
     transparent: true,
     opacity: 0.32,
-    roughness: 0.04,
+    roughness: 0.08,
     metalness: 0.0,
     ior: 1.52,
-    reflectivity: 0.94,
-    clearcoat: 1.0,
-    clearcoatRoughness: 0.05,
-    envMapIntensity: 1.5,
+    reflectivity: 0.78,
+    clearcoat: 0.55,
+    clearcoatRoughness: 0.14,
+    envMapIntensity: 0.75,
     depthWrite: false,
   });
 
@@ -1116,13 +1116,13 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
     color: 0x456968,
     transparent: true,
     opacity: 0.78,
-    roughness: 0.09,
+    roughness: 0.12,
     metalness: 0.04,
     ior: 1.333,
-    reflectivity: 0.9,
-    clearcoat: 0.92,
-    clearcoatRoughness: 0.1,
-    envMapIntensity: 1.4,
+    reflectivity: 0.8,
+    clearcoat: 0.65,
+    clearcoatRoughness: 0.16,
+    envMapIntensity: 0.85,
     depthWrite: false,
   });
   floodWater.customProgramCacheKey = () => "rumah-flood-water-v1";
