@@ -10,7 +10,7 @@ import { buildScheduleSummary, type ScheduleSummary } from "@/lib/timeline/sched
 import { type LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { type AirflowSimulationResult } from "@/lib/simulation/airflowEngine";
 import { runFloodSimulation, type FloodSimulationResult } from "@/lib/simulation/floodEngine";
-import { runAirflowSimulationAsync, generateBricksAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
+import { generateBricksAsync, runSimsAsync } from "@/lib/simulation/workerClient";
 import { parseVersionedProjectSave, validateProjectImport } from "@/lib/model/schema";
 import type { BrickSpec, Level, Project } from "@/lib/model/types";
 import type { BrickInstance } from "@/lib/geometry/masonry";
@@ -357,11 +357,12 @@ export default function HomePage() {
     if (!hydrated) return;
     let active = true;
     const simProj = simInputDerived.project;
-    void runLightingSimulationAsync(simProj).then((res) => {
-      if (active && res) setLighting(res);
-    });
-    void runAirflowSimulationAsync(simProj).then((res) => {
-      if (active && res) setAirflow(res);
+    // OPT-16: one batched worker request (single structured-clone, single derived
+    // build, single zero-copy reply with all 8 Float32Array buffers).
+    void runSimsAsync(simProj).then((res) => {
+      if (!active || !res) return;
+      setLighting(res.lighting);
+      setAirflow(res.airflow);
     });
     return () => {
       active = false;
