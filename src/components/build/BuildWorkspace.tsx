@@ -1171,7 +1171,7 @@ export function BuildWorkspace({
                     >
                       <span className="flex items-center gap-1.5">
                         <Sparkles className="h-3.5 w-3.5 text-amber-300/90" />
-                        Render Sinematik (Ray-Traced Look)
+                        Ray-Tracing Photographic
                       </span>
                       {rtLook && <Check className="h-3.5 w-3.5 text-primary" />}
                     </DropdownMenu.Item>
@@ -1203,8 +1203,8 @@ export function BuildWorkspace({
                       </div>
                       <p className="mt-1.5 text-[9.5px] leading-relaxed text-muted-foreground">
                         {rtLook
-                          ? "Baked AO, berkas matahari, bloom HDR & MSAA aktif sesuai tier."
-                          : "Mode kompatibilitas: render langsung tanpa pasca-pemrosesan."}
+                          ? "GI baked, refleksi probe BPCEM, bayangan PCSS, kaca Fresnel, lampu IES, bloom Dual-Kawase & AgX fotografis aktif sesuai tier."
+                          : "Mode standar: rasterisasi bersih tanpa pasca-pemrosesan fotografis."}
                       </p>
                     </div>
                   </DropdownMenu.Content>

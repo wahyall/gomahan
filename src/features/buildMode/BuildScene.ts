@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { DEFAULT_BLOOM_STRENGTH, DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
+import { DualKawaseBloomPass } from "@/features/buildMode/DualKawaseBloomPass";
+import { PhotographicOutputPass } from "@/features/buildMode/PhotographicOutputPass";
 import { BuildCameraController } from "@/features/buildMode/BuildCameraController";
 import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import {
@@ -51,6 +52,15 @@ import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { createChamferBox, createContactShadowTexture, disposeGeometry, disposeResource } from "@/lib/scene/geometryHelpers";
 import { buildInstancedContactDecals, type ContactDecalSpec } from "@/lib/scene/bakedAo";
 import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, makeSunSpriteTexture, type MaterialPalette } from "@/lib/scene/materials";
+import { createIesSpotTexture } from "@/lib/scene/pcssShadow";
+import { ReflectionProbeRig } from "@/lib/scene/reflectionProbes";
+import { rtLookUniforms, setRtLookUniforms } from "@/lib/scene/rtUniforms";
+import {
+  computeAutoExposure,
+  resolvePhotographicPreset,
+  whiteBalanceMatrix,
+  type PhotographicPreset,
+} from "@/lib/scene/photographicPresets";
 import {
   buildProjectFurnitureObject,
   buildProjectHouse,
@@ -342,6 +352,7 @@ export class BuildScene {
   private readonly _m4 = new THREE.Matrix4();
   private readonly _q = new THREE.Quaternion();
   private readonly _v1 = new THREE.Vector3();
+  private readonly _v2 = new THREE.Vector3();
   private readonly _s1 = new THREE.Vector3(1, 1, 1);
   private readonly _up = new THREE.Vector3(0, 1, 0);
   private readonly _col = new THREE.Color();
@@ -443,7 +454,15 @@ export class BuildScene {
   private renderPass: RenderPass | null = null;
   private atmospherePass: AtmospherePass | null = null;
   private bloomPass: DualKawaseBloomPass | null = null;
-  private outputPass: FinalOutputPass | null = null;
+  private photoOutputPass: PhotographicOutputPass | null = null;
+  private sceneDepthTex: THREE.DepthTexture | null = null;
+  /** GR-02: dual CubeCamera reflection probe rig (event-driven bake). */
+  private probeRig: ReflectionProbeRig | null = null;
+  /** GR-05: shared IES cookie for the SpotLight pool. */
+  private iesTex: THREE.DataTexture | null = null;
+  /** PH-01 smooth auto-exposure state (camera iris). */
+  private currentExposure = 1.0;
+  private photoPreset: PhotographicPreset = resolvePhotographicPreset(10, 0);
   private postActive = false;
   /** Cinematic "ray-traced look" stack: HDR MSAA → Baked AO → sun shafts → bloom → ACES. */
   private rayTracingEnabled = true;
@@ -676,10 +695,14 @@ export class BuildScene {
     this.staticDisposables.push(this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
 
     // Pre-allocate fixed hardware light pool per level (max 7 Spot + 7 Point slots, at most 7 active per level)
+    this.iesTex = createIesSpotTexture();
+    this.staticDisposables.push(this.iesTex);
     for (const lvIdx of [0, 1] as const) {
       for (let i = 0; i < 7; i++) {
         const spot = new THREE.SpotLight(0xfff3de, 0, 4.4, 0.7, 0.82, 0.45);
         spot.visible = false;
+        // GR-05: photometric IES cookie — soft core + wall-wash scallop ring.
+        spot.map = this.iesTex;
         this.lightPoolLevelRoots[lvIdx].add(spot, spot.target);
         this.spotLightPools[lvIdx].push(spot);
 
@@ -786,6 +809,8 @@ export class BuildScene {
     this.handleResize();
     this.setupPostPipeline();
     this.configurePostPipeline();
+    // GR-08: shared RT uniforms + probe env-map binding follow the store default.
+    this.applyRtStack();
     window.addEventListener("resize", this.onResizeBound);
     if (canvas.parentElement && typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(() => this.handleResize());
@@ -850,13 +875,17 @@ export class BuildScene {
     this.postActive = false;
     this.atmospherePass?.dispose();
     this.bloomPass?.dispose();
-    this.outputPass?.dispose();
+    this.photoOutputPass?.dispose();
+    this.probeRig?.dispose();
+    this.probeRig = null;
+    this.sceneDepthTex?.dispose();
+    this.sceneDepthTex = null;
     this.composer?.dispose();
     this.composer = null;
     this.renderPass = null;
     this.atmospherePass = null;
     this.bloomPass = null;
-    this.outputPass = null;
+    this.photoOutputPass = null;
 
     if (typeof window !== "undefined") {
       delete (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__;
@@ -1055,18 +1084,53 @@ export class BuildScene {
     this.applyQualityTier(effective, tier === "high");
   }
 
-  /** Toggle the cinematic ray-traced-look stack (Baked AO + sun shafts + bloom + MSAA HDR). */
+  /** Toggle the hybrid photorealistic RT stack (GI + BPCEM + PCSS + Fresnel +
+   *  IES + Dual-Kawase bloom + AgX photographic output). Uniform-gated: instant. */
   public setRayTracingLook(enabled: boolean): void {
     this.rayTracingEnabled = enabled;
+    this.applyRtStack();
     this.configurePostPipeline();
     this.requestRender();
   }
 
+  /** GR-08: flip shared RT uniforms, rebind probe env-maps, bake probes on demand. */
+  private applyRtStack(): void {
+    const on = this.rayTracingEnabled && !this.softwareGpu;
+    setRtLookUniforms(on, this.photoPreset.giBounce);
+    if (this.probeRig) {
+      if (on && !this.probeRig.hasBaked && this.hasRenderedOnce) {
+        this.bakeReflectionProbes();
+      }
+      this.probeRig.bindEnvMaps(this.houseContainer, on, this.envTex);
+      this.probeRig.bindEnvMaps(this.propsContainer, on, this.envTex);
+    }
+  }
+
+  /** GR-02: capture both probes once per rebuild / sun-hour change (<3 ms GPU). */
+  private bakeReflectionProbes(): void {
+    if (!this.probeRig || !this.renderer || this.disposed || this.softwareGpu) return;
+    const hide: THREE.Object3D[] = [
+      this.overlayGroup,
+      this.previewGroup,
+      this.dimsGroup,
+      this.labelsGroup,
+    ];
+    if (this.rainPoints) hide.push(this.rainPoints);
+    this.probeRig.bake(this.renderer, this.scene, {
+      searchRoot: this.scene,
+      hide,
+    });
+    this.probeRig.bindEnvMaps(this.houseContainer, this.rayTracingEnabled, this.envTex);
+    this.probeRig.bindEnvMaps(this.propsContainer, this.rayTracingEnabled, this.envTex);
+  }
+
   /**
-   * Cinematic "ray-tracing like" real-time pipeline (`3d-sky-rays` + Baked AO + HDR bloom):
-   * linear HDR MSAA buffer → screen-space sun shafts → progressive Dual-Kawase HDR
-   * bloom (half-res pyramid, OPT-04) → fused bloom-composite + vignette + dither +
-   * single ACES tone-map + sRGB in `FinalOutputPass` (OPT-03 fusion).
+   * Hybrid photorealistic RT pipeline (`PLAN_GRAPHIC.md` §1): linear HDR MSAA
+   * buffer (with a resolved depth texture for SSCS) → screen-space sun shafts →
+   * progressive Dual-Kawase HDR bloom (half-res pyramid, OPT-04) → fused
+   * `PhotographicOutputPass` (SSCS contact shadows + bloom composite + EV100
+   * auto-exposure + Kelvin white balance + AgX Punchy + RCAS sharpening +
+   * cos⁴ vignette + edge CA + film grain + dither, GR-06 / PH-01–PH-04).
    */
   private setupPostPipeline(): void {
     if (this.composer || this.disposed) return;
@@ -1082,28 +1146,41 @@ export class BuildScene {
       // ghost-white frames — real GPUs keep 4x AA, software falls back to a clean resolve.
       samples: this.softwareGpu ? 0 : 4,
     });
+    // GR-06: the depth plane is resolved alongside colour (r187 blit) and feeds
+    // the SSCS raymarch in the fused output pass. Attached to renderTarget1 —
+    // the only buffer the RenderPass ever writes depth into.
+    if (!this.softwareGpu) {
+      this.sceneDepthTex = new THREE.DepthTexture(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr));
+      target.depthTexture = this.sceneDepthTex;
+    }
     this.composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, this.cameraCtrl.activeCamera);
     this.atmospherePass = new AtmospherePass();
-    this.bloomPass = new DualKawaseBloomPass(new THREE.Vector2(w, h));
-    this.outputPass = new FinalOutputPass();
-    this.outputPass.finalUniforms.tBloom.value = this.bloomPass.bloomTexture;
+    this.bloomPass = new DualKawaseBloomPass(new THREE.Vector2(w, h), this.photoPreset.bloomThreshold, 0.5, 2.2, 0.65);
+    this.photoOutputPass = new PhotographicOutputPass();
+    this.photoOutputPass.photoUniforms.tBloom.value = this.bloomPass.bloomTexture;
+    this.photoOutputPass.photoUniforms.tDepth.value = this.sceneDepthTex;
     this.composer.addPass(this.renderPass);
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
-    this.composer.addPass(this.outputPass);
+    this.composer.addPass(this.photoOutputPass);
     // Custom-target composers start with _width/_height in *pixels*; setSize must run
     // before setPixelRatio or the targets transiently resize to w·dpr² (~4x the VRAM).
     this.composer.setSize(w, h);
     this.composer.setPixelRatio(this.currentDpr);
+    this.photoOutputPass.setSize(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr));
     this.lastAppliedSize = { w, h, dpr: this.currentDpr };
     this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
-    this.outputPass.finalUniforms.uAspect.value = w / h;
+    this.photoOutputPass.photoUniforms.uAspect.value = w / h;
+    // GR-02: probe rig lives for the lifetime of the scene; baking is event-driven.
+    this.probeRig = new ReflectionProbeRig();
     if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
       (window as unknown as { __RT_DEBUG__?: unknown }).__RT_DEBUG__ = {
         composer: this.composer,
         atmo: this.atmospherePass,
         bloom: this.bloomPass,
+        photo: this.photoOutputPass,
+        probes: this.probeRig,
       };
     }
   }
@@ -1122,12 +1199,19 @@ export class BuildScene {
     if (this.atmospherePass) {
       this.atmospherePass.atmosphereUniforms.uSamples.value = this.activeTier === "high" ? 40 : 22;
     }
+    if (this.photoOutputPass) {
+      // GR-03: SSCS only on the high tier — medium keeps the fused output but skips
+      // the 6-step depth march; software/low tiers never reach this path.
+      this.photoOutputPass.photoUniforms.uSscs.value = this.activeTier === "high" && !this.softwareGpu ? 1 : 0;
+    }
   }
 
   /** Project the sun into screen space and drive the god-ray uniforms every frame,
    * then gate the pass chain: OPT-03 kills the whole atmosphere pass when the sun
    * is off-screen/behind the camera, OPT-04 skips the bloom pyramid when no HDR
-   * source exists (sun down, interior lights off, no lightning strike). */
+   * source exists (sun down, interior lights off, no lightning strike).
+   * GR-06/PH-01: also advances the smooth EV100 iris and feeds the fused
+   * photographic pass (sun dir in view space, projection, SSCS gating). */
   private updateAtmosphere(cam: THREE.Camera): void {
     const ap = this.atmospherePass;
     if (!ap) return;
@@ -1150,22 +1234,51 @@ export class BuildScene {
       ap.atmosphereUniforms.uTime.value = this.simElapsedS;
     }
 
-    // OPT-03: with vignette/dither fused into FinalOutputPass there is nothing left
-    // for this pass to do without visible sun shafts — drop the full-resolution
-    // HalfFloat read/write entirely (~50% of orbit angles and 100% of night).
+    // OPT-03: no shafts → no full-resolution HalfFloat read/write at all.
     ap.enabled = ap.atmosphereUniforms.uSunFade.value > 0.001;
 
     // OPT-04 early bypass: with the sun below the horizon, every interior light off
-    // and no lightning strike, no pixel can pass the 1.75 bloom threshold — the whole
-    // 7-pass bloom pyramid is skipped for free.
+    // and no lightning strike, no pixel can pass the photographic bloom threshold —
+    // the whole 7-pass bloom pyramid is skipped for free.
     if (this.bloomPass) {
       this.bloomPass.enabled =
         Boolean(this.sunCore?.visible) || this.poolLitState || this.lightningEnergy > 0.02;
     }
-    if (this.outputPass) {
-      this.outputPass.finalUniforms.uTime.value = this.simElapsedS;
-      this.outputPass.finalUniforms.uBloomStrength.value = this.bloomPass?.enabled ? DEFAULT_BLOOM_STRENGTH : 0;
+    if (this.photoOutputPass) {
+      const pu = this.photoOutputPass.photoUniforms;
+      pu.uTime.value = this.simElapsedS;
+      pu.uBloomStrength.value = this.bloomPass?.enabled ? this.photoPreset.bloomStrength : 0;
+      // PH-01 smooth iris (Build viewport is always exterior).
+      this.currentExposure = computeAutoExposure(
+        this.currentExposure,
+        this.derived?.project.simulation.hourOfDay ?? 10,
+        this.lastRainMmH,
+        false,
+        1 / 60,
+      );
+      pu.uExposure.value = this.currentExposure;
+      (pu.uWhiteBalance.value as THREE.Matrix3).set(
+        this.wbMatrix[0]!, this.wbMatrix[1]!, this.wbMatrix[2]!,
+        this.wbMatrix[3]!, this.wbMatrix[4]!, this.wbMatrix[5]!,
+        this.wbMatrix[6]!, this.wbMatrix[7]!, this.wbMatrix[8]!,
+      );
+      // Projection pair for SSCS view-space reconstruction.
+      const proj = cam.projectionMatrix;
+      (pu.uProj.value as THREE.Matrix4).copy(proj);
+      (pu.uProjInv.value as THREE.Matrix4).copy(cam.projectionMatrixInverse);
+      // Shared view-space sun direction (foliage SSS, Mie scattering, SSCS).
+      rtLookUniforms.uSunDirView.value.copy(this.sunDir).transformDirection(cam.matrixWorldInverse);
+      rtLookUniforms.uCamWorldY.value = cam.getWorldPosition(this._v2).y;
+      // SSCS is pointless at night / with the sun below the horizon.
+      pu.uSscs.value =
+        this.activeTier === "high" && !this.softwareGpu && this.sunLight.intensity > 0.4 ? 1 : 0;
+      pu.uSunDirView.value.copy(rtLookUniforms.uSunDirView.value);
     }
+  }
+
+  /** PH-03 cached white-balance matrix for the current photographic preset. */
+  private get wbMatrix(): number[] {
+    return whiteBalanceMatrix(this.photoPreset.kelvin, this.photoPreset.tint);
   }
 
   private applyQualityTier(tier: "high" | "medium" | "low", explicitHigh = false): void {
@@ -1548,6 +1661,35 @@ transformed.y = rainY;`,
     if (nextEnvKey !== this.envKey) {
       this.envKey = nextEnvKey;
 
+      // PH-01/PH-03/GR-06: resolve the photographic calibration for this hour and
+      // push it into the shared uniforms + bloom + aerial colors (0 GPU cost).
+      this.photoPreset = resolvePhotographicPreset(sim.hourOfDay, sim.rainIntensityMmH);
+      rtLookUniforms.uRtGiStrength.value = this.rayTracingEnabled ? this.photoPreset.giBounce : 0;
+      this.bloomPass?.setThreshold(this.photoPreset.bloomThreshold);
+      {
+        const isNightP = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
+        const isGoldenP = (sim.hourOfDay >= 16.5 && sim.hourOfDay <= 18.8) || (sim.hourOfDay >= 5.2 && sim.hourOfDay <= 7.5);
+        rtLookUniforms.uAerialWarm.value.setRGB(
+          isNightP ? 0.3 : isGoldenP ? 1.0 : 0.92,
+          isNightP ? 0.36 : isGoldenP ? 0.8 : 0.87,
+          isNightP ? 0.52 : isGoldenP ? 0.55 : 0.72,
+        );
+        rtLookUniforms.uAerialCool.value.setRGB(
+          isNightP ? 0.18 : 0.66,
+          isNightP ? 0.25 : 0.76,
+          isNightP ? 0.4 : 0.88,
+        );
+        rtLookUniforms.uSunTint.value.setRGB(
+          isNightP ? 0.18 : isGoldenP ? 1.0 : 0.99,
+          isNightP ? 0.22 : isGoldenP ? 0.83 : 0.95,
+          isNightP ? 0.34 : isGoldenP ? 0.6 : 0.87,
+        );
+      }
+      // GR-02: reflection probes re-capture on sun-hour change (event-driven).
+      if (this.rayTracingEnabled && this.probeRig?.hasBaked) {
+        this.bakeReflectionProbes();
+      }
+
       // Sun angle + cool opposite sky fill (`3d-wood-lighting-scorecard`)
       let sx = 0.45;
       let sy = 0.78;
@@ -1591,10 +1733,13 @@ transformed.y = rainY;`,
       // Screen-space sun shaft strength (`3d-sky-rays`): strongest at a low golden sun, subtle at noon
       this.godRayStrength = isNight ? 0 : isStorm ? 0.12 : isGolden ? 0.95 : 0.5;
       this.godRayStrength *= THREE.MathUtils.lerp(1.3, 0.75, THREE.MathUtils.clamp(this.sunDir.y, 0, 1));
+      // PH-05: preset character rides on top (pagi lembut, golden sinematik).
+      this.godRayStrength *= this.photoPreset.godRayBoost;
 
       if (this.scene.fog instanceof THREE.FogExp2) {
         this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
         this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
+        this.scene.fog.density *= this.photoPreset.aerialDensity;
       }
       this.markShadowDirty();
     }
@@ -1984,6 +2129,17 @@ transformed.y = rainY;`,
     });
     this.rebuildGridOverlay();
     this.applyLevelAndWallVisibility();
+    // GR-02: fresh meshes carry cloned materials — re-point BPCEM env-maps at the
+    // probes (or the flat PMREM env while RT is off) and re-capture so the
+    // reflection content matches the new build.
+    if (this.probeRig) {
+      if (this.rayTracingEnabled && this.hasRenderedOnce) {
+        this.bakeReflectionProbes();
+      } else {
+        this.probeRig.bindEnvMaps(this.houseContainer, false, this.envTex);
+        this.probeRig.bindEnvMaps(this.propsContainer, false, this.envTex);
+      }
+    }
     this.markShadowDirty();
   }
 
@@ -4839,7 +4995,10 @@ transformed.y = rainY;`,
       if (sizeChanged || dprChanged) this.composer.setSize(w, h);
     }
     if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
-    if (this.outputPass) this.outputPass.finalUniforms.uAspect.value = w / h;
+    if (this.photoOutputPass) {
+      this.photoOutputPass.photoUniforms.uAspect.value = w / h;
+      this.photoOutputPass.setSize(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr));
+    }
     // A real resize just reset the drawing buffer; paint one frame right now so the
     // user never sees the cleared (black) canvas waiting for the next RAF.
     if (this.hasRenderedOnce && !this.contextLost && !this.disposed) {
@@ -5041,6 +5200,12 @@ transformed.y = rainY;`,
         this.perfCpuMs = performance.now() - perfT0;
       }
       this.hasRenderedOnce = true;
+      // GR-02: first reflection-probe bake happens right after the first rendered
+      // frame (house built, sky assigned) — then only on rebuild/envKey change.
+      if (this.probeRig && this.rayTracingEnabled && !this.probeRig.hasBaked && !this.softwareGpu) {
+        this.bakeReflectionProbes();
+        this.requestRender();
+      }
 
       if (dt > 0 && dt < 0.25) {
         this.fpsSamples.push(1 / dt);

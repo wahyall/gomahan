@@ -1,17 +1,56 @@
 import * as THREE from "three";
 import type { Level, Project } from "@/lib/model/types";
 import type { StructuralColumnNode } from "@/lib/structure/sniEngine";
+import { rtLookUniforms } from "@/lib/scene/rtUniforms";
 
 /**
- * 4-Layer Fast Deterministic CPU Baked AO System (`PF-00`):
- * 1. Floor & Ceiling 2D Distance-Field AO Map (`uv1` + `material.aoMap`)
+ * 4-Layer Fast Deterministic CPU Baked AO System (`PF-00`) upgraded to a
+ * **4-channel RGBA Baked GI + Sky Occlusion map** (`GR-01`):
+ *
+ * 1. Floor & Ceiling 2D Distance-Field AO Map (`uv1` + `material.aoMap`) — now RGBA:
+ *    `R` crease AO · `G` **sky visibility** (interiors 0.24, open yard 1.0,
+ *    soft gradient toward openings) · `B` **single-bounce GI / colour-bleeding
+ *    intensity** (sun pools through openings + active night fixtures) ·
+ *    `A` warm↔cool GI tint blend.
  * 2. Analytical Vertex Crease AO (`aAoDarken` attribute + `onBeforeCompile` indirect-only multiplier)
  * 3. Instanced Contact AO Decals (1 `InstancedMesh` per floor)
  * 4. Procedural Micro-Cavity AO (applied once at texture generation in `materials.ts`)
+ *
+ * The GI channels are injected in `attachBakedAoShader` behind the shared
+ * `uRtEnabled` uniform: RT OFF reproduces the pre-GR-01 look bit-for-bit;
+ * RT ON unlocks interior sky occlusion + warm colour bleeding — ~0.05 ms/frame.
  */
 
 const BAKED_AO_ATTR = "aAoDarken";
-const BAKED_AO_CACHE_KEY_SUFFIX = "-baked-ao-v2";
+const BAKED_AO_CACHE_KEY_SUFFIX = "-baked-ao-v3";
+
+/** Deterministic sun direction used by the CPU GI bake (mirrors BuildScene's fallback). */
+export function computeBakeSunDir(hourOfDay: number): { x: number; y: number; z: number } {
+  const sunElev = Math.max(0.12, Math.sin(((hourOfDay - 5.5) / 13) * Math.PI));
+  const sunAz = ((hourOfDay - 12) / 6) * 0.9;
+  const x = Math.sin(sunAz);
+  const y = sunElev;
+  const z = -Math.cos(sunAz) * 0.6;
+  const inv = 1 / Math.hypot(x, y, z);
+  return { x: x * inv, y: y * inv, z: z * inv };
+}
+
+/** Simplified light fixture context for the GI bake. */
+export interface GiBakeLight {
+  x: number;
+  y: number;
+  z: number;
+  on: boolean;
+  dimmer: number;
+  lumens: number;
+  colorTempK: number;
+}
+
+export interface GiBakeContext {
+  hourOfDay: number;
+  rainIntensityMmH: number;
+  lights: GiBakeLight[];
+}
 
 /**
  * Ensures `uv1` exists on a floor/ceiling geometry by projecting world XZ coordinates
@@ -57,32 +96,58 @@ function distPointToSegmentSq(px: number, pz: number, ax: number, az: number, bx
   return ex * ex + ez * ez;
 }
 
+interface Box2 {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+function boxContains(b: Box2, x: number, z: number): boolean {
+  return x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ;
+}
+
+function polygonBoundsLocal(points: { x: number; z: number }[]): Box2 | null {
+  if (points.length < 3) return null;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  return { minX, maxX, minZ, maxZ };
+}
+
 /**
- * Generates a fast 2D soft distance-field AO DataTexture (<3 ms) for a floor level:
- * darkens smoothly along walls, wall corners, columns, and stair/overhang projections.
+ * Generates the 4-channel RGBA baked GI + AO DataTexture (<2 ms CPU) for a floor level:
  *
- * OPT-10: rasterizes each wall segment only over its ±wallRadius pixel footprint
- * (instead of testing every pixel against every wall) and hoists stair/slab AABBs
- * out of the pixel loop. The per-pixel math is unchanged, so the output is
- * bit-identical to the brute-force version (~55× fewer distance evaluations).
- * The texture is single-channel `THREE.RedFormat` — the aoMap shader reads `.r`
- * only, so grayscale RGBA was 4× the VRAM and upload bandwidth for nothing.
+ * - `R` crease AO (walls, corners, columns, stairs, overhang slabs — unchanged math)
+ * - `G` sky visibility (enclosed rooms 0.24 · carport 0.55 · overhang 0.42 · open 1.0,
+ *   lifted toward 0.85 within 1.8 m of an open window/door)
+ * - `B` GI bounce intensity (halo around sun pools through openings + night fixture
+ *   glow — the *secondary* bounce, the direct pool itself comes from the shadow map)
+ * - `A` warm↔cool GI tint (1 = tungsten/wood bounce, 0 = blue-hour ambient)
  */
-export function generateFloorAoTexture(
+export function generateFloorGiAoTexture(
   level: Level | undefined,
   project: Project,
   columns: StructuralColumnNode[],
   levelIndex: 0 | 1,
+  gi: GiBakeContext,
 ): THREE.DataTexture {
   const siteW = Math.max(1, project.site.width);
   const siteD = Math.max(1, project.site.depth);
-  // ~256×512 proportion for 5×17m, capped for fast <3ms CPU generation
   const texW = 128;
   const texH = Math.max(128, Math.min(512, Math.round((texW * siteD) / siteW)));
-  const data = new Uint8Array(texW * texH);
+  const pxCount = texW * texH;
+  const data = new Uint8Array(pxCount * 4);
 
   const walls = level?.walls ?? [];
-  const stairs = project.levels[0]?.stairs ?? [];
+  const stairs = levelIndex === 0 ? (project.levels[0]?.stairs ?? []) : [];
   const lt2Slabs = levelIndex === 0 ? (project.levels[1]?.slabs ?? []) : [];
   const lvCols = columns.filter((c) => (levelIndex === 0 ? c.minLevel === 0 : c.maxLevel >= 1));
 
@@ -93,10 +158,8 @@ export function generateFloorAoTexture(
   const colRadiusSq = colRadius * colRadius;
 
   // --- Pass 1: per-segment wall distance-field rasterization (OPT-10) ---
-  // A pixel only ever sees wall influence when it lies within `wallRadius` of
-  // the segment, so each wall only visits the pixels of its own footprint.
-  const minWallDistSq = new Float32Array(texW * texH).fill(wallRadiusSq);
-  const nearCount = new Uint8Array(texW * texH);
+  const minWallDistSq = new Float32Array(pxCount).fill(wallRadiusSq);
+  const nearCount = new Uint8Array(pxCount);
 
   const pxPerMeterX = texW / siteW;
   const pxPerMeterZ = texH / siteD;
@@ -107,7 +170,6 @@ export function generateFloorAoTexture(
     const hiX = Math.max(w.start.x, w.end.x) + wallRadius;
     const loZ = Math.min(w.start.z, w.end.z) - wallRadius;
     const hiZ = Math.max(w.start.z, w.end.z) + wallRadius;
-    // Pixel centers are ((px + 0.5) / texW) * siteW; add ±1px of safety margin.
     const px0 = Math.max(0, Math.floor(loX * pxPerMeterX - 0.5) - 1);
     const px1 = Math.min(texW - 1, Math.ceil(hiX * pxPerMeterX - 0.5) + 1);
     const py0 = Math.max(0, Math.floor(loZ * pxPerMeterZ - 0.5) - 1);
@@ -127,8 +189,8 @@ export function generateFloorAoTexture(
     }
   }
 
-  // --- OPT-10: hoist stair & overhang-slab AABBs out of the pixel loop ---
-  const stairBoxes: { minX: number; maxX: number; minZ: number; maxZ: number }[] = [];
+  // --- Hoisted stair / overhang / room AABBs (OPT-10) ---
+  const stairBoxes: Box2[] = [];
   for (let i = 0; i < stairs.length; i++) {
     const st = stairs[i]!;
     stairBoxes.push({
@@ -138,24 +200,110 @@ export function generateFloorAoTexture(
       maxZ: Math.max(st.start.z, st.end.z) + st.width * 0.5,
     });
   }
-  const slabBoxes: { minX: number; maxX: number; minZ: number; maxZ: number }[] = [];
+  const slabBoxes: Box2[] = [];
   for (let i = 0; i < lt2Slabs.length; i++) {
     const sl = lt2Slabs[i]!;
     if (!sl.isOverhang || sl.polygon.length < 3) continue;
-    let sMinX = Infinity;
-    let sMaxX = -Infinity;
-    let sMinZ = Infinity;
-    let sMaxZ = -Infinity;
-    for (const pt of sl.polygon) {
-      if (pt.x < sMinX) sMinX = pt.x;
-      if (pt.x > sMaxX) sMaxX = pt.x;
-      if (pt.z < sMinZ) sMinZ = pt.z;
-      if (pt.z > sMaxZ) sMaxZ = pt.z;
-    }
-    slabBoxes.push({ minX: sMinX, maxX: sMaxX, minZ: sMinZ, maxZ: sMaxZ });
+    const b = polygonBoundsLocal(sl.polygon);
+    if (b) slabBoxes.push(b);
   }
 
-  // --- Pass 2: combine the distance field with columns/stairs/slabs ---
+  // Enclosed-room boxes (sky occlusion): interior programs only — gardens,
+  // carports, the LT1 teras (circulation) and LT2 balconies stay sky-open.
+  // On LT2 every enclosed room sits under the roof.
+  const rooms = level?.rooms ?? [];
+  const enclosedRoomBoxes: Box2[] = [];
+  const openPrograms = levelIndex === 0 ? ["garden", "carport", "void", "circulation"] : ["garden", "void", "balcony"];
+  for (const r of rooms) {
+    if (openPrograms.includes(r.program)) continue;
+    const b = polygonBoundsLocal(r.polygon);
+    if (b) enclosedRoomBoxes.push(b);
+  }
+  const carportBoxes: Box2[] =
+    levelIndex === 0
+      ? rooms.filter((r) => r.program === "carport").map((r) => polygonBoundsLocal(r.polygon)).filter((b): b is Box2 => b !== null)
+      : [];
+
+  // --- GI bake inputs ---------------------------------------------------------
+  const isDay = gi.hourOfDay >= 5.6 && gi.hourOfDay <= 18.4;
+  const sunDir = computeBakeSunDir(gi.hourOfDay);
+  const rainFactor = Math.min(1, gi.rainIntensityMmH / 60);
+  const sunPower = isDay ? Math.max(0, 1 - rainFactor * 0.75) : 0;
+
+  interface GiBlob {
+    x: number;
+    z: number;
+    r: number;
+    intensity: number;
+    warm: number;
+  }
+  const blobs: GiBlob[] = [];
+
+  // Sun pools through light-passing openings (secondary bounce halo).
+  if (sunPower > 0.02) {
+    for (const w of walls) {
+      const wLen = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
+      if (wLen < 0.2 || w.height < 1.6) continue;
+      const dx = (w.end.x - w.start.x) / wLen;
+      const dz = (w.end.z - w.start.z) / wLen;
+      for (const op of w.openings) {
+        const lightPasses = op.kind === "arch" || op.kind === "window" || op.openPct > 15;
+        if (!lightPasses) continue;
+        const opX = w.start.x + dx * op.offset;
+        const opZ = w.start.z + dz * op.offset;
+        const opY = op.sill + op.height * 0.5;
+        // Ray from the opening along the sun direction down to this level's floor.
+        const floorY =
+          levelIndex === 0 ? project.site.peil.floor1PeilM : project.site.peil.floor1PeilM + (project.levels[0]?.height ?? 3.6);
+        if (sunDir.y <= 0.05) continue;
+        const t = (opY - floorY) / sunDir.y;
+        if (t <= 0 || t > 40) continue;
+        const poolX = opX - sunDir.x * t;
+        const poolZ = opZ - sunDir.z * t;
+        const spread = 0.55 * op.width + 0.5 * Math.min(6, t);
+        blobs.push({
+          x: poolX,
+          z: poolZ,
+          r: spread * 2.1, // halo is wider than the direct pool — it is the bounce
+          intensity: 0.3 * sunPower * Math.min(1, op.width / 1.1),
+          warm: 1,
+        });
+      }
+    }
+    // Soft sky bounce base inside enclosed rooms (through openings, indirect).
+    if (levelIndex === 0) {
+      for (const b of enclosedRoomBoxes) {
+        blobs.push({
+          x: (b.minX + b.maxX) * 0.5,
+          z: (b.minZ + b.maxZ) * 0.5,
+          r: Math.max(b.maxX - b.minX, b.maxZ - b.minZ) * 0.75,
+          intensity: 0.05 * sunPower,
+          warm: 0.7,
+        });
+      }
+    }
+  }
+
+  // Night fixture glow (warm pools under downlights/wall/garden lamps).
+  const nightFactor = isDay ? 0.25 : 1;
+  for (const l of gi.lights) {
+    if (!l.on || l.dimmer <= 0) continue;
+    const lumens = Math.max(0, Math.min(1200, l.lumens));
+    const power = (lumens / 650) * l.dimmer * 0.42 * nightFactor;
+    if (power <= 0.01) continue;
+    blobs.push({
+      x: l.x,
+      z: l.z,
+      r: 1.1 + Math.min(2.4, l.y * 0.55),
+      intensity: power,
+      warm: l.colorTempK <= 3200 ? 1 : 0.22,
+    });
+  }
+
+  // --- Pass 2: combine the distance field with columns/stairs/slabs + GI ------
+  const giB = new Float32Array(pxCount);
+  const giA = new Float32Array(pxCount);
+
   for (let py = 0; py < texH; py++) {
     const wz = ((py + 0.5) / texH) * siteD;
     for (let px = 0; px < texW; px++) {
@@ -190,25 +338,83 @@ export function generateFloorAoTexture(
       // 3. LT1 under-stair & overhang AO
       if (levelIndex === 0) {
         for (let i = 0; i < stairBoxes.length; i++) {
-          const b = stairBoxes[i]!;
-          if (wx >= b.minX && wx <= b.maxX && wz >= b.minZ && wz <= b.maxZ) {
-            ao = Math.min(ao, 0.48);
-          }
+          if (boxContains(stairBoxes[i]!, wx, wz)) ao = Math.min(ao, 0.48);
         }
         for (let i = 0; i < slabBoxes.length; i++) {
-          const b = slabBoxes[i]!;
-          if (wx >= b.minX && wx <= b.maxX && wz >= b.minZ && wz <= b.maxZ) {
-            ao = Math.min(ao, 0.62);
-          }
+          if (boxContains(slabBoxes[i]!, wx, wz)) ao = Math.min(ao, 0.62);
         }
       }
 
+      // --- Sky visibility (G) ---
+      let skyVis = 1.0;
+      for (let i = 0; i < enclosedRoomBoxes.length; i++) {
+        if (boxContains(enclosedRoomBoxes[i]!, wx, wz)) {
+          skyVis = 0.24;
+          break;
+        }
+      }
+      if (skyVis > 0.9) {
+        for (let i = 0; i < carportBoxes.length; i++) {
+          if (boxContains(carportBoxes[i]!, wx, wz)) {
+            skyVis = 0.55;
+            break;
+          }
+        }
+      }
+      if (skyVis > 0.9 && levelIndex === 0) {
+        for (let i = 0; i < slabBoxes.length; i++) {
+          if (boxContains(slabBoxes[i]!, wx, wz)) {
+            skyVis = 0.42;
+            break;
+          }
+        }
+      }
+      if (skyVis < 0.9) {
+        // Openings pull sky visibility back up within 1.8 m (soft window gradient).
+        const openBoost = openingSkyBoost(walls, wx, wz);
+        if (openBoost > 0) {
+          skyVis = Math.min(1, skyVis + (0.85 - skyVis) * openBoost);
+        }
+      }
+
+      // --- GI bounce accumulation (B/A) ---
+      let bAcc = 0;
+      let aWeight = 0;
+      let aAcc = 0;
+      for (let i = 0; i < blobs.length; i++) {
+        const bl = blobs[i]!;
+        const d = Math.hypot(wx - bl.x, wz - bl.z);
+        if (d >= bl.r) continue;
+        const f = 1 - d / bl.r;
+        const wgt = f * f * bl.intensity;
+        bAcc += wgt;
+        aAcc += wgt * bl.warm;
+        aWeight += wgt;
+      }
+      const aoGate = 0.4 + 0.6 * ao;
+      giB[pidx] = Math.min(0.5, bAcc * aoGate);
+      giA[pidx] = aWeight > 1e-4 ? Math.min(1, aAcc / aWeight) : 0.75;
+
       const v = Math.max(68, Math.min(255, Math.round(ao * 255)));
-      data[pidx] = v;
+      const p4 = pidx * 4;
+      data[p4] = v;
+      data[p4 + 2] = 0;
+      data[p4 + 3] = 0;
+      // G channel filled below (needs the blurred B context? no — direct write):
+      data[p4 + 1] = Math.max(0, Math.min(255, Math.round(skyVis * 255)));
     }
   }
 
-  const tex = new THREE.DataTexture(data, texW, texH, THREE.RedFormat);
+  // --- Pass 3: 2× separable 3-tap blur on the GI channels (organic pools) -----
+  blurChannel(giB, texW, texH);
+  blurChannel(giA, texW, texH);
+  for (let i = 0; i < pxCount; i++) {
+    const p4 = i * 4;
+    data[p4 + 2] = Math.max(0, Math.min(255, Math.round(giB[i]! * 2 * 255)));
+    data[p4 + 3] = Math.max(0, Math.min(255, Math.round(giA[i]! * 255)));
+  }
+
+  const tex = new THREE.DataTexture(data, texW, texH, THREE.RGBAFormat);
   tex.colorSpace = THREE.NoColorSpace;
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -217,6 +423,72 @@ export function generateFloorAoTexture(
   tex.flipY = false;
   tex.needsUpdate = true;
   return tex;
+}
+
+/** Sky-visibility lift near light-passing openings (max 1.0 at the frame, 0 beyond 1.8 m). */
+function openingSkyBoost(walls: Level["walls"], wx: number, wz: number): number {
+  let best = 0;
+  for (const w of walls) {
+    if (w.height < 1.6) continue;
+    const wLen = Math.hypot(w.end.x - w.start.x, w.end.z - w.start.z);
+    if (wLen < 0.2) continue;
+    const dx = (w.end.x - w.start.x) / wLen;
+    const dz = (w.end.z - w.start.z) / wLen;
+    for (const op of w.openings) {
+      const lightPasses = op.kind === "arch" || op.kind === "window" || op.openPct > 15;
+      if (!lightPasses) continue;
+      const opX = w.start.x + dx * op.offset;
+      const opZ = w.start.z + dz * op.offset;
+      const d = Math.hypot(wx - opX, wz - opZ);
+      const reach = 0.35 + op.width * 0.5 + 1.8;
+      if (d < reach) {
+        const f = 1 - d / reach;
+        best = Math.max(best, f);
+        if (best >= 0.999) return 1;
+      }
+    }
+  }
+  return best;
+}
+
+/** In-place 3-tap separable blur (two axis passes), adequate for soft GI pools. */
+function blurChannel(ch: Float32Array, w: number, h: number): void {
+  const tmp = new Float32Array(ch.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const c = ch[row + x]!;
+      const l = x > 0 ? ch[row + x - 1]! : c;
+      const r = x < w - 1 ? ch[row + x + 1]! : c;
+      tmp[row + x] = (l + 2 * c + r) * 0.25;
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      const idx = y * w + x;
+      const c = tmp[idx]!;
+      const u = y > 0 ? tmp[idx - w]! : c;
+      const d = y < h - 1 ? tmp[idx + w]! : c;
+      ch[idx] = (u + 2 * c + d) * 0.25;
+    }
+  }
+}
+
+/**
+ * Back-compat wrapper: AO-only bake (neutral mid-day, no fixtures) — callers that
+ * only need the crease field (tests, legacy paths) keep working.
+ */
+export function generateFloorAoTexture(
+  level: Level | undefined,
+  project: Project,
+  columns: StructuralColumnNode[],
+  levelIndex: 0 | 1,
+): THREE.DataTexture {
+  return generateFloorGiAoTexture(level, project, columns, levelIndex, {
+    hourOfDay: 10,
+    rainIntensityMmH: 0,
+    lights: [],
+  });
 }
 
 /**
@@ -316,8 +588,10 @@ export function applyGradientVertexAo(
 }
 
 /**
- * Attaches indirect-only Baked Vertex AO (`aAoDarken`) to a PBR material.
- * Uses `customProgramCacheKey` so Three.js shares compiled WebGL programs cleanly.
+ * Attaches indirect-only Baked Vertex AO (`aAoDarken`) + RGBA Baked GI / Sky
+ * Occlusion injection to a PBR material (GR-01). Uses `customProgramCacheKey`
+ * so Three.js shares compiled WebGL programs cleanly. When `uRtEnabled = 0` the
+ * injected math collapses to the exact pre-GR-01 behaviour.
  */
 export function attachBakedAoShader<T extends THREE.MeshStandardMaterial>(mat: T): T {
   const ud = mat.userData as { _bakedAoAttached?: boolean };
@@ -349,20 +623,43 @@ vBakedAo = 1.0 - clamp(${BAKED_AO_ATTR}, 0.0, 0.78);`,
         .replace(
           "#include <common>",
           `#include <common>
-varying float vBakedAo;`,
+varying float vBakedAo;
+uniform float uRtEnabled;
+uniform float uRtGiStrength;`,
         )
         .replace(
           "#include <aomap_fragment>",
-          `#include <aomap_fragment>
-#ifdef USE_AOMAP
-float floorMapAo = clamp(ambientOcclusion, 0.25, 1.0);
-reflectedLight.directDiffuse *= mix(1.0, floorMapAo, 0.42);
+          `#ifdef USE_AOMAP
+  // GR-01 RGBA baked map: R crease AO · G sky visibility · B GI intensity · A warm/cool tint.
+  vec4 giAoSample = texture2D( aoMap, vAoMapUv );
+  float bakedCreaseAo = clamp( giAoSample.r, 0.0, 1.0 );
+  float bakedSkyVis = clamp( giAoSample.g, 0.0, 1.0 );
+  float ambientOcclusion = ( bakedCreaseAo - 1.0 ) * aoMapIntensity + 1.0;
+  float skyOcclusion = mix( 1.0, 0.22 + 0.78 * bakedSkyVis, uRtEnabled );
+  reflectedLight.indirectDiffuse *= ambientOcclusion * skyOcclusion;
+  #if defined( USE_CLEARCOAT )
+    clearcoatSpecularIndirect *= ambientOcclusion * skyOcclusion;
+  #endif
+  #if defined( USE_SHEEN )
+    sheenSpecularIndirect *= ambientOcclusion * skyOcclusion;
+  #endif
+  #if defined( USE_ENVMAP ) && defined( STANDARD )
+    float dotNV = saturate( dot( geometryNormal, geometryViewDir ) );
+    reflectedLight.indirectSpecular *= computeSpecularOcclusion( dotNV, ambientOcclusion, material.roughness ) * mix( 1.0, skyOcclusion, 0.6 );
+  #endif
+  float floorMapAo = clamp( bakedCreaseAo, 0.25, 1.0 );
+  reflectedLight.directDiffuse *= mix( 1.0, floorMapAo, 0.42 );
+  // Single-bounce colour bleeding: warm halo around sun pools / night fixtures.
+  vec3 giTint = mix( vec3( 0.62, 0.70, 0.88 ), vec3( 1.0, 0.84, 0.62 ), clamp( giAoSample.a, 0.0, 1.0 ) );
+  reflectedLight.indirectDiffuse += giAoSample.b * 0.5 * giTint * diffuseColor.rgb * uRtEnabled * uRtGiStrength * 0.85;
 #endif
 reflectedLight.directDiffuse *= mix(1.0, vBakedAo, 0.36);
 reflectedLight.indirectDiffuse *= vBakedAo;
 reflectedLight.indirectSpecular *= mix(1.0, vBakedAo, 0.75);`,
         );
     }
+    shader.uniforms.uRtEnabled = rtLookUniforms.uRtEnabled;
+    shader.uniforms.uRtGiStrength = rtLookUniforms.uRtGiStrength;
   };
   mat.needsUpdate = true;
   return mat;

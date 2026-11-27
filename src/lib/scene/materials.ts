@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import { attachBakedAoShader } from "@/lib/scene/bakedAo";
+import { attachPcssShadow } from "@/lib/scene/pcssShadow";
+import { attachBpceReflection } from "@/lib/scene/reflectionProbes";
+import { exteriorProbeUniforms, interiorProbeUniforms, rtLookUniforms } from "@/lib/scene/rtUniforms";
 
 /**
  * High-resolution procedural PBR textures & materials guided by:
@@ -215,9 +218,20 @@ function getOrBuildCanvasPalette(texScale: number): CachedCanvasPalette {
       ctx.strokeRect(3.5, 3.5, S - 7, S - 7);
     });
     const rough = makeCanvasOnly(S, S, (ctx) => {
-      ctx.fillStyle = "#484848";
+      // GR-04 glazed ceramic body 0.14–0.21 (mirror-wet reflections) with subtle
+      // mineral mottling so window reflections stay faintly organic, grout 0.96.
+      ctx.fillStyle = "#232323"; // ≈0.137 glazed centre
       ctx.fillRect(0, 0, S, S);
-      ctx.strokeStyle = "#e0e0e0";
+      for (let i = 0; i < 24; i++) {
+        const gx = (i * 137) % S;
+        const gy = (i * 289) % S;
+        const grad = ctx.createRadialGradient(gx, gy, 2, gx, gy, S * 0.22);
+        grad.addColorStop(0, i % 2 === 0 ? "rgba(56,56,56,0.5)" : "rgba(26,26,26,0.5)");
+        grad.addColorStop(1, "rgba(40,40,40,0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(gx - S * 0.22, gy - S * 0.22, S * 0.44, S * 0.44);
+      }
+      ctx.strokeStyle = "#f5f5f5"; // matte grout ≈ 0.96
       ctx.lineWidth = 8;
       ctx.strokeRect(4, 4, S - 8, S - 8);
     });
@@ -488,9 +502,19 @@ export function createTileTextures(tileCm: number, baseHex: string, groutHex: st
     S,
     S,
     (ctx) => {
-      ctx.fillStyle = "#484848"; // glossy/satin glazed tile center
+      // GR-04 glazed ceramic: body 0.14–0.21, grout 0.96 (plan §1.3).
+      ctx.fillStyle = "#232323"; // glazed tile centre
       ctx.fillRect(0, 0, S, S);
-      ctx.strokeStyle = "#e0e0e0"; // matte grout line
+      for (let i = 0; i < 24; i++) {
+        const gx = (i * 137) % S;
+        const gy = (i * 289) % S;
+        const grad = ctx.createRadialGradient(gx, gy, 2, gx, gy, S * 0.22);
+        grad.addColorStop(0, i % 2 === 0 ? "rgba(56,56,56,0.5)" : "rgba(26,26,26,0.5)");
+        grad.addColorStop(1, "rgba(40,40,40,0)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(gx - S * 0.22, gy - S * 0.22, S * 0.44, S * 0.44);
+      }
+      ctx.strokeStyle = "#f5f5f5"; // matte grout line
       ctx.lineWidth = 8;
       ctx.strokeRect(4, 4, S - 8, S - 8);
     },
@@ -647,6 +671,8 @@ export function createStandingSeamBumpTexture() {
 
 export function createSkyGradientTexture(hourOfDay: number, season: "kemarau" | "hujan", rainMmH: number): THREE.CanvasTexture {
   // Seamless 360-degree equirectangular atmospheric sky dome (`3d-sky-background`)
+  // upgraded with photographic atmosphere (PH-05): solar aureole, horizon haze band
+  // and gentle Rayleigh-like vertical falloff — all baked once per envKey (0 ms/frame).
   const W = 512;
   const H = 256;
   const cv = document.createElement("canvas");
@@ -676,6 +702,36 @@ export function createSkyGradientTexture(hourOfDay: number, season: "kemarau" | 
   pos.forEach((p, i) => grd.addColorStop(p, stops[i]!));
   ctx.fillStyle = grd;
   ctx.fillRect(0, 0, W, H);
+
+  // PH-05 — soft horizon haze band (aerial perspective cue at the dome's equator).
+  if (!isStorm) {
+    const hazeAlpha = isNight ? 0.05 : isGolden ? 0.3 : 0.16;
+    const hazeCol = isNight ? "41, 58, 92" : isGolden ? "246, 196, 138" : "236, 244, 250";
+    const haze = ctx.createLinearGradient(0, H * 0.4, 0, H * 0.62);
+    haze.addColorStop(0, `rgba(${hazeCol},0)`);
+    haze.addColorStop(0.55, `rgba(${hazeCol},${hazeAlpha})`);
+    haze.addColorStop(1, `rgba(${hazeCol},0)`);
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, H * 0.4, W, H * 0.22);
+  }
+
+  // PH-05 — solar aureole around the true sun position (feeds CubeCamera reflections).
+  if (!isNight && !isStorm) {
+    const sunAz = ((hourOfDay - 12) / 6) * 0.9; // matches the BuildScene fallback formula
+    const sunElev = Math.max(0.12, Math.sin(((hourOfDay - 5.5) / 13) * Math.PI));
+    const sunU = ((Math.atan2(Math.sin(sunAz), Math.cos(sunAz)) / (Math.PI * 2)) + 0.5) % 1;
+    const sunV = Math.max(0.04, Math.min(0.96, 0.5 - Math.asin(Math.min(1, sunElev)) / Math.PI));
+    const cx = sunU * W;
+    const cy = sunV * H;
+    const aureoleR = isGolden ? W * 0.42 : W * 0.26;
+    const coreCol = isGolden ? "255, 214, 150" : "255, 248, 232";
+    const halo = ctx.createRadialGradient(cx, cy, 2, cx, cy, aureoleR);
+    halo.addColorStop(0, `rgba(${coreCol},${isGolden ? 0.55 : 0.34})`);
+    halo.addColorStop(0.35, `rgba(${coreCol},${isGolden ? 0.2 : 0.12})`);
+    halo.addColorStop(1, `rgba(${coreCol},0)`);
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   if (!isStorm) {
     // Periodic harmonic cirrus / cumulus bands along azimuth so longitude wrap at x=0/W is 100% seam-free
@@ -829,6 +885,209 @@ export interface MaterialPalette {
   getCachedMaterial: (hex: string, roughness: number) => THREE.MeshStandardMaterial;
   getPropMaterial: <T extends THREE.Material>(key: string, factory: () => T) => T;
   dispose: () => void;
+}
+
+/* ------------------------------------------------------------------ *
+ * GR-04 / GR-07 / PH — photographic material shader hooks.            *
+ * All hooks are uniform-gated (rtLookUniforms): RT OFF compiles the   *
+ * exact stock shader path; RT ON activates the injection in-place.    *
+ * ------------------------------------------------------------------ */
+
+const RT_AA_CACHE_KEY = "-rt-spec-aa-v1";
+const RT_AERIAL_CACHE_KEY = "-rt-aerial-v1";
+const RT_GLASS_CACHE_KEY = "-rt-fresnel-glass-v1";
+const RT_SSS_CACHE_KEY = "-rt-foliage-sss-v1";
+
+/**
+ * GR-04 — Toksvig/Kaplanyan specular anti-aliasing: derives extra roughness
+ * from the per-pixel normal variance so window mullions, metal roof seams and
+ * tile grout stop shimmering while the camera moves. 3 lines of GLSL.
+ */
+export function attachSpecularAa<T extends THREE.MeshStandardMaterial>(mat: T): T {
+  const ud = mat.userData as { _rtSpecAa?: boolean };
+  if (ud._rtSpecAa) return mat;
+  ud._rtSpecAa = true;
+  const prevKey = mat.customProgramCacheKey?.bind(mat);
+  mat.customProgramCacheKey = () => `${prevKey ? prevKey() : mat.type}${RT_AA_CACHE_KEY}`;
+  const prevCompile = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prevCompile?.call(mat, shader, renderer);
+    if (shader.fragmentShader.includes("rtSpecAa")) return;
+    shader.uniforms.uRtEnabled = rtLookUniforms.uRtEnabled;
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <roughnessmap_fragment>",
+      `#include <roughnessmap_fragment>
+#ifndef FLAT_SHADED
+  float rtSpecAa = length( fwidth( vNormal ) ) * 0.55 * uRtEnabled;
+  roughnessFactor = clamp( roughnessFactor + rtSpecAa, 0.045, 1.0 );
+#endif`,
+    );
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
+/**
+ * GR-07 — Height-based aerial perspective + Mie sun in-scattering fused into
+ * `fog_fragment` (visible from 100% of camera angles, not just toward the sun):
+ * distant neighbours gain a warm glow toward the sun and cool blue depth away
+ * from it, while ground-level air thickens via an exponential height falloff.
+ */
+export function attachAerialFog<T extends THREE.MeshStandardMaterial>(mat: T): T {
+  const ud = mat.userData as { _rtAerial?: boolean };
+  if (ud._rtAerial) return mat;
+  ud._rtAerial = true;
+  const prevKey = mat.customProgramCacheKey?.bind(mat);
+  mat.customProgramCacheKey = () => `${prevKey ? prevKey() : mat.type}${RT_AERIAL_CACHE_KEY}`;
+  const prevCompile = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prevCompile?.call(mat, shader, renderer);
+    if (shader.fragmentShader.includes("vRtWorldY")) return;
+    shader.uniforms.uRtAerial = rtLookUniforms.uRtAerial;
+    shader.uniforms.uSunDirView = rtLookUniforms.uSunDirView;
+    shader.uniforms.uCamWorldY = rtLookUniforms.uCamWorldY;
+    shader.uniforms.uAerialCool = rtLookUniforms.uAerialCool;
+    shader.uniforms.uAerialWarm = rtLookUniforms.uAerialWarm;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+varying float vRtWorldY;`,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+vRtWorldY = ( modelMatrix * (
+#ifdef USE_INSTANCING
+  instanceMatrix *
+#endif
+  vec4( transformed, 1.0 ) ) ).y;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+varying float vRtWorldY;
+uniform float uRtAerial;
+uniform vec3 uSunDirView;
+uniform float uCamWorldY;
+uniform vec3 uAerialCool;
+uniform vec3 uAerialWarm;`,
+      )
+      .replace(
+        "#include <fog_fragment>",
+        `#ifdef USE_FOG
+  #ifdef FOG_EXP2
+    float rtFogFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth );
+  #else
+    float rtFogFactor = smoothstep( fogNear, fogFar, vFogDepth );
+  #endif
+  vec3 rtFogColor = fogColor;
+  if ( uRtAerial > 0.5 ) {
+    // GR-07: exponential height fog — air thickens toward the ground plane.
+    float rtHeightAtten = exp( - max( 0.0, uCamWorldY - vRtWorldY ) * 0.055 );
+    float rtAerialFactor = 1.0 - exp( - fogDensity * fogDensity * vFogDepth * vFogDepth * 2.1 * rtHeightAtten );
+    rtFogFactor = max( rtFogFactor, rtAerialFactor * 0.9 );
+    // Mie forward scattering (warm when the camera looks TOWARD the sun: the
+    // view ray is -vViewPosition, the sun is +uSunDirView) vs Rayleigh depth.
+    vec3 rtViewDir = -normalize( vViewPosition );
+    float rtMie = pow( clamp( dot( rtViewDir, uSunDirView ), 0.0, 1.0 ), 6.0 );
+    rtFogColor = mix( uAerialCool, uAerialWarm, rtMie );
+    rtFogColor = mix( fogColor, rtFogColor, 0.68 );
+  }
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, rtFogColor, clamp( rtFogFactor, 0.0, 1.0 ) );
+#endif`,
+      );
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
+/**
+ * GR-04 — Schlick Fresnel architectural glass: crystal-clear when looked
+ * through head-on (opacity ~0.12), a sharp sky/tree mirror at grazing angles
+ * (opacity ~0.86 + 2.2× stronger probe reflections) with a low-iron edge tint.
+ */
+export function attachFresnelGlass<T extends THREE.MeshPhysicalMaterial>(mat: T): T {
+  const ud = mat.userData as { _rtFresnelGlass?: boolean };
+  if (ud._rtFresnelGlass) return mat;
+  ud._rtFresnelGlass = true;
+  const prevKey = mat.customProgramCacheKey?.bind(mat);
+  mat.customProgramCacheKey = () => `${prevKey ? prevKey() : mat.type}${RT_GLASS_CACHE_KEY}`;
+  const prevCompile = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prevCompile?.call(mat, shader, renderer);
+    if (shader.fragmentShader.includes("rtFres")) return;
+    shader.uniforms.uRtFresnel = rtLookUniforms.uRtFresnel;
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+uniform float uRtFresnel;`,
+      )
+      .replace(
+        "#include <normal_fragment_maps>",
+        `#include <normal_fragment_maps>
+float rtFres = pow( 1.0 - abs( dot( normalize( vViewPosition ), normal ) ), 4.0 );`,
+      )
+      .replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+if ( uRtFresnel > 0.5 ) {
+  // Clear head-on, mirror-like at grazing angles (Schlick).
+  diffuseColor.a = clamp( mix( 0.12, 0.86, rtFres ), 0.06, 0.94 );
+  // Low-iron green-blue edge tint toward grazing.
+  diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.83, 0.93, 0.92 ), rtFres * 0.45 );
+  material.roughness = min( material.roughness, 0.045 + rtFres * 0.03 );
+}`,
+      )
+      .replace(
+        "#include <aomap_fragment>",
+        `#include <aomap_fragment>
+reflectedLight.indirectSpecular *= ( 1.0 + 1.2 * rtFres * uRtFresnel );`,
+      );
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
+/**
+ * GR-04 — Foliage backlit subsurface scattering: view-dependent wrap
+ * translucency so canopies and hedges glow warm green-gold when the sun sits
+ * behind them, instead of reading as opaque plastic.
+ */
+export function attachFoliageSss<T extends THREE.MeshStandardMaterial>(mat: T): T {
+  const ud = mat.userData as { _rtFoliageSss?: boolean };
+  if (ud._rtFoliageSss) return mat;
+  ud._rtFoliageSss = true;
+  const prevKey = mat.customProgramCacheKey?.bind(mat);
+  mat.customProgramCacheKey = () => `${prevKey ? prevKey() : mat.type}${RT_SSS_CACHE_KEY}`;
+  const prevCompile = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prevCompile?.call(mat, shader, renderer);
+    if (shader.fragmentShader.includes("rtBackLit")) return;
+    shader.uniforms.uRtSss = rtLookUniforms.uRtSss;
+    shader.uniforms.uSunDirView = rtLookUniforms.uSunDirView;
+    shader.uniforms.uSunTint = rtLookUniforms.uSunTint;
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+uniform float uRtSss;
+uniform vec3 uSunDirView;
+uniform vec3 uSunTint;`,
+      )
+      .replace(
+        "#include <lights_fragment_end>",
+        `#include <lights_fragment_end>
+{
+  float rtBackLit = pow( clamp( dot( normalize( vViewPosition ), -uSunDirView + normal * 0.4 ), 0.0, 1.0 ), 3.0 );
+  reflectedLight.directDiffuse += rtBackLit * uSunTint * diffuseColor.rgb * 0.55 * uRtSss;
+}`,
+      );
+  };
+  mat.needsUpdate = true;
+  return mat;
 }
 
 export function createMaterialPalette(texScale = 1): MaterialPalette {
@@ -1014,9 +1273,11 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
     roughnessMap: tileCream.rough,
     normalMap: tileCream.normal,
     normalScale: new THREE.Vector2(0.62, 0.62),
-    roughness: 0.42,
+    // GR-04: roughness 1.0 lets the glazed map (body 0.14–0.21 / grout 0.96) drive
+    // the final factor; envMapIntensity lifted so BPCEM window reflections pop.
+    roughness: 1.0,
     metalness: 0.02,
-    envMapIntensity: 0.65,
+    envMapIntensity: 0.9,
   });
   const tileWet = new THREE.MeshStandardMaterial({
     map: tileGrey.albedo,
@@ -1048,14 +1309,14 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
   const glass = new THREE.MeshPhysicalMaterial({
     color: 0xdcf0f7,
     transparent: true,
-    opacity: 0.32,
+    opacity: 0.32, // RT OFF base; GR-04 Fresnel drives alpha when RT is ON
     roughness: 0.08,
     metalness: 0.0,
     ior: 1.52,
     reflectivity: 0.78,
     clearcoat: 0.55,
     clearcoatRoughness: 0.14,
-    envMapIntensity: 0.75,
+    envMapIntensity: 1.05,
     depthWrite: false,
   });
 
@@ -1222,6 +1483,41 @@ export function createMaterialPalette(texScale = 1): MaterialPalette {
   ]) {
     attachBakedAoShader(m);
   }
+
+  // GR-03 + GR-07 + GR-04 hooks — uniform-gated, one program serves RT ON & OFF.
+  // PCSS-Lite + aerial fog + specular AA on every opaque shadow receiver.
+  for (const m of [
+    brickOuter,
+    brickInner,
+    mortar,
+    concrete,
+    plasterExt,
+    plasterInt,
+    tileFloor,
+    tileWet,
+    tileWood,
+    carport,
+    woodTeak,
+    woodDeck,
+    roofCover,
+    lisplank,
+    ceiling,
+    grass,
+    road,
+    neighborWall,
+    neighborRoof,
+  ]) {
+    attachPcssShadow(m);
+    attachAerialFog(m);
+    attachSpecularAa(m);
+  }
+  // GR-02 BPCEM probes: glass & flood water read the exterior probe (sky, sun,
+  // neighbours); interior furniture timber reads the interior room probe.
+  attachBpceReflection(glass, exteriorProbeUniforms, "exterior");
+  attachFresnelGlass(glass);
+  attachBpceReflection(floodWater, exteriorProbeUniforms, "exterior");
+  attachBpceReflection(woodTeak, interiorProbeUniforms, "interior");
+  attachPcssShadow(floodWater);
 
   const envBoundMats: THREE.MeshStandardMaterial[] = [
     brickOuter,

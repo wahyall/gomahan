@@ -216,6 +216,18 @@ export class DualKawaseBloomPass extends Pass {
     (mat.uniforms.uTexel!.value as THREE.Vector2).set((1 / Math.max(1, w)) * scale, (1 / Math.max(1, h)) * scale);
   }
 
+  /** GR-06: photographic preset drives the HDR threshold (1.0–1.08 golden → night 0.98). */
+  public setThreshold(threshold: number): void {
+    const mat = this.prefilterQuad.material as THREE.ShaderMaterial;
+    mat.uniforms.uThreshold!.value = Math.max(0.5, threshold);
+  }
+
+  /** GR-06: tent upsample scatter spread (bloom radius character). */
+  public setScatter(scatter: number): void {
+    const mat = this.upQuad.material as THREE.ShaderMaterial;
+    mat.uniforms.uScatter!.value = Math.max(0.2, Math.min(1.2, scatter));
+  }
+
   render(renderer: THREE.WebGLRenderer, _writeBuffer: THREE.WebGLRenderTarget, readBuffer: THREE.WebGLRenderTarget): void {
     const oldAutoClear = renderer.autoClear;
     renderer.autoClear = false; // additive upsample passes must keep the pyramid contents

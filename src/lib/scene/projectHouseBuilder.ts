@@ -11,9 +11,14 @@ import {
   attachBakedAoShader,
   buildInstancedContactDecals,
   computeWallCornerFlags,
-  generateFloorAoTexture,
+  generateFloorGiAoTexture,
   type ContactDecalSpec,
+  type GiBakeContext,
 } from "@/lib/scene/bakedAo";
+import { attachPcssShadow } from "@/lib/scene/pcssShadow";
+import { attachBpceReflection } from "@/lib/scene/reflectionProbes";
+import { interiorProbeUniforms } from "@/lib/scene/rtUniforms";
+import { attachFoliageSss } from "@/lib/scene/materials";
 import type { MaterialPalette } from "@/lib/scene/materials";
 import { buildFurnitureMesh, buildHvacMesh, buildLightFixtureMesh } from "@/lib/scene/propsBuilder";
 import { pointInPolygon, polygonArea, polygonBounds } from "@/lib/geometry/rooms";
@@ -381,6 +386,7 @@ export function buildStaticNeighborhood(
     const hedgeGeo = createChamferBox(3.95, 0.52, 0.32, 0.07, 1);
     hedgeGeo.translate(cx, 0.55, 0.56);
     const hedgeMat = new THREE.MeshStandardMaterial({ color: 0x4c7c3d, roughness: 0.9, envMapIntensity: 0.16 });
+    attachFoliageSss(hedgeMat); // GR-04 backlit glow when the sun sits behind the hedge
     const hedge = new THREE.Mesh(hedgeGeo, hedgeMat);
     hedge.castShadow = true;
     hedge.receiveShadow = true;
@@ -418,6 +424,8 @@ export function buildStaticNeighborhood(
 
     const foliageMat = new THREE.MeshStandardMaterial({ color: 0x568746, roughness: 0.86, envMapIntensity: 0.28 });
     const foliageHiMat = new THREE.MeshStandardMaterial({ color: 0x6ba055, roughness: 0.84, envMapIntensity: 0.3 });
+    attachFoliageSss(foliageMat); // GR-04: canopies glow green-gold when backlit
+    attachFoliageSss(foliageHiMat);
     const crownGeos: THREE.BufferGeometry[] = [];
     for (const [ox, oy, oz, rad] of [
       [0, 2.88, 0, 0.9],
@@ -830,9 +838,26 @@ export function buildProjectHouse(
   const batchLt2 = new StaticBatchCollector();
   const batchRoof = new StaticBatchCollector();
 
-  // Baked AO Layer 1: Fast per-level 2D distance-field AO maps for floors & ceilings
-  const aoMapLt1 = generateFloorAoTexture(project.levels[0], project, struct.columns, 0);
-  const aoMapLt2 = generateFloorAoTexture(project.levels[1], project, struct.columns, 1);
+  // Baked AO Layer 1 + GR-01: per-level RGBA GI + Sky-Occlusion maps for floors &
+  // ceilings. The bake context carries the sim hour / rain / fixture state so
+  // sun pools through openings and night lamp glow land in the GI channels.
+  const giBakeCtx: GiBakeContext = {
+    hourOfDay: project.simulation.hourOfDay,
+    rainIntensityMmH: project.simulation.rainIntensityMmH,
+    lights: project.levels.flatMap((lv) =>
+      lv.lights.map((l) => ({
+        x: l.position.x,
+        y: l.position.y,
+        z: l.position.z,
+        on: l.on,
+        dimmer: l.dimmer,
+        lumens: l.lumens,
+        colorTempK: l.colorTempK,
+      })),
+    ),
+  };
+  const aoMapLt1 = generateFloorGiAoTexture(project.levels[0], project, struct.columns, 0, giBakeCtx);
+  const aoMapLt2 = generateFloorGiAoTexture(project.levels[1], project, struct.columns, 1, giBakeCtx);
   resources.push(aoMapLt1, aoMapLt2);
   const floorAoMatCache = new Map<string, THREE.Material>();
   const getFloorAoMat = (lvIdx: 0 | 1, baseMat: THREE.Material): THREE.Material => {
@@ -844,6 +869,10 @@ export function buildProjectHouse(
       cloned.aoMap = lvIdx === 0 ? aoMapLt1 : aoMapLt2;
       cloned.aoMapIntensity = 1.15;
       attachBakedAoShader(cloned);
+      // GR-02/GR-03: floors carry the interior BPCEM probe + PCSS-Lite kernel
+      // (clone() drops onBeforeCompile hooks, so re-attach after cloning).
+      attachPcssShadow(cloned);
+      attachBpceReflection(cloned, interiorProbeUniforms, "interior");
       cloned.needsUpdate = true;
       resources.push(cloned);
       floorAoMatCache.set(key, cloned);
@@ -993,15 +1022,15 @@ export function buildProjectHouse(
     if (frontGardenRoom || rearGardenRoom) {
       const leafDeep = palette.getPropMaterial(
         "garden:leafDeep",
-        () => new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 }),
+        () => attachFoliageSss(new THREE.MeshStandardMaterial({ color: 0x477a38, roughness: 0.88, envMapIntensity: 0.18 })),
       );
       const leafLight = palette.getPropMaterial(
         "garden:leafLight",
-        () => new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 }),
+        () => attachFoliageSss(new THREE.MeshStandardMaterial({ color: 0x69a052, roughness: 0.84, envMapIntensity: 0.2 })),
       );
       const hedgeMat = palette.getPropMaterial(
         "garden:hedge",
-        () => new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 }),
+        () => attachFoliageSss(new THREE.MeshStandardMaterial({ color: 0x4f803f, roughness: 0.92, envMapIntensity: 0.15 })),
       );
       const gardenLightMat = palette.getPropMaterial(
         "garden:bulb",

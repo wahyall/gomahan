@@ -41,14 +41,15 @@ describe("Performance Architecture Regression Suite", () => {
     const data = tex.image.data as Uint8Array;
     const width = tex.image.width;
     const height = tex.image.height;
-    // OPT-10: the AO distance-field texture is single-channel RedFormat —
-    // the aoMap shader samples `.r` only, so grayscale RGBA was 4x VRAM.
-    expect(tex.image.data).toHaveLength(width * height);
+    // GR-01: the AO map is now 4-channel RGBA (R crease AO · G sky visibility ·
+    // B GI bounce · A warm/cool tint) — the aoMap shader reads the full vec4.
+    expect(tex.format).toBe(THREE.RGBAFormat);
+    expect(tex.image.data).toHaveLength(width * height * 4);
 
     const samplePx = (wx: number, wz: number) => {
       const px = Math.max(0, Math.min(width - 1, Math.floor((wx / project.site.width) * width)));
       const py = Math.max(0, Math.min(height - 1, Math.floor((wz / project.site.depth) * height)));
-      return data[py * width + px]!;
+      return data[(py * width + px) * 4]!;
     };
 
     const nearWallAo = samplePx(2.5, 4.02);

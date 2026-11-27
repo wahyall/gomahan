@@ -809,10 +809,21 @@ export function buildLightFixtureMesh(
 ): THREE.Group {
   const g = new THREE.Group();
   const tempBucket = light.colorTempK <= 3200 ? "warm" : light.colorTempK <= 4200 ? "neutral" : "cool";
-  const warmCol = tempBucket === "warm" ? 0xffcf87 : tempBucket === "neutral" ? 0xfff0d4 : 0xeaf4ff;
   const bulbMat = palette.getPropMaterial(
     `light:bulb:${light.on ? tempBucket : "off"}`,
-    () => new THREE.MeshBasicMaterial({ color: light.on ? warmCol : 0x6b6f75 }),
+    () =>
+      light.on
+        ? // GR-05: HDR linear emissive (> 3.0, toneMapped false) so night fixtures
+          // punch through the Dual-Kawase bloom threshold with a photographic halo.
+          new THREE.MeshBasicMaterial({
+            color: new THREE.Color(
+              tempBucket === "warm" ? 3.6 : tempBucket === "neutral" ? 3.4 : 3.2,
+              tempBucket === "warm" ? 2.7 : tempBucket === "neutral" ? 3.3 : 3.2,
+              tempBucket === "warm" ? 1.65 : tempBucket === "neutral" ? 3.0 : 3.4,
+            ),
+            toneMapped: false,
+          })
+        : new THREE.MeshBasicMaterial({ color: 0x6b6f75 }),
   );
 
   const b = new PropBatcher();

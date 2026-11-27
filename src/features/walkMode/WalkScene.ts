@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { DEFAULT_BLOOM_STRENGTH, DualKawaseBloomPass, FinalOutputPass } from "@/features/buildMode/DualKawaseBloomPass";
+import { DualKawaseBloomPass } from "@/features/buildMode/DualKawaseBloomPass";
+import { PhotographicOutputPass } from "@/features/buildMode/PhotographicOutputPass";
 import { AtmospherePass } from "@/features/buildMode/AtmospherePass";
 import type { BuildQualityTier } from "@/features/buildMode/BuildScene";
 import { WalkAvatar } from "@/features/walkMode/WalkAvatar";
@@ -19,6 +20,16 @@ import {
   makeSunSpriteTexture,
   type MaterialPalette,
 } from "@/lib/scene/materials";
+import { createIesSpotTexture } from "@/lib/scene/pcssShadow";
+import { ReflectionProbeRig } from "@/lib/scene/reflectionProbes";
+import { rtLookUniforms, setRtLookUniforms } from "@/lib/scene/rtUniforms";
+import {
+  computeAutoExposure,
+  resolvePhotographicPreset,
+  whiteBalanceMatrix,
+  type PhotographicPreset,
+} from "@/lib/scene/photographicPresets";
+import { pointInPolygon } from "@/lib/geometry/rooms";
 import { buildProjectHouse, buildStaticNeighborhood } from "@/lib/scene/projectHouseBuilder";
 import { computeSolarPosition } from "@/lib/simulation/lightingEngine";
 import type { Project } from "@/lib/model/types";
@@ -60,12 +71,21 @@ export class WalkScene {
   private readonly sunLight: THREE.DirectionalLight;
   private readonly fillLight: THREE.DirectionalLight;
 
-  /** Cinematic ray-traced-look post stack, mirroring BuildScene (`Baked AO + sun shafts + bloom + MSAA HDR`). */
+  /** Hybrid photorealistic RT post stack, mirroring BuildScene (GR-01…GR-08 / PH-01…PH-05). */
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
   private atmospherePass: AtmospherePass | null = null;
   private bloomPass: DualKawaseBloomPass | null = null;
-  private outputPass: FinalOutputPass | null = null;
+  private photoOutputPass: PhotographicOutputPass | null = null;
+  private sceneDepthTex: THREE.DepthTexture | null = null;
+  /** GR-02: dual CubeCamera reflection probe rig (event-driven bake). */
+  private probeRig: ReflectionProbeRig | null = null;
+  /** GR-05: shared IES cookie for the Walk spot pool. */
+  private iesTex: THREE.DataTexture | null = null;
+  /** PH-01 smooth auto-exposure state (camera iris, interior-aware). */
+  private currentExposure = 1.0;
+  private photoPreset: PhotographicPreset = resolvePhotographicPreset(10, 0);
+  private envTex: THREE.Texture | null = null;
   private postActive = false;
   private rayTracingEnabled = true;
   private qualityOverride: BuildQualityTier = "auto";
@@ -365,8 +385,12 @@ export class WalkScene {
     canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
 
     // Pre-allocate 4 reusable floor-local SpotLights (avoids 14-28 shader light loops & per-rebuild allocations)
+    this.iesTex = createIesSpotTexture();
+    this.staticDisposables.push(this.iesTex);
     for (let i = 0; i < 4; i++) {
       const spot = new THREE.SpotLight(0xffe7bd, 0, 4.4, Math.PI * 0.34, 0.82, 0.45);
+      // GR-05: photometric IES cookie — soft core + wall-wash scallop ring.
+      spot.map = this.iesTex;
       this.lightsGroup.add(spot, spot.target);
       this.spotLightPool.push(spot);
     }
@@ -374,6 +398,8 @@ export class WalkScene {
     this.updateProjectData(derived, struct);
     this.setupPostPipeline();
     this.configurePostPipeline();
+    // GR-08: shared RT uniforms + probe env-map binding follow the store default.
+    this.applyRtStack();
     this.startLoop();
   }
 
@@ -436,11 +462,34 @@ export class WalkScene {
     this.needsRender = true;
   }
 
-  /** Toggle the cinematic ray-traced-look stack (same setting as the Build viewport). */
+  /** Toggle the hybrid photorealistic RT stack (same setting as the Build viewport). */
   public setRayTracingLook(enabled: boolean): void {
     this.rayTracingEnabled = enabled;
+    this.applyRtStack();
     this.configurePostPipeline();
     this.requestRender();
+  }
+
+  /** GR-08: flip shared RT uniforms, rebind probe env-maps, bake probes on demand. */
+  private applyRtStack(): void {
+    const on = this.rayTracingEnabled && !this.softwareGpu;
+    setRtLookUniforms(on, this.photoPreset.giBounce);
+    if (this.probeRig) {
+      if (on && !this.probeRig.hasBaked && this.hasRenderedOnce) {
+        this.bakeReflectionProbes();
+      }
+      this.probeRig.bindEnvMaps(this.houseContainer, on, this.envTex);
+    }
+  }
+
+  /** GR-02: capture both probes once per rebuild / sun-hour change (<3 ms GPU). */
+  private bakeReflectionProbes(): void {
+    if (!this.probeRig || !this.renderer || this.disposed || this.softwareGpu) return;
+    this.probeRig.bake(this.renderer, this.scene, {
+      searchRoot: this.scene,
+      hide: [this.debugOverlay.root, this.avatar.root],
+    });
+    this.probeRig.bindEnvMaps(this.houseContainer, this.rayTracingEnabled, this.envTex);
   }
 
   /** Apply the shared render-quality tier (Auto / Tinggi / Sedang / Hemat). */
@@ -461,10 +510,11 @@ export class WalkScene {
   }
 
   /**
-   * Cinematic "ray-traced like" real-time pipeline, mirrored from BuildScene:
-   * linear HDR MSAA buffer → Baked AO → screen-space sun shafts → progressive
-   * Dual-Kawase HDR bloom (OPT-04) → fused bloom composite + vignette + dither +
-   * single ACES tone-map + sRGB in `FinalOutputPass` (OPT-03 fusion).
+   * Hybrid photorealistic RT pipeline, mirrored from BuildScene: linear HDR MSAA
+   * buffer + resolved depth (SSCS input) → screen-space sun shafts → progressive
+   * Dual-Kawase HDR bloom (OPT-04) → fused `PhotographicOutputPass`
+   * (GR-06 / PH-01–PH-04: SSCS + bloom + EV100 + Kelvin WB + AgX Punchy + RCAS
+   * + cos⁴ vignette + edge CA + film grain + dither + vertical correction).
    */
   private setupPostPipeline(): void {
     if (this.composer || this.disposed) return;
@@ -479,23 +529,32 @@ export class WalkScene {
       // MSAA resolve on HalfFloat targets wedges software rasterizers into ghost-white frames.
       samples: this.softwareGpu ? 0 : 4,
     });
+    // GR-06: resolved depth plane feeds the SSCS raymarch in the fused output pass.
+    if (!this.softwareGpu) {
+      this.sceneDepthTex = new THREE.DepthTexture(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr));
+      target.depthTexture = this.sceneDepthTex;
+    }
     this.composer = new EffectComposer(this.renderer, target);
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.atmospherePass = new AtmospherePass();
-    this.bloomPass = new DualKawaseBloomPass(new THREE.Vector2(w, h));
-    this.outputPass = new FinalOutputPass();
-    this.outputPass.finalUniforms.tBloom.value = this.bloomPass.bloomTexture;
+    this.bloomPass = new DualKawaseBloomPass(new THREE.Vector2(w, h), this.photoPreset.bloomThreshold, 0.5, 2.2, 0.65);
+    this.photoOutputPass = new PhotographicOutputPass();
+    this.photoOutputPass.photoUniforms.tBloom.value = this.bloomPass.bloomTexture;
+    this.photoOutputPass.photoUniforms.tDepth.value = this.sceneDepthTex;
     this.composer.addPass(this.renderPass);
     this.composer.addPass(this.atmospherePass);
     this.composer.addPass(this.bloomPass);
-    this.composer.addPass(this.outputPass);
+    this.composer.addPass(this.photoOutputPass);
     // Custom-target composers start with _width/_height in *pixels*; setSize must run
     // before setPixelRatio or the targets transiently resize to w·dpr² (~4x the VRAM).
     this.composer.setSize(w, h);
     this.composer.setPixelRatio(this.currentDpr);
+    this.photoOutputPass.setSize(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr));
     this.lastAppliedSize = { w, h, dpr: this.currentDpr };
     this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
-    this.outputPass.finalUniforms.uAspect.value = w / h;
+    this.photoOutputPass.photoUniforms.uAspect.value = w / h;
+    // GR-02: probe rig lives for the lifetime of the scene; baking is event-driven.
+    this.probeRig = new ReflectionProbeRig();
   }
 
   /** Enable / disable passes per quality tier; low tier falls back to the direct render. */
@@ -507,6 +566,10 @@ export class WalkScene {
     this.postActive = true;
     if (this.atmospherePass) {
       this.atmospherePass.atmosphereUniforms.uSamples.value = this.activeTier === "high" ? 40 : 22;
+    }
+    if (this.photoOutputPass) {
+      // GR-03: SSCS on the high tier only — medium keeps the fused output.
+      this.photoOutputPass.photoUniforms.uSscs.value = this.activeTier === "high" && !this.softwareGpu ? 1 : 0;
     }
   }
 
@@ -581,10 +644,50 @@ export class WalkScene {
       }
       this.bloomPass.enabled = Boolean(this.sunCore?.visible) || anyLightOn;
     }
-    if (this.outputPass) {
-      this.outputPass.finalUniforms.uTime.value = this.simElapsedS;
-      this.outputPass.finalUniforms.uBloomStrength.value = this.bloomPass?.enabled ? DEFAULT_BLOOM_STRENGTH : 0;
+    if (this.photoOutputPass) {
+      const pu = this.photoOutputPass.photoUniforms;
+      pu.uTime.value = this.simElapsedS;
+      pu.uBloomStrength.value = this.bloomPass?.enabled ? this.photoPreset.bloomStrength : 0;
+      // PH-01: interior-aware smooth iris — stepping through the front door opens
+      // the lens exactly like a photographer's camera (0.00 ms GPU).
+      const isInterior = this.computeIsInterior();
+      this.currentExposure = computeAutoExposure(
+        this.currentExposure,
+        this.derived.project.simulation.hourOfDay,
+        this.derived.project.simulation.rainIntensityMmH,
+        isInterior,
+        1 / 60,
+      );
+      pu.uExposure.value = this.currentExposure;
+      const wb = whiteBalanceMatrix(this.photoPreset.kelvin, this.photoPreset.tint);
+      (pu.uWhiteBalance.value as THREE.Matrix3).set(
+        wb[0]!, wb[1]!, wb[2]!,
+        wb[3]!, wb[4]!, wb[5]!,
+        wb[6]!, wb[7]!, wb[8]!,
+      );
+      (pu.uProj.value as THREE.Matrix4).copy(this.camera.projectionMatrix);
+      (pu.uProjInv.value as THREE.Matrix4).copy(this.camera.projectionMatrixInverse);
+      rtLookUniforms.uSunDirView.value.copy(this.sunDir).transformDirection(this.camera.matrixWorldInverse);
+      rtLookUniforms.uCamWorldY.value = this.camera.position.y;
+      pu.uSunDirView.value.copy(rtLookUniforms.uSunDirView.value);
+      pu.uSscs.value =
+        this.activeTier === "high" && !this.softwareGpu && this.sunLight.intensity > 0.4 ? 1 : 0;
+      // PH-02: subtle architectural vertical correction at near-level pitch.
+      const vert = THREE.MathUtils.clamp(1 - Math.abs(this.pitchRad) / 0.28, 0, 1);
+      pu.uVertCorrect.value = isInterior ? vert * 0.8 : vert * 0.45;
     }
+  }
+
+  /** PH-01: is the walker inside an enclosed (roofed) room right now? */
+  private computeIsInterior(): boolean {
+    const lv = this.derived.project.levels[Math.min(1, Math.max(0, this.ctrl.currentLevel))];
+    if (!lv) return false;
+    const pt = { x: this.ctrl.x, z: this.ctrl.z };
+    for (const r of lv.rooms) {
+      if (r.program === "garden" || r.program === "carport" || r.program === "void") continue;
+      if (pointInPolygon(pt, r.polygon)) return true;
+    }
+    return false;
   }
 
   public updateProjectData(derived: DerivedProjectModel, struct: StructuralReport): void {
@@ -601,6 +704,33 @@ export class WalkScene {
     const nextEnvKey = `${sim.hourOfDay.toFixed(2)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}|${project.site.orientationDeg}`;
     if (nextEnvKey !== this.envKey) {
       this.envKey = nextEnvKey;
+      // PH-01/PH-03/GR-06: photographic calibration for this hour (shared with Build).
+      this.photoPreset = resolvePhotographicPreset(sim.hourOfDay, sim.rainIntensityMmH);
+      rtLookUniforms.uRtGiStrength.value = this.rayTracingEnabled ? this.photoPreset.giBounce : 0;
+      this.bloomPass?.setThreshold(this.photoPreset.bloomThreshold);
+      {
+        const isNightP = sim.hourOfDay < 5.5 || sim.hourOfDay > 18.5;
+        const isGoldenP = (sim.hourOfDay >= 16.5 && sim.hourOfDay <= 18.8) || (sim.hourOfDay >= 5.2 && sim.hourOfDay <= 7.5);
+        rtLookUniforms.uAerialWarm.value.setRGB(
+          isNightP ? 0.3 : isGoldenP ? 1.0 : 0.92,
+          isNightP ? 0.36 : isGoldenP ? 0.8 : 0.87,
+          isNightP ? 0.52 : isGoldenP ? 0.55 : 0.72,
+        );
+        rtLookUniforms.uAerialCool.value.setRGB(
+          isNightP ? 0.18 : 0.66,
+          isNightP ? 0.25 : 0.76,
+          isNightP ? 0.4 : 0.88,
+        );
+        rtLookUniforms.uSunTint.value.setRGB(
+          isNightP ? 0.18 : isGoldenP ? 1.0 : 0.99,
+          isNightP ? 0.22 : isGoldenP ? 0.83 : 0.95,
+          isNightP ? 0.34 : isGoldenP ? 0.6 : 0.87,
+        );
+      }
+      // GR-02: probes re-capture on sun-hour change (event-driven, not per-frame).
+      if (this.rayTracingEnabled && this.probeRig?.hasBaked) {
+        this.bakeReflectionProbes();
+      }
       const nextSkyKey = `${Math.round(sim.hourOfDay * 4)}|${sim.season}|${Math.round(sim.rainIntensityMmH / 5)}`;
       if (nextSkyKey !== this.skyKey) {
         this.skyKey = nextSkyKey;
@@ -624,6 +754,7 @@ export class WalkScene {
         this.scene.environment = env;
         this.palette.bindEnvMap(env);
       }
+      this.envTex = env;
       this.scene.environmentIntensity = isNight ? 0.35 : isStorm ? 0.82 : 0.62;
 
       const [sx, sy, sz] = solar.sunDir;
@@ -649,10 +780,13 @@ export class WalkScene {
 
       this.godRayStrength = isNight ? 0 : isStorm ? 0.12 : isGolden ? 0.95 : 0.5;
       this.godRayStrength *= THREE.MathUtils.lerp(1.3, 0.75, THREE.MathUtils.clamp(this.sunDir.y, 0, 1));
+      // PH-05: preset character rides on top (pagi lembut, golden sinematik).
+      this.godRayStrength *= this.photoPreset.godRayBoost;
 
       if (this.scene.fog instanceof THREE.FogExp2) {
         this.scene.fog.color.set(isNight ? 0x0e1628 : isStorm ? 0x647280 : 0xd9e8f4);
         this.scene.fog.density = isStorm ? 0.011 : isNight ? 0.0052 : 0.0046;
+        this.scene.fog.density *= this.photoPreset.aerialDensity;
       }
       this.markShadowDirty();
     }
@@ -749,6 +883,16 @@ export class WalkScene {
     this.houseContainer.add(built.houseRoot);
     this.dynResources = built.resources;
     this.animatedFans = built.animatedFans;
+
+    // GR-02: fresh meshes carry cloned materials — re-point BPCEM env-maps and
+    // re-capture the probes so reflections match the new build.
+    if (this.probeRig) {
+      if (this.rayTracingEnabled && this.hasRenderedOnce) {
+        this.bakeReflectionProbes();
+      } else {
+        this.probeRig.bindEnvMaps(this.houseContainer, false, this.envTex);
+      }
+    }
 
     this.updatePooledLights(true);
     this.markShadowDirty();
@@ -1048,7 +1192,10 @@ export class WalkScene {
       if (sizeChanged || dprChanged) this.composer.setSize(w, h);
     }
     if (this.atmospherePass) this.atmospherePass.atmosphereUniforms.uAspect.value = w / h;
-    if (this.outputPass) this.outputPass.finalUniforms.uAspect.value = w / h;
+    if (this.photoOutputPass) {
+      this.photoOutputPass.photoUniforms.uAspect.value = w / h;
+      this.photoOutputPass.setSize(Math.round(w * this.currentDpr), Math.round(h * this.currentDpr));
+    }
     // A real resize just reset the drawing buffer; paint one frame right now so the
     // user never sees the cleared (black) canvas waiting for the next RAF.
     if (this.hasRenderedOnce && !this.contextLost && !this.disposed) {
@@ -1202,6 +1349,11 @@ export class WalkScene {
         this.renderer.render(this.scene, this.camera);
       }
       this.hasRenderedOnce = true;
+      // GR-02: first reflection-probe bake right after the first rendered frame.
+      if (this.probeRig && this.rayTracingEnabled && !this.probeRig.hasBaked && !this.softwareGpu) {
+        this.bakeReflectionProbes();
+        this.requestRender();
+      }
 
       // FPS, Adaptive DPR Governor & Stats Telemetry (O(1) circular ring buffer, zero-GC)
       const fpsInst = 1 / Math.max(0.001, dt);
@@ -1385,13 +1537,17 @@ export class WalkScene {
     this.postActive = false;
     this.atmospherePass?.dispose();
     this.bloomPass?.dispose();
-    this.outputPass?.dispose();
+    this.photoOutputPass?.dispose();
+    this.probeRig?.dispose();
+    this.probeRig = null;
+    this.sceneDepthTex?.dispose();
+    this.sceneDepthTex = null;
     this.composer?.dispose();
     this.composer = null;
     this.renderPass = null;
     this.atmospherePass = null;
     this.bloomPass = null;
-    this.outputPass = null;
+    this.photoOutputPass = null;
 
     this.renderer.dispose();
   }
