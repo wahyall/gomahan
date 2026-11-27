@@ -168,6 +168,14 @@ export class WalkScene {
   private fpsRingSum = 0;
   private disposed = false;
 
+  // OPT-01: canvas.toDataURL bridge for snapshot/export paths (preserveDrawingBuffer: false)
+  private rawToDataURL: HTMLCanvasElement["toDataURL"] | null = null;
+  // OPT-09 / OPT-18: frustum-gated fan animation + compositor blur gating
+  private readonly _frustum = new THREE.Frustum();
+  private readonly _pm = new THREE.Matrix4();
+  private body3dActive = false;
+  private last3dActiveAt = 0;
+
   private readonly onResizeBound = () => this.handleResize();
   private readonly onVisibilityBound = () => this.handleVisibility();
   private readonly onKeyDownBound = (e: KeyboardEvent) => this.handleKeyDown(e);
@@ -208,7 +216,7 @@ export class WalkScene {
     this.struct = struct;
     this.actions = actions;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", stencil: false });
     const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
     this.mobileViewport = mobileViewport;
     // Software rasterizers (SwiftShader / llvmpipe) must never receive the cinematic stack
@@ -241,7 +249,16 @@ export class WalkScene {
     const aspect = Math.max(1, canvas.clientWidth) / Math.max(1, canvas.clientHeight);
     this.camera = new THREE.PerspectiveCamera(WALK_CONFIG.firstPerson.fov, aspect, WALK_CONFIG.cameraNear, WALK_CONFIG.cameraFar);
 
-    this.palette = createMaterialPalette();
+    // OPT-01 (2026-11): `preserveDrawingBuffer: false` restores the zero-copy swapchain
+    // page-flip; snapshot/export paths read the canvas through `captureDataUrl()`, which
+    // renders one synchronous frame immediately before the read.
+    this.rawToDataURL = this.canvas.toDataURL.bind(this.canvas);
+    this.canvas.toDataURL = ((type?: string, quality?: number) => {
+      if (this.disposed || this.contextLost) return this.rawToDataURL!(type, quality);
+      return this.captureDataUrl(type ?? "image/jpeg", quality ?? 0.92);
+    }) as HTMLCanvasElement["toDataURL"];
+
+    this.palette = createMaterialPalette(mobileViewport ? 1 : 2);
     this.palette.setAnisotropy(Math.min(8, this.renderer.capabilities.getMaxAnisotropy()));
 
     this.hemiLight = new THREE.HemisphereLight(0xd9ecff, 0x6f6859, 0.78);
@@ -347,6 +364,56 @@ export class WalkScene {
 
   public requestRender(): void {
     this.needsRender = true;
+  }
+
+  /** OPT-01: render one synchronous frame, then read the canvas in the same microtask. */
+  public captureDataUrl(mime = "image/jpeg", quality = 0.92): string {
+    if (this.disposed || this.contextLost) return this.rawToDataURL?.(mime, quality) ?? "";
+    if (this.postActive && this.composer) {
+      this.updateAtmosphere(this.camera);
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
+    return this.rawToDataURL!(mime, quality);
+  }
+
+  /** OPT-09: a fan only keeps the loop alive while it is on-screen and effectively visible. */
+  private anyFanVisibleInFrustum(): boolean {
+    if (this.animatedFans.length === 0 || this.reducedMotion) return false;
+    this.camera.updateMatrixWorld();
+    this._pm.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+    this._frustum.setFromProjectionMatrix(this._pm);
+    for (const fan of this.animatedFans) {
+      let o: THREE.Object3D | null = fan;
+      let effectivelyVisible = true;
+      while (o) {
+        if (!o.visible) {
+          effectivelyVisible = false;
+          break;
+        }
+        o = o.parent;
+      }
+      if (!effectivelyVisible) continue;
+      fan.getWorldPosition(this._v1);
+      if (this._frustum.containsPoint(this._v1)) return true;
+    }
+    return false;
+  }
+
+  /** OPT-18: mark <body> as 3D-active so `.studio-glass` drops its compositor blur
+   * while the camera is actually moving; released ~150 ms after it rests. */
+  private update3dActiveFlag(active: boolean, now: number): void {
+    if (active) {
+      this.last3dActiveAt = now;
+      if (!this.body3dActive) {
+        this.body3dActive = true;
+        document.body.setAttribute("data-3d-active", "1");
+      }
+    } else if (this.body3dActive && now - this.last3dActiveAt > 150) {
+      this.body3dActive = false;
+      document.body.removeAttribute("data-3d-active");
+    }
   }
 
   private markShadowDirty(): void {
@@ -949,7 +1016,9 @@ export class WalkScene {
       this.lastFrameMs = now;
 
       const move = this.readMoveInput(dt);
-      const fansActive = this.animatedFans.length > 0 && !this.reducedMotion;
+      // OPT-09: `animatedFans.length > 0` alone kept the loop awake 100% of the
+      // session; only an on-screen, effectively-visible fan keeps it rendering now.
+      const fansActive = this.anyFanVisibleInFrustum();
       const moveInputActive =
         move.forward !== 0 || move.strafe !== 0 || this.keysDown.has("KeyQ");
       const camSettling =
@@ -957,6 +1026,12 @@ export class WalkScene {
         (this.cameraMode === "third_person" && Math.abs(this.smoothCamDist - this.thirdPersonDist) > 1e-3);
       const shouldStepAndRender =
         this.needsRender || moveInputActive || camSettling || fansActive || this.lastWalkActive;
+
+      // OPT-18: compositor blur gating on <body>
+      this.update3dActiveFlag(
+        this.needsRender || moveInputActive || camSettling || fansActive || this.lastWalkActive,
+        now,
+      );
 
       if (!shouldStepAndRender) {
         this.rafId = requestAnimationFrame(tick);
@@ -1131,6 +1206,9 @@ export class WalkScene {
 
   private emitTelemetry(force: boolean): void {
     const now = performance.now();
+    // OPT-13: cheapest throttle check first — getSnapshot() and the 13-segment
+    // signature string are only built after the 90 ms gate passes.
+    if (!force && now - this.lastSnapshotEmitAt < 90) return;
     const avgFps =
       this.fpsRingCount > 0 ? Math.round(this.fpsRingSum / this.fpsRingCount) : 60;
     const snap = this.ctrl.getSnapshot();
@@ -1163,6 +1241,16 @@ export class WalkScene {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     if (document.pointerLockElement === this.canvas) {
       document.exitPointerLock?.();
+    }
+    // OPT-18: never leave the body attribute latched after the scene is gone.
+    if (this.body3dActive) {
+      this.body3dActive = false;
+      document.body.removeAttribute("data-3d-active");
+    }
+    // OPT-01: restore the native toDataURL once the override is no longer needed.
+    if (this.rawToDataURL) {
+      this.canvas.toDataURL = this.rawToDataURL;
+      this.rawToDataURL = null;
     }
     window.removeEventListener("resize", this.onResizeBound);
     this.resizeObserver?.disconnect();
