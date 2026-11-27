@@ -8,6 +8,8 @@ import { SpatialHashGrid } from "@/features/walkMode/collisionBuilder";
 import { runLightingSimulation } from "@/lib/simulation/lightingEngine";
 import { runAirflowSimulation } from "@/lib/simulation/airflowEngine";
 import { runAirflowSimulationAsync, generateBricksAsync, runLightingSimulationAsync } from "@/lib/simulation/workerClient";
+import { WallSpatialGrid, type WallGate } from "@/lib/simulation/wallGrid";
+import type { Wall } from "@/lib/model/types";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 
 describe("Performance Architecture Regression Suite", () => {
@@ -136,6 +138,79 @@ describe("Performance Architecture Regression Suite", () => {
     expect(asyncAirflow).not.toBeNull();
     expect(asyncAirflow!.airflowScore).toBe(syncAirflow.airflowScore);
     expect(asyncAirflow!.avgAch).toBeCloseTo(syncAirflow.avgAch, 5);
+  });
+
+  it("OPT-15 wall spatial grid returns identical blocking verdicts to the brute-force wall loop", () => {
+    const project = createDefaultProject();
+    const siteW = project.site.width;
+    const siteD = project.site.depth;
+
+    // Brute-force reference — the exact pre-OPT-15 inline loop (lighting gates).
+    const bruteForce = (ax: number, az: number, bx: number, bz: number, walls: Wall[], ignoreWallId?: string): boolean => {
+      const dx = bx - ax;
+      const dz = bz - az;
+      if (Math.hypot(dx, dz) < 0.12) return false;
+      for (const w of walls) {
+        if (ignoreWallId && w.id === ignoreWallId) continue;
+        if (w.height < 1.6) continue;
+        const wx = w.end.x - w.start.x;
+        const wz = w.end.z - w.start.z;
+        const wLen = Math.hypot(wx, wz);
+        if (wLen < 0.1) continue;
+        const denom = dx * wz - dz * wx;
+        if (Math.abs(denom) < 1e-6) continue;
+        const t = ((w.start.x - ax) * wz - (w.start.z - az) * wx) / denom;
+        const u = ((w.start.x - ax) * dz - (w.start.z - az) * dx) / denom;
+        const minT = ignoreWallId ? 0.04 : 0.02;
+        if (t > minT && t <= 1.001 && u >= -0.005 && u <= 1.005) {
+          const hitAlong = Math.max(0, Math.min(wLen, u * wLen));
+          const passesOpening = w.openings.some(
+            (op) => Math.abs(hitAlong - op.offset) <= op.width * 0.5 && (op.kind === "arch" || op.kind === "window" || op.openPct > 15),
+          );
+          if (!passesOpening) return true;
+        }
+      }
+      return false;
+    };
+
+    const LIGHT_GATE: WallGate = {
+      tLo: 0.02,
+      tHi: 1.001,
+      tHiInclusive: true,
+      uLo: -0.005,
+      uLoInclusive: true,
+      uHi: 1.005,
+      uHiInclusive: true,
+      windowPasses: true,
+      clampHitAlong: true,
+    };
+    const LIGHT_GATE_IGNORE: WallGate = { ...LIGHT_GATE, tLo: 0.04 };
+
+    for (const lv of project.levels) {
+      const grid = new WallSpatialGrid(lv.walls, siteW, siteD);
+      let raySeed = 12345;
+      const rand = () => {
+        raySeed = (raySeed * 1103515245 + 12345) & 0x7fffffff;
+        return raySeed / 0x7fffffff;
+      };
+      let mismatches = 0;
+      for (let r = 0; r < 3000; r++) {
+        const ax = rand() * siteW;
+        const az = rand() * siteD;
+        const bx = rand() * siteW;
+        const bz = rand() * siteD;
+        const useIgnore = r % 3 === 0;
+        const ignoreWallId = useIgnore ? lv.walls[r % lv.walls.length]?.id : undefined;
+        const expected = bruteForce(ax, az, bx, bz, lv.walls, ignoreWallId);
+        // Mirrors the engine wrapper: rays shorter than 0.12 m never reach the grid.
+        const actual =
+          Math.hypot(bx - ax, bz - az) < 0.12
+            ? false
+            : grid.segmentBlocked(ax, az, bx, bz, ignoreWallId ? LIGHT_GATE_IGNORE : LIGHT_GATE, ignoreWallId);
+        if (expected !== actual) mismatches++;
+      }
+      expect(mismatches).toBe(0);
+    }
   });
 
   it("offloads brick-instance generation through the simulation worker path with full positional parity", async () => {
