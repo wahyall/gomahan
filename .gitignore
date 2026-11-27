@@ -6,3 +6,5 @@ qa/
 .env*.local
 .DS_Store
 agent-skills
+# PR_DESCRIPTION.md tidak di-bundle ke repo
+PR_DESCRIPTION.md
