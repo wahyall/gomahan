@@ -1,30 +1,24 @@
 import type { DerivedProjectModel } from "@/lib/geometry/projectModel";
 import { pointInPolygon } from "@/lib/geometry/rooms";
-import type { HvacUnit, Vec2, Wall } from "@/lib/model/types";
+import type { HvacUnit, Vec2 } from "@/lib/model/types";
+import { WallSpatialGrid, type WallGate } from "@/lib/simulation/wallGrid";
 
-function airflowBlockedByWalls(ax: number, az: number, bx: number, bz: number, walls: Wall[]): boolean {
-  const dx = bx - ax;
-  const dz = bz - az;
-  if (Math.hypot(dx, dz) < 0.15) return false;
-  for (const w of walls) {
-    if (w.height < 1.6) continue;
-    const wx = w.end.x - w.start.x;
-    const wz = w.end.z - w.start.z;
-    const wLen = Math.hypot(wx, wz);
-    if (wLen < 0.1) continue;
-    const denom = dx * wz - dz * wx;
-    if (Math.abs(denom) < 1e-6) continue;
-    const t = ((w.start.x - ax) * wz - (w.start.z - az) * wx) / denom;
-    const u = ((w.start.x - ax) * dz - (w.start.z - az) * dx) / denom;
-    if (t > 0.08 && t < 0.92 && u > 0.02 && u < 0.98) {
-      const hitAlong = u * wLen;
-      const passesOpening = w.openings.some(
-        (op) => Math.abs(hitAlong - op.offset) <= op.width * 0.5 && (op.kind === "arch" || op.openPct > 15),
-      );
-      if (!passesOpening) return true;
-    }
-  }
-  return false;
+// OPT-15: gate set replicates the original inline loop semantics bit-for-bit.
+const AIR_GATE: WallGate = {
+  tLo: 0.08,
+  tHi: 0.92,
+  tHiInclusive: false,
+  uLo: 0.02,
+  uLoInclusive: false,
+  uHi: 0.98,
+  uHiInclusive: false,
+  windowPasses: false,
+  clampHitAlong: false,
+};
+
+function airflowBlockedByWalls(ax: number, az: number, bx: number, bz: number, grid: WallSpatialGrid): boolean {
+  if (Math.hypot(bx - ax, bz - az) < 0.15) return false;
+  return grid.segmentBlocked(ax, az, bx, bz, AIR_GATE);
 }
 
 export interface ZoneAirflowResult {
@@ -118,6 +112,9 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
 
     // Active HVAC units on this level
     const activeHvac: HvacUnit[] = lv.hvac.filter((h) => h.on);
+    // OPT-15: build the 1 m wall spatial grid once per level — each HVAC→cell
+    // ray below only visits the walls in the cells it actually crosses.
+    const wallGrid = new WallSpatialGrid(lv.walls, project.site.width, project.site.depth);
 
     for (let gz = 0; gz < gridD; gz++) {
       for (let gx = 0; gx < gridW; gx++) {
@@ -149,8 +146,10 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
             }
           }
           // Stack effect suction near central stair (X: 0..1.35, Z: 7.5..12.5) and rear void (Z=15.35)
-          const dStair = Math.hypot(px - 0.75, pz - 10.0);
-          if (dStair < 3.0) {
+          // OPT-15: squared distance gate (dStair is never used beyond the radius test).
+          const sdx = px - 0.75;
+          const sdz = pz - 10.0;
+          if (sdx * sdx + sdz * sdz < 9.0) {
             vz += (10.0 - pz) * 0.08;
             vx += (0.75 - px) * 0.08;
           }
@@ -161,9 +160,10 @@ export function runAirflowSimulation(derived: DerivedProjectModel): AirflowSimul
           const speedMult = h.speedLevel === 1 ? 0.7 : h.speedLevel === 2 ? 1.0 : 1.3;
           const dx = px - h.position.x;
           const dz = pz - h.position.z;
+          // OPT-15: squared distance gate — sqrt only for survivors.
+          if (dx * dx + dz * dz > 25) continue;
+          if (airflowBlockedByWalls(h.position.x, h.position.z, px, pz, wallGrid)) continue;
           const dist = Math.hypot(dx, dz);
-          if (dist > 5.0) continue;
-          if (airflowBlockedByWalls(h.position.x, h.position.z, px, pz, lv.walls)) continue;
 
           if (h.type === "ceiling_fan" && dist < 3.8) {
             // Radial downdraft + swirl
