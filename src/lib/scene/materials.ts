@@ -914,6 +914,13 @@ export function attachSpecularAa<T extends THREE.MeshStandardMaterial>(mat: T): 
     prevCompile?.call(mat, shader, renderer);
     if (shader.fragmentShader.includes("rtSpecAa")) return;
     shader.uniforms.uRtEnabled = rtLookUniforms.uRtEnabled;
+    if (!shader.fragmentShader.includes("uniform float uRtEnabled;")) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <common>",
+        `#include <common>
+uniform float uRtEnabled;`,
+      );
+    }
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <roughnessmap_fragment>",
       `#include <roughnessmap_fragment>
@@ -990,8 +997,8 @@ uniform vec3 uAerialWarm;`,
     rtFogFactor = max( rtFogFactor, rtAerialFactor * 0.9 );
     // Mie forward scattering (warm when the camera looks TOWARD the sun: the
     // view ray is -vViewPosition, the sun is +uSunDirView) vs Rayleigh depth.
-    vec3 rtViewDir = -normalize( vViewPosition );
-    float rtMie = pow( clamp( dot( rtViewDir, uSunDirView ), 0.0, 1.0 ), 6.0 );
+    vec3 rtViewDir = -normalize( vViewPosition + vec3( 0.0, 0.0, 1e-6 ) );
+    float rtMie = pow( max( 1e-5, clamp( dot( rtViewDir, uSunDirView ), 0.0, 1.0 ) ), 6.0 );
     rtFogColor = mix( uAerialCool, uAerialWarm, rtMie );
     rtFogColor = mix( fogColor, rtFogColor, 0.68 );
   }
@@ -1028,7 +1035,7 @@ uniform float uRtFresnel;`,
       .replace(
         "#include <normal_fragment_maps>",
         `#include <normal_fragment_maps>
-float rtFres = pow( 1.0 - abs( dot( normalize( vViewPosition ), normal ) ), 4.0 );`,
+float rtFres = pow( max( 1e-5, 1.0 - abs( dot( normalize( vViewPosition + vec3( 0.0, 0.0, 1e-6 ) ), normal ) ) ), 4.0 );`,
       )
       .replace(
         "#include <emissivemap_fragment>",
@@ -1038,6 +1045,12 @@ if ( uRtFresnel > 0.5 ) {
   diffuseColor.a = clamp( mix( 0.12, 0.86, rtFres ), 0.06, 0.94 );
   // Low-iron green-blue edge tint toward grazing.
   diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.83, 0.93, 0.92 ), rtFres * 0.45 );
+}`,
+      )
+      .replace(
+        "#include <lights_physical_fragment>",
+        `#include <lights_physical_fragment>
+if ( uRtFresnel > 0.5 ) {
   material.roughness = min( material.roughness, 0.045 + rtFres * 0.03 );
 }`,
       )
@@ -1081,7 +1094,7 @@ uniform vec3 uSunTint;`,
         "#include <lights_fragment_end>",
         `#include <lights_fragment_end>
 {
-  float rtBackLit = pow( clamp( dot( normalize( vViewPosition ), -uSunDirView + normal * 0.4 ), 0.0, 1.0 ), 3.0 );
+  float rtBackLit = pow( max( 1e-5, clamp( dot( normalize( vViewPosition + vec3( 0.0, 0.0, 1e-6 ) ), -uSunDirView + normal * 0.4 ), 0.0, 1.0 ) ), 3.0 );
   reflectedLight.directDiffuse += rtBackLit * uSunTint * diffuseColor.rgb * 0.55 * uRtSss;
 }`,
       );

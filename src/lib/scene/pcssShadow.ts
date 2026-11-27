@@ -25,9 +25,9 @@ vec2 texelSize = vec2( 1.0 ) / shadowMapSize;
                         // PCSS-Lite variable penumbra (GR-03) — uniform-gated, no recompile.
                         if ( uRtPcss > 0.5 ) {
 
-                                // Base filter is deliberately wider than the stock kernel: the sun is an
-                                // area light (~0.5 degrees), so a 6 m canopy casts a real ~5–15 cm penumbra.
-                                vec2 radius = shadowRadius * texelSize * 2.6;
+                                // Base filter is wider than stock PCF for area-light sun softness (~0.5 deg),
+                                // while bounded enough to prevent grazing-wall shadow acne banding.
+                                vec2 radius = shadowRadius * texelSize * 1.85;
 
                                 // Use IGN to rotate sampling patterns per pixel (grid-artifact free).
                                 float phi = interleavedGradientNoise( gl_FragCoord.xy ) * PI2;
@@ -45,7 +45,7 @@ vec2 texelSize = vec2( 1.0 ) / shadowMapSize;
                                 // Receiver depth grows with distance from the sun → wider penumbra
                                 // (physical area-light behaviour without a depth readback).
                                 float depthFactor = clamp( shadowCoord.z, 0.0, 1.0 );
-                                float spread = 1.0 + blocked * ( 0.8 + 4.2 * depthFactor );
+                                float spread = 1.0 + blocked * ( 0.6 + 2.6 * depthFactor );
                                 vec2 pcssR = radius * spread;
 
                                 shadow = (

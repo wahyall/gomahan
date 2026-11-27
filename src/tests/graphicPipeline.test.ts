@@ -19,6 +19,7 @@ import {
 import { rtLookUniforms, setRtLookUniforms } from "@/lib/scene/rtUniforms";
 import { attachBpceReflection, ReflectionProbeRig } from "@/lib/scene/reflectionProbes";
 import { attachPcssShadow, createIesSpotTexture, IES_TEXTURE_SIZE, sampleIesProfile } from "@/lib/scene/pcssShadow";
+import { attachFresnelGlass, attachSpecularAa } from "@/lib/scene/materials";
 import { PhotographicOutputPass } from "@/features/buildMode/PhotographicOutputPass";
 import { useStudioStore } from "@/lib/store/useStudioStore";
 
@@ -299,10 +300,41 @@ describe("Hybrid RT Graphics Pipeline", () => {
     expect(frag).toContain("linearToSrgb");
     // 6-step SSCS march toward the sun.
     expect(frag).toContain("i <= 6");
-    // Pass has all uniforms typed and starts in photographic mode.
+    // Pass has all uniforms typed, does not swap ping-pong buffers, and starts in photographic mode.
+    expect(pass.needsSwap).toBe(false);
     expect(pass.photoUniforms.uSscs.value).toBe(1);
     expect(pass.photoUniforms.uSscsDist.value).toBeCloseTo(0.22, 5);
     expect(pass.photoUniforms.uSharpness.value).toBeGreaterThan(0);
     pass.dispose();
+  });
+
+  it("GR-04: attachSpecularAa declares uRtEnabled standalone and attachFresnelGlass touches material.roughness after lights_physical_fragment", () => {
+    const terrainMat = new THREE.MeshStandardMaterial({ color: 0x5c8c46, roughness: 0.94 });
+    attachSpecularAa(terrainMat);
+    const fakeTerrain = {
+      fragmentShader: "#include <common>\n#include <roughnessmap_fragment>\n",
+      vertexShader: "#include <common>\n",
+      uniforms: {} as Record<string, unknown>,
+    };
+    terrainMat.onBeforeCompile(fakeTerrain as never, {} as never);
+    expect(fakeTerrain.fragmentShader).toContain("uniform float uRtEnabled;");
+    expect(fakeTerrain.fragmentShader).toContain("rtSpecAa");
+    expect(fakeTerrain.uniforms.uRtEnabled).toBe(rtLookUniforms.uRtEnabled);
+    terrainMat.dispose();
+
+    const glassMat = new THREE.MeshPhysicalMaterial({ color: 0xdcf0f7, roughness: 0.08 });
+    attachFresnelGlass(glassMat);
+    const fakeGlass = {
+      fragmentShader:
+        "#include <common>\n#include <normal_fragment_maps>\n#include <emissivemap_fragment>\n#include <lights_physical_fragment>\n#include <aomap_fragment>\n",
+      vertexShader: "#include <common>\n",
+      uniforms: {} as Record<string, unknown>,
+    };
+    glassMat.onBeforeCompile(fakeGlass as never, {} as never);
+    const lightsIdx = fakeGlass.fragmentShader.indexOf("#include <lights_physical_fragment>");
+    const roughIdx = fakeGlass.fragmentShader.indexOf("material.roughness = min");
+    expect(lightsIdx).toBeGreaterThan(-1);
+    expect(roughIdx).toBeGreaterThan(lightsIdx);
+    glassMat.dispose();
   });
 });

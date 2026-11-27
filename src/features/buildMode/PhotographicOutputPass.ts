@@ -68,10 +68,8 @@ const PHOTO_FRAG = /* glsl */ `
 
   varying vec2 vUv;
 
-  float hash21(vec2 p) {
-    p = fract(p * vec2(234.34, 435.345));
-    p += dot(p, p + 34.23);
-    return fract(p.x * p.y);
+  float ignNoise(vec2 fragCoord) {
+    return fract(52.9829189 * fract(dot(fragCoord, vec2(0.06711056, 0.00583715))));
   }
 
   // Reconstruct the view-space position of a screen pixel from its depth.
@@ -85,8 +83,16 @@ const PHOTO_FRAG = /* glsl */ `
   // GR-03: 6-step screen-space contact shadow march toward the sun.
   float sscsOcclusion(vec2 uv, vec3 viewPos) {
     if (uSscs < 0.5) return 0.0;
-    if (texture2D(tDepth, uv).r >= 0.9999) return 0.0; // sky never contact-shadows
-    vec3 dir = normalize(uSunDirView);
+    float centerD = texture2D(tDepth, uv).r;
+    if (centerD >= 0.9999 || centerD <= 0.0001) return 0.0; // sky/unwritten depth never contact-shadows
+    vec3 dir = normalize(uSunDirView + vec3(0.0, 0.0, 1e-6));
+    // Estimate view-space surface normal from adjacent depth samples to avoid
+    // grazing-wall self-shadowing artifacts.
+    vec2 px = 1.0 / max(uResolution, vec2(1.0));
+    vec3 pR = viewPosFromDepth(min(uv + vec2(px.x, 0.0), vec2(0.999)));
+    vec3 pU = viewPosFromDepth(min(uv + vec2(0.0, px.y), vec2(0.999)));
+    vec3 surfN = normalize(cross(pR - viewPos, pU - viewPos) + vec3(0.0, 0.0, 1e-6));
+    if (dot(surfN, dir) <= 0.05) return 0.0;
     float occ = 0.0;
     for (int i = 1; i <= 6; i++) {
       float t = 0.024 + uSscsDist * (float(i) / 6.0);
@@ -95,16 +101,20 @@ const PHOTO_FRAG = /* glsl */ `
       if (clip.w <= 0.0) continue;
       vec2 suv = (clip.xy / clip.w) * 0.5 + 0.5;
       if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
-      vec3 sceneView = viewPosFromDepth(suv);
+      float sd = texture2D(tDepth, suv).r;
+      if (sd >= 0.9999 || sd <= 0.0001) continue;
+      vec4 sClip = vec4(suv * 2.0 - 1.0, sd * 2.0 - 1.0, 1.0);
+      vec4 sView4 = uProjInv * sClip;
+      vec3 sceneView = sView4.xyz / sView4.w;
       float sampleDist = -samplePos.z;
       float sceneDist = -sceneView.z;
-      // The surface sits between the camera and the ray point (occluder), and
-      // within a thin slab so broad geometry never self-shadows.
-      if (sampleDist > sceneDist + 0.028 && sampleDist < sceneDist + 0.42) {
-        occ += 1.0 / 6.0;
+      float diff = sampleDist - sceneDist;
+      if (diff > 0.035 && diff < 0.36) {
+        float w = smoothstep(0.035, 0.08, diff) * (1.0 - smoothstep(0.18, 0.36, diff));
+        occ += w / 6.0;
       }
     }
-    return occ;
+    return clamp(occ, 0.0, 1.0);
   }
 
   // AgX (Filament / Blender, rec2020 primaries) with the Punchy look.
@@ -159,13 +169,14 @@ const PHOTO_FRAG = /* glsl */ `
     color = clamp( ( color - 0.5 ) * 1.035 + 0.5, 0.0, 1.0 );
 
     color = AGX_OUTSET * color;
-    color = pow( max( vec3( 0.0 ), color ), vec3( 2.2 ) );
+    color = pow( max( vec3( 1e-6 ), color ), vec3( 2.2 ) );
     color = REC2020_TO_SRGB * color;
     return clamp( color, 0.0, 1.0 );
   }
 
   vec3 linearToSrgb(vec3 c) {
-    return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) ) - 0.055, step( vec3( 0.0031308 ), c ) );
+    vec3 safeC = max( c, vec3( 1e-6 ) );
+    return mix( c * 12.92, 1.055 * pow( safeC, vec3( 1.0 / 2.4 ) ) - 0.055, step( vec3( 0.0031308 ), c ) );
   }
 
   void main() {
@@ -183,11 +194,31 @@ const PHOTO_FRAG = /* glsl */ `
     vec2 cuv = vUv - 0.5;
     float rr = dot( cuv, cuv );
     vec2 caOff = cuv * uCaAmount * rr * 2.0;
+    vec3 centerRgb = texture2D( tDiffuse, uv ).rgb;
+    float baseA = texture2D( tDiffuse, uv ).a;
+
+    // RCAS-style contrast-adaptive micro-sharpening directly on linear tDiffuse
+    // (same signal space as its 4 cardinal taps, before CA/SSCS/bloom).
+    vec3 sharpDelta = vec3( 0.0 );
+    if ( uSharpness > 0.001 ) {
+      vec2 t = 1.0 / max( uResolution, vec2( 1.0 ) );
+      vec3 cN = texture2D( tDiffuse, uv + vec2( 0.0, t.y ) ).rgb;
+      vec3 cS = texture2D( tDiffuse, uv - vec2( 0.0, t.y ) ).rgb;
+      vec3 cE = texture2D( tDiffuse, uv + vec2( t.x, 0.0 ) ).rgb;
+      vec3 cW = texture2D( tDiffuse, uv - vec2( t.x, 0.0 ) ).rgb;
+      vec3 mn = min( centerRgb, min( min( cN, cS ), min( cE, cW ) ) );
+      vec3 mx = max( centerRgb, max( max( cN, cS ), max( cE, cW ) ) );
+      vec3 localRange = max( mx - mn, 1e-3 );
+      vec3 adapt = clamp( 0.045 / localRange, 0.0, 1.0 );
+      vec3 detail = centerRgb - ( cN + cS + cE + cW ) * 0.25;
+      sharpDelta = detail * adapt * uSharpness * 1.4;
+    }
+
     vec3 col;
     col.r = texture2D( tDiffuse, uv + caOff ).r;
-    col.g = texture2D( tDiffuse, uv ).g;
+    col.g = centerRgb.g;
     col.b = texture2D( tDiffuse, uv - caOff ).b;
-    float baseA = texture2D( tDiffuse, uv ).a;
+    col = max( vec3( 0.0 ), col + sharpDelta );
 
     // 1) Screen-space contact shadows lock contact points to the floor
     //    (only when the march is enabled — the depth fetch is not free).
@@ -201,23 +232,6 @@ const PHOTO_FRAG = /* glsl */ `
     // 2) Additive HDR bloom composite.
     col += texture2D( tBloom, uv ).rgb * uBloomStrength;
 
-    // 6) RCAS-style contrast-adaptive sharpening (5-tap, damped in high contrast)
-    //    on the LINEAR composite — same signal space as its neighbour taps.
-    if ( uSharpness > 0.001 ) {
-      vec2 t = 1.0 / uResolution;
-      vec3 cN = texture2D( tDiffuse, uv + vec2( 0.0, t.y ) ).rgb;
-      vec3 cS = texture2D( tDiffuse, uv - vec2( 0.0, t.y ) ).rgb;
-      vec3 cE = texture2D( tDiffuse, uv + vec2( t.x, 0.0 ) ).rgb;
-      vec3 cW = texture2D( tDiffuse, uv - vec2( t.x, 0.0 ) ).rgb;
-      vec3 mn = min( col, min( min( cN, cS ), min( cE, cW ) ) );
-      vec3 mx = max( col, max( max( cN, cS ), max( cE, cW ) ) );
-      vec3 localRange = max( mx - mn, 1e-3 );
-      // Contrast-adaptive weight: flat wood grain sharpens, hard edges stay calm.
-      vec3 adapt = clamp( 0.045 / localRange, 0.0, 1.0 );
-      vec3 detail = ( cN + cS + cE + cW ) * 0.25 - col;
-      col += detail * adapt * uSharpness * 2.4;
-    }
-
     // 3) EV100 exposure + 4) white balance, then 5) AgX Punchy tone map.
     col = uWhiteBalance * ( col * uExposure );
     col = agxPunchy( col );
@@ -228,16 +242,19 @@ const PHOTO_FRAG = /* glsl */ `
     float vig = 1.0 - uVignette * ( rN * rN ) * ( rN * rN );
     col *= clamp( vig, 0.0, 1.0 );
 
-    // Luminance-weighted fine film grain: mid-shadows only, never highlights.
-    float lum = dot( col, vec3( 0.2126, 0.7152, 0.0722 ) );
-    float grainW = 1.0 - smoothstep( 0.22, 0.62, lum );
-    col += ( hash21( vUv * 911.7 + floor( uTime * 12.0 ) * 19.3 ) - 0.5 ) * uGrainAmount * grainW;
+    // Convert to sRGB display space BEFORE grain & 8-bit dither so shadow regions
+    // don't get amplified by the 12.92x linear-to-sRGB dark slope.
+    col = linearToSrgb( clamp( col, 0.0, 1.0 ) );
 
-    // Blue-noise-ish dither against 8-bit banding.
-    col += ( hash21( vUv * 913.37 + floor( uTime * 8.0 ) * 17.7 ) - 0.5 ) * uDither;
+    // Subtle luminance-weighted film grain + pixel-space IGN dither against 8-bit banding.
+    float lum = dot( col, vec3( 0.2126, 0.7152, 0.0722 ) );
+    float grainW = 1.0 - smoothstep( 0.22, 0.65, lum );
+    float n1 = ignNoise( gl_FragCoord.xy + vec2( floor( uTime * 12.0 ) * 19.3, floor( uTime * 12.0 ) * 7.1 ) );
+    float n2 = ignNoise( gl_FragCoord.xy * 1.13 + vec2( floor( uTime * 8.0 ) * 17.7, 3.1 ) );
+    col += ( n1 - 0.5 ) * uGrainAmount * grainW;
+    col += ( n2 - 0.5 ) * uDither;
 
     gl_FragColor = vec4( clamp( col, 0.0, 1.0 ), baseA );
-    gl_FragColor.rgb = linearToSrgb( gl_FragColor.rgb );
   }
 `;
 
@@ -273,6 +290,7 @@ export class PhotographicOutputPass extends Pass {
 
   constructor() {
     super();
+    this.needsSwap = false;
     this.photoUniforms = {
       tDiffuse: { value: null },
       tBloom: { value: null },

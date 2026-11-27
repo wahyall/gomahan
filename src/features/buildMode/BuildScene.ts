@@ -576,7 +576,7 @@ export class BuildScene {
     this.canvas = canvas;
     this.actions = actions;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", stencil: false });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance", stencil: false });
     const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
     this.mobileViewport = mobileViewport;
     // Software rasterizers (SwiftShader/llvmpipe) must never receive the cinematic stack:
@@ -878,6 +878,8 @@ export class BuildScene {
     this.photoOutputPass?.dispose();
     this.probeRig?.dispose();
     this.probeRig = null;
+    this.composer?.renderTarget1?.depthTexture?.dispose();
+    this.composer?.renderTarget2?.depthTexture?.dispose();
     this.sceneDepthTex?.dispose();
     this.sceneDepthTex = null;
     this.composer?.dispose();
@@ -1266,12 +1268,14 @@ export class BuildScene {
       const proj = cam.projectionMatrix;
       (pu.uProj.value as THREE.Matrix4).copy(proj);
       (pu.uProjInv.value as THREE.Matrix4).copy(cam.projectionMatrixInverse);
+      // Bind the depth texture of whichever buffer RenderPass will write into on this frame.
+      pu.tDepth.value = this.composer?.readBuffer.depthTexture ?? this.sceneDepthTex;
       // Shared view-space sun direction (foliage SSS, Mie scattering, SSCS).
       rtLookUniforms.uSunDirView.value.copy(this.sunDir).transformDirection(cam.matrixWorldInverse);
       rtLookUniforms.uCamWorldY.value = cam.getWorldPosition(this._v2).y;
       // SSCS is pointless at night / with the sun below the horizon.
       pu.uSscs.value =
-        this.activeTier === "high" && !this.softwareGpu && this.sunLight.intensity > 0.4 ? 1 : 0;
+        this.activeTier === "high" && !this.softwareGpu && this.sunLight.intensity > 0.4 && pu.tDepth.value ? 1 : 0;
       pu.uSunDirView.value.copy(rtLookUniforms.uSunDirView.value);
     }
   }

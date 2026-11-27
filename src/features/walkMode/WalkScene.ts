@@ -250,7 +250,7 @@ export class WalkScene {
     this.struct = struct;
     this.actions = actions;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", stencil: false });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance", stencil: false });
     const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
     this.mobileViewport = mobileViewport;
     // Software rasterizers (SwiftShader / llvmpipe) must never receive the cinematic stack
@@ -667,11 +667,13 @@ export class WalkScene {
       );
       (pu.uProj.value as THREE.Matrix4).copy(this.camera.projectionMatrix);
       (pu.uProjInv.value as THREE.Matrix4).copy(this.camera.projectionMatrixInverse);
+      // Bind the depth texture of whichever buffer RenderPass will write into on this frame.
+      pu.tDepth.value = this.composer?.readBuffer.depthTexture ?? this.sceneDepthTex;
       rtLookUniforms.uSunDirView.value.copy(this.sunDir).transformDirection(this.camera.matrixWorldInverse);
       rtLookUniforms.uCamWorldY.value = this.camera.position.y;
       pu.uSunDirView.value.copy(rtLookUniforms.uSunDirView.value);
       pu.uSscs.value =
-        this.activeTier === "high" && !this.softwareGpu && this.sunLight.intensity > 0.4 ? 1 : 0;
+        this.activeTier === "high" && !this.softwareGpu && this.sunLight.intensity > 0.4 && pu.tDepth.value ? 1 : 0;
       // PH-02: subtle architectural vertical correction at near-level pitch.
       const vert = THREE.MathUtils.clamp(1 - Math.abs(this.pitchRad) / 0.28, 0, 1);
       pu.uVertCorrect.value = isInterior ? vert * 0.8 : vert * 0.45;
@@ -1540,6 +1542,8 @@ export class WalkScene {
     this.photoOutputPass?.dispose();
     this.probeRig?.dispose();
     this.probeRig = null;
+    this.composer?.renderTarget1?.depthTexture?.dispose();
+    this.composer?.renderTarget2?.depthTexture?.dispose();
     this.sceneDepthTex?.dispose();
     this.sceneDepthTex = null;
     this.composer?.dispose();

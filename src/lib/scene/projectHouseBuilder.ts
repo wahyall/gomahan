@@ -18,7 +18,7 @@ import {
 import { attachPcssShadow } from "@/lib/scene/pcssShadow";
 import { attachBpceReflection } from "@/lib/scene/reflectionProbes";
 import { interiorProbeUniforms } from "@/lib/scene/rtUniforms";
-import { attachFoliageSss } from "@/lib/scene/materials";
+import { attachAerialFog, attachFoliageSss, attachSpecularAa } from "@/lib/scene/materials";
 import type { MaterialPalette } from "@/lib/scene/materials";
 import { buildFurnitureMesh, buildHvacMesh, buildLightFixtureMesh } from "@/lib/scene/propsBuilder";
 import { pointInPolygon, polygonArea, polygonBounds } from "@/lib/geometry/rooms";
@@ -866,12 +866,20 @@ export function buildProjectHouse(
     let m = floorAoMatCache.get(key);
     if (!m) {
       const cloned = baseMat.clone();
+      // THREE.Material.clone() deep-copies userData while dropping onBeforeCompile &
+      // customProgramCacheKey, so clear attachment guards before re-attaching hooks.
+      delete cloned.userData._bakedAoAttached;
+      delete cloned.userData._rtPcssAttached;
+      delete cloned.userData._rtAerial;
+      delete cloned.userData._rtSpecAa;
+      delete cloned.userData._rtBpceAttached;
       cloned.aoMap = lvIdx === 0 ? aoMapLt1 : aoMapLt2;
       cloned.aoMapIntensity = 1.15;
       attachBakedAoShader(cloned);
-      // GR-02/GR-03: floors carry the interior BPCEM probe + PCSS-Lite kernel
-      // (clone() drops onBeforeCompile hooks, so re-attach after cloning).
+      // GR-02/GR-03/GR-04/GR-07: floors carry GI, PCSS, aerial fog, specular AA & BPCEM.
       attachPcssShadow(cloned);
+      attachAerialFog(cloned);
+      attachSpecularAa(cloned);
       attachBpceReflection(cloned, interiorProbeUniforms, "interior");
       cloned.needsUpdate = true;
       resources.push(cloned);

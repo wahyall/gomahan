@@ -619,13 +619,15 @@ vBakedAo = 1.0 - clamp(${BAKED_AO_ATTR}, 0.0, 0.78);`,
         );
     }
     if (!shader.fragmentShader.includes("vBakedAo")) {
+      const rtDecl = shader.fragmentShader.includes("uniform float uRtEnabled;")
+        ? "uniform float uRtGiStrength;"
+        : "uniform float uRtEnabled;\nuniform float uRtGiStrength;";
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
           `#include <common>
 varying float vBakedAo;
-uniform float uRtEnabled;
-uniform float uRtGiStrength;`,
+${rtDecl}`,
         )
         .replace(
           "#include <aomap_fragment>",
