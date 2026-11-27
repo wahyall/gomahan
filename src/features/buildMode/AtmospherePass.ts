@@ -2,12 +2,15 @@ import * as THREE from "three";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 
 /**
- * Cinematic atmosphere pass: screen-space sun shafts (crepuscular "god rays"),
- * a subtle linear-space vignette and a 8-bit banding dither — all applied on the
- * linear HDR buffer before tone mapping, following the `3d-sky-rays` recipe:
- * march toward the projected sun, accumulate threshold-gated sky energy with an
- * exponentially decaying weight, normalise by the weight sum so sample count
+ * Cinematic atmosphere pass: screen-space sun shafts (crepuscular "god rays")
+ * applied on the linear HDR buffer before tone mapping, following the `3d-sky-rays`
+ * recipe: march toward the projected sun, accumulate threshold-gated sky energy with
+ * an exponentially decaying weight, normalise by the weight sum so sample count
  * never changes exposure, and fade out as the sun leaves the overscan margin.
+ *
+ * OPT-03 fusion: the linear-space vignette and 8-bit dither moved to
+ * `FinalOutputPass` (with bloom composite + ACES) so this pass can be fully
+ * disabled whenever the sun is behind the camera or below the horizon.
  */
 const AtmosphereShader = {
   uniforms: {
@@ -22,8 +25,6 @@ const AtmosphereShader = {
     uEnergyClamp: { value: 1.9 },
     uSamples: { value: 32 },
     uAspect: { value: 1.777 },
-    uVignette: { value: 0.16 },
-    uDither: { value: 0.0022 },
     uTime: { value: 0 },
   },
   vertexShader: /* glsl */ `
@@ -45,8 +46,6 @@ const AtmosphereShader = {
     uniform float uEnergyClamp;
     uniform int uSamples;
     uniform float uAspect;
-    uniform float uVignette;
-    uniform float uDither;
     uniform float uTime;
     varying vec2 vUv;
 
@@ -87,13 +86,6 @@ const AtmosphereShader = {
         float rays = sum / max(weightSum, 1e-4);
         col += rays * radial * uSunFade * uIntensity * uSunColor * 0.6;
       }
-
-      // Gentle linear-space vignette keeps sky corners from going chalky
-      float r = length((vUv - 0.5) * vec2(uAspect, 1.0));
-      col *= 1.0 - uVignette * smoothstep(0.55, 1.25, r);
-
-      // 8-bit output banding dither (decorrelates quantisation after tone map)
-      col += (hash21(vUv * 913.37 + floor(uTime * 8.0) * 17.7) - 0.5) * uDither;
 
       gl_FragColor = vec4(col, base.a);
     }
