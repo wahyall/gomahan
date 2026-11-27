@@ -82,6 +82,23 @@ export function runLightingSimulationAsync(project: Project): Promise<LightingSi
   });
 }
 
+export interface SimAllResult {
+  lighting: LightingSimulationResult;
+  airflow: AirflowSimulationResult;
+}
+
+/** OPT-16: batched lighting + airflow request — one structured-clone of the project,
+ * one derived-model build in the worker, one zero-copy reply with all 8 buffers. */
+export function runSimsAsync(project: Project): Promise<SimAllResult | null> {
+  return dispatchWorkerTask("sim_all", project, () => {
+    const derived = buildDerivedModel(project, { includeBricks: false });
+    return {
+      lighting: runLightingSimulation(derived),
+      airflow: runAirflowSimulation(derived),
+    } satisfies SimAllResult;
+  });
+}
+
 export function runAirflowSimulationAsync(project: Project): Promise<AirflowSimulationResult | null> {
   return dispatchWorkerTask("airflow", project, () => {
     const derived = buildDerivedModel(project, { includeBricks: false });

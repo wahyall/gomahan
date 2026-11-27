@@ -8,12 +8,14 @@ import { runLightingSimulation, type LightingSimulationResult } from "@/lib/simu
 export type SimulationWorkerRequest =
   | { id: number; kind: "lighting"; project: Project }
   | { id: number; kind: "airflow"; project: Project }
-  | { id: number; kind: "bricks"; project: Project };
+  | { id: number; kind: "bricks"; project: Project }
+  | { id: number; kind: "sim_all"; project: Project };
 
 export type SimulationWorkerResponse =
   | { id: number; kind: "lighting"; result: LightingSimulationResult }
   | { id: number; kind: "airflow"; result: AirflowSimulationResult }
-  | { id: number; kind: "bricks"; result: BrickInstance[] };
+  | { id: number; kind: "bricks"; result: BrickInstance[] }
+  | { id: number; kind: "sim_all"; result: { lighting: LightingSimulationResult; airflow: AirflowSimulationResult } };
 
 const workerScope = self as unknown as {
   postMessage(message: SimulationWorkerResponse, options?: { transfer?: Transferable[] }): void;
@@ -22,6 +24,27 @@ const workerScope = self as unknown as {
 
 workerScope.addEventListener("message", (event: MessageEvent<SimulationWorkerRequest>) => {
   const req = event.data;
+  if (req.kind === "sim_all") {
+    // OPT-16: one derived-model build feeds both engines (the old path built it
+    // twice for two separate messages) and all 8 Float32Array buffers transfer
+    // zero-copy in a single postMessage.
+    const derived = buildDerivedModel(req.project, { includeBricks: false });
+    const lighting = runLightingSimulation(derived);
+    const airflow = runAirflowSimulation(derived);
+    const transfers: Transferable[] = [
+      lighting.lt1LuxGrid.buffer,
+      lighting.lt2LuxGrid.buffer,
+      airflow.lt1VelX.buffer,
+      airflow.lt1VelZ.buffer,
+      airflow.lt1Temp.buffer,
+      airflow.lt2VelX.buffer,
+      airflow.lt2VelZ.buffer,
+      airflow.lt2Temp.buffer,
+    ];
+    workerScope.postMessage({ id: req.id, kind: "sim_all", result: { lighting, airflow } }, { transfer: transfers });
+    return;
+  }
+
   if (req.kind === "lighting") {
     const derived = buildDerivedModel(req.project, { includeBricks: false });
     const result = runLightingSimulation(derived);

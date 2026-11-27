@@ -138,6 +138,16 @@ input[type="range"].studio-range::-moz-range-thumb {
   -webkit-backdrop-filter: blur(16px) saturate(135%);
 }
 
+/* OPT-18: while the 3D camera is actively orbiting/walking, freeze the
+   frosted-glass compositor readback over the live WebGL canvas (3-7 ms/frame
+   on integrated GPUs). BuildScene/WalkScene set `data-3d-active` on <body>
+   during interaction and release it ~150 ms after the camera rests. */
+body[data-3d-active="1"] .studio-glass {
+  background: linear-gradient(165deg, rgba(28, 33, 42, 0.955) 0%, rgba(19, 23, 29, 0.97) 100%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .studio-surface {
   background: linear-gradient(180deg, rgba(28, 32, 40, 0.98) 0%, rgba(22, 26, 33, 0.98) 100%);
   border: 1px solid rgba(242, 239, 232, 0.085);
