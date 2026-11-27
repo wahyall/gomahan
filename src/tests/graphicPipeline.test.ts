@@ -18,7 +18,13 @@ import {
 } from "@/lib/scene/photographicPresets";
 import { rtLookUniforms, setRtLookUniforms } from "@/lib/scene/rtUniforms";
 import { attachBpceReflection, ReflectionProbeRig } from "@/lib/scene/reflectionProbes";
-import { attachPcssShadow, createIesSpotTexture, IES_TEXTURE_SIZE, sampleIesProfile } from "@/lib/scene/pcssShadow";
+import {
+  attachPcssShadow,
+  computeIesSpotBudgetPerLevel,
+  createIesSpotTexture,
+  IES_TEXTURE_SIZE,
+  sampleIesProfile,
+} from "@/lib/scene/pcssShadow";
 import { attachFresnelGlass, attachSpecularAa } from "@/lib/scene/materials";
 import { PhotographicOutputPass } from "@/features/buildMode/PhotographicOutputPass";
 import { useStudioStore } from "@/lib/store/useStudioStore";
@@ -336,5 +342,15 @@ describe("Hybrid RT Graphics Pipeline", () => {
     expect(lightsIdx).toBeGreaterThan(-1);
     expect(roughIdx).toBeGreaterThan(lightsIdx);
     glassMat.dispose();
+  });
+
+  it("GR-05: computeIesSpotBudgetPerLevel caps total spotLightMap units inside MAX_TEXTURE_IMAGE_UNITS across LT1 + LT2", () => {
+    // 16-unit baseline GPU (ANGLE/D3D11, mobile, SwiftShader): 2 levels × 4 spots = 8 maps + 8 reserved = 16
+    expect(computeIesSpotBudgetPerLevel(16, 7, 2)).toBe(4);
+    expect(computeIesSpotBudgetPerLevel(16, 4, 1)).toBe(4);
+    // 32-unit desktop GPU unlocks all 7 spots per level
+    expect(computeIesSpotBudgetPerLevel(32, 7, 2)).toBe(7);
+    // Very constrained GPU falls back cleanly without negative counts
+    expect(computeIesSpotBudgetPerLevel(8, 7, 2)).toBe(0);
   });
 });

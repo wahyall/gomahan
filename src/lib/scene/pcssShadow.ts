@@ -173,3 +173,24 @@ export function createIesSpotTexture(): THREE.DataTexture {
   tex.needsUpdate = true;
   return tex;
 }
+
+/**
+ * Computes how many `SpotLight`s per level may bind a `spot.map` IES cookie
+ * without exceeding the GPU's `MAX_TEXTURE_IMAGE_UNITS` limit when all levels
+ * are visible simultaneously (LT2 / Atap).
+ *
+ * Each `spot.map` reserves one fragment sampler slot (`spotLightMap[i]`).
+ * Reserving 8 slots covers albedo, normal, roughness, aoMap, envMap, sun
+ * shadow map, plus 2 headroom slots on a 16-unit WebGL2 baseline GPU.
+ */
+export function computeIesSpotBudgetPerLevel(
+  maxFragmentTextures: number,
+  spotsPerLevel: number,
+  levelCount: number,
+  reservedMaterialSamplers = 8,
+): number {
+  const safeMax = Number.isFinite(maxFragmentTextures) && maxFragmentTextures > 0 ? maxFragmentTextures : 16;
+  const available = Math.max(0, safeMax - reservedMaterialSamplers);
+  const perLevel = Math.floor(available / Math.max(1, levelCount));
+  return Math.max(0, Math.min(spotsPerLevel, perLevel));
+}

@@ -52,7 +52,7 @@ import type { LightingSimulationResult } from "@/lib/simulation/lightingEngine";
 import { createChamferBox, createContactShadowTexture, disposeGeometry, disposeResource } from "@/lib/scene/geometryHelpers";
 import { buildInstancedContactDecals, type ContactDecalSpec } from "@/lib/scene/bakedAo";
 import { createEnvironmentMap, createMaterialPalette, createSkyGradientTexture, makeSunSpriteTexture, type MaterialPalette } from "@/lib/scene/materials";
-import { createIesSpotTexture } from "@/lib/scene/pcssShadow";
+import { computeIesSpotBudgetPerLevel, createIesSpotTexture } from "@/lib/scene/pcssShadow";
 import { ReflectionProbeRig } from "@/lib/scene/reflectionProbes";
 import { rtLookUniforms, setRtLookUniforms } from "@/lib/scene/rtUniforms";
 import {
@@ -694,15 +694,19 @@ export class BuildScene {
     });
     this.staticDisposables.push(this.skyMat, this.skyMesh.geometry, this.contactShadowTex, this.contactShadowMat);
 
-    // Pre-allocate fixed hardware light pool per level (max 7 Spot + 7 Point slots, at most 7 active per level)
-    this.iesTex = createIesSpotTexture();
-    this.staticDisposables.push(this.iesTex);
+    // Pre-allocate fixed hardware light pool per level (max 7 Spot + 7 Point slots, at most 7 active per level).
+    // Budget `spot.map` IES cookies to stay within GPU `MAX_TEXTURE_IMAGE_UNITS` when LT1 + LT2 are both visible.
+    const iesPerLevel = computeIesSpotBudgetPerLevel(this.renderer.capabilities.maxTextures, 7, 2);
+    this.iesTex = iesPerLevel > 0 ? createIesSpotTexture() : null;
+    if (this.iesTex) this.staticDisposables.push(this.iesTex);
     for (const lvIdx of [0, 1] as const) {
       for (let i = 0; i < 7; i++) {
         const spot = new THREE.SpotLight(0xfff3de, 0, 4.4, 0.7, 0.82, 0.45);
         spot.visible = false;
-        // GR-05: photometric IES cookie — soft core + wall-wash scallop ring.
-        spot.map = this.iesTex;
+        // GR-05: photometric IES cookie — soft core + wall-wash scallop ring (within fragment texture budget).
+        if (this.iesTex && i < iesPerLevel) {
+          spot.map = this.iesTex;
+        }
         this.lightPoolLevelRoots[lvIdx].add(spot, spot.target);
         this.spotLightPools[lvIdx].push(spot);
 
@@ -2403,7 +2407,15 @@ transformed.y = rainY;`,
       let pointIdx = 0;
 
       if (enabled && lv) {
-        const activeLights = lv.lights.filter((x) => x.on && x.dimmer > 0).slice(-7);
+        const activeLights = lv.lights
+          .filter((x) => x.on && x.dimmer > 0)
+          .slice(-7)
+          .sort((a, b) => {
+            const aWall = a.type === "wall" ? 1 : 0;
+            const bWall = b.type === "wall" ? 1 : 0;
+            if (aWall !== bWall) return bWall - aWall;
+            return b.lumens * b.dimmer - a.lumens * a.dimmer;
+          });
         for (const l of activeLights) {
           const lightHex = l.colorTempK <= 3200 ? 0xffcb85 : 0xfff3de;
           const clampedY = Math.min(lv.height - 0.25, Math.max(0.25, l.position.y));

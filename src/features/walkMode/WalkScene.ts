@@ -20,7 +20,7 @@ import {
   makeSunSpriteTexture,
   type MaterialPalette,
 } from "@/lib/scene/materials";
-import { createIesSpotTexture } from "@/lib/scene/pcssShadow";
+import { computeIesSpotBudgetPerLevel, createIesSpotTexture } from "@/lib/scene/pcssShadow";
 import { ReflectionProbeRig } from "@/lib/scene/reflectionProbes";
 import { rtLookUniforms, setRtLookUniforms } from "@/lib/scene/rtUniforms";
 import {
@@ -385,12 +385,15 @@ export class WalkScene {
     canvas.addEventListener("webglcontextrestored", this.onContextRestoredBound);
 
     // Pre-allocate 4 reusable floor-local SpotLights (avoids 14-28 shader light loops & per-rebuild allocations)
-    this.iesTex = createIesSpotTexture();
-    this.staticDisposables.push(this.iesTex);
+    const iesCount = computeIesSpotBudgetPerLevel(this.renderer.capabilities.maxTextures, 4, 1);
+    this.iesTex = iesCount > 0 ? createIesSpotTexture() : null;
+    if (this.iesTex) this.staticDisposables.push(this.iesTex);
     for (let i = 0; i < 4; i++) {
       const spot = new THREE.SpotLight(0xffe7bd, 0, 4.4, Math.PI * 0.34, 0.82, 0.45);
-      // GR-05: photometric IES cookie — soft core + wall-wash scallop ring.
-      spot.map = this.iesTex;
+      // GR-05: photometric IES cookie — soft core + wall-wash scallop ring (within fragment texture budget).
+      if (this.iesTex && i < iesCount) {
+        spot.map = this.iesTex;
+      }
       this.lightsGroup.add(spot, spot.target);
       this.spotLightPool.push(spot);
     }

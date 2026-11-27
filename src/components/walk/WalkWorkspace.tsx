@@ -123,7 +123,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
     sceneRef.current?.setQualityOverride(renderTier);
   }, [renderTier]);
 
-  // Dynamic time-of-day (T cycles Pagi → Siang → Sore → Malam, same presets as Build mode)
+  // Time-of-day presets (T cycles Pagi → Siang → Sore → Malam, same presets as Build mode)
   const hourOfDay = derived.project.simulation.hourOfDay;
 
   useEffect(() => {
@@ -219,7 +219,7 @@ export function WalkWorkspace({ derived, struct, onSnapshotCapture }: WalkWorksp
           {/* Forces clean Row 2 split on <640px widths even in wider mobile viewports */}
           <div className="order-3 h-0 basis-full sm:hidden" aria-hidden />
 
-          {/* 3. Dynamic Time-of-Day Pills (Row 2 right on mobile, Row 2 center on sm/md, Row 1 center on lg+) */}
+          {/* 3. Time-of-Day Pills (Row 2 right on mobile, Row 2 center on sm/md, Row 1 center on lg+) */}
           <div className="order-5 flex shrink-0 justify-end sm:order-3 sm:w-full sm:justify-center lg:order-2 lg:w-auto">
             <div className="studio-glass pointer-events-auto flex items-center gap-0.5 rounded-full p-0.5">
               <span className="pl-2 pr-0.5 text-amber-300 sm:px-2" title="Waktu Pencahayaan Matahari">
