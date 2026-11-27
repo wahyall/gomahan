@@ -163,7 +163,9 @@ export class BuildScene {
   private readonly hemiLight: THREE.HemisphereLight;
   private readonly sunLight: THREE.DirectionalLight;
   private readonly fillLight: THREE.DirectionalLight;
-  private readonly lightningLight: THREE.DirectionalLight;
+  // OPT-05: lightning energy rides `fillLight` — no permanent third DirectionalLight
+  private fillLightBase = 0.45;
+  private fillLightTinted = false;
 
   private readonly envGroup = new THREE.Group();
   private readonly neighborsGroup = new THREE.Group();
@@ -215,6 +217,14 @@ export class BuildScene {
   private airParticleStates: { x: number; y: number; z: number; lv: 0 | 1; life: number }[] = [];
 
   private clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
+  // OPT-02/OPT-05/OPT-09/OPT-18: prewarm state, fan frustum culling, blur gating, capture bridge
+  private poolLitState = false;
+  private shaderPrewarmDone = false;
+  private rawToDataURL: HTMLCanvasElement["toDataURL"] | null = null;
+  private readonly _frustum = new THREE.Frustum();
+  private readonly _pm = new THREE.Matrix4();
+  private body3dActive = false;
+  private last3dActiveAt = 0;
   private explodePieces: { obj: THREE.Object3D; base: THREE.Vector3; off: THREE.Vector3 }[] = [];
   private explodeInstanced: { im: THREE.InstancedMesh; n: number; pos: Float32Array; off: Float32Array; quat: Float32Array; scl: Float32Array }[] = [];
   private explodeCurrent = 0;
@@ -497,7 +507,7 @@ export class BuildScene {
     this.canvas = canvas;
     this.actions = actions;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance", stencil: false });
     const mobileViewport = typeof window !== "undefined" && window.innerWidth < 768;
     this.mobileViewport = mobileViewport;
     // Software rasterizers (SwiftShader / llvmpipe) must never receive the cinematic stack:
@@ -524,7 +534,8 @@ export class BuildScene {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
-    this.renderer.localClippingEnabled = true;
+    // OPT-02: clipping is enabled on demand only when a real section cut is active
+    // (updateProjectData drives it) — Early-Z stays on for ~95% of the session.
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.FogExp2(0xd9e8f4, 0.0046);
@@ -563,9 +574,14 @@ export class BuildScene {
     this.fillLight.position.set(-14, 12, 20);
     this.scene.add(this.fillLight);
 
-    this.lightningLight = new THREE.DirectionalLight(0xdce8ff, 0);
-    this.lightningLight.position.set(-10, 24, -12);
-    this.scene.add(this.lightningLight);
+    // OPT-01 (2026-11): `preserveDrawingBuffer: false` restores the zero-copy swapchain
+    // page-flip; snapshot/export paths read the canvas through `captureDataUrl()`, which
+    // renders one synchronous frame immediately before the read.
+    this.rawToDataURL = this.canvas.toDataURL.bind(this.canvas);
+    this.canvas.toDataURL = ((type?: string, quality?: number) => {
+      if (this.disposed || this.contextLost) return this.rawToDataURL!(type, quality);
+      return this.captureDataUrl(type ?? "image/jpeg", quality ?? 0.92);
+    }) as HTMLCanvasElement["toDataURL"];
 
     this.skyMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide, depthWrite: false, fog: false });
     this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(140, 32, 20), this.skyMat);
@@ -731,6 +747,16 @@ export class BuildScene {
   public dispose(): void {
     this.disposed = true;
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    // OPT-18: never leave the body attribute latched after the scene is gone.
+    if (this.body3dActive) {
+      this.body3dActive = false;
+      document.body.removeAttribute("data-3d-active");
+    }
+    // OPT-01: restore the native toDataURL once the override is no longer needed.
+    if (this.rawToDataURL) {
+      this.canvas.toDataURL = this.rawToDataURL;
+      this.rawToDataURL = null;
+    }
     if (this.previewRafId !== null) {
       cancelAnimationFrame(this.previewRafId);
       this.previewRafId = null;
@@ -857,6 +883,90 @@ export class BuildScene {
 
   public getCanvas(): HTMLCanvasElement {
     return this.canvas;
+  }
+
+  /** OPT-01: render one synchronous frame, then read the canvas in the same microtask. */
+  public captureDataUrl(mime = "image/jpeg", quality = 0.92): string {
+    if (this.disposed || this.contextLost) return this.rawToDataURL?.(mime, quality) ?? "";
+    const cam = this.cameraCtrl.activeCamera;
+    if (this.postActive && this.composer) {
+      if (this.renderPass) this.renderPass.camera = cam;
+      this.updateAtmosphere(cam);
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, cam);
+    }
+    return this.rawToDataURL!(mime, quality);
+  }
+
+  /** OPT-09: a fan only keeps the loop alive while it is on-screen and effectively visible. */
+  private anyFanVisibleInFrustum(): boolean {
+    if (this.animatedFans.length === 0 || this.reducedMotion) return false;
+    const cam = this.cameraCtrl.activeCamera;
+    cam.updateMatrixWorld();
+    this._pm.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    this._frustum.setFromProjectionMatrix(this._pm);
+    for (const fan of this.animatedFans) {
+      let o: THREE.Object3D | null = fan;
+      let effectivelyVisible = true;
+      while (o) {
+        if (!o.visible) {
+          effectivelyVisible = false;
+          break;
+        }
+        o = o.parent;
+      }
+      if (!effectivelyVisible) continue;
+      fan.getWorldPosition(this._v1);
+      if (this._frustum.containsPoint(this._v1)) return true;
+    }
+    return false;
+  }
+
+  /** OPT-18: mark <body> as 3D-active so `.studio-glass` drops its compositor blur
+   * while the camera is actually moving; released ~150 ms after it rests. */
+  private update3dActiveFlag(active: boolean, now: number): void {
+    if (active) {
+      this.last3dActiveAt = now;
+      if (!this.body3dActive) {
+        this.body3dActive = true;
+        document.body.setAttribute("data-3d-active", "1");
+      }
+    } else if (this.body3dActive && now - this.last3dActiveAt > 150) {
+      this.body3dActive = false;
+      document.body.removeAttribute("data-3d-active");
+    }
+  }
+
+  /**
+   * OPT-02 + OPT-05 prewarm: compile both macro shader variants up front —
+   * (clipped + lit pool) and (unclipped + day pool) — via `compileAsync` so the
+   * first section-cut slider drag and the first light toggle never hitch.
+   */
+  private prewarmShaderVariants(): void {
+    if (this.shaderPrewarmDone || this.disposed) return;
+    this.shaderPrewarmDone = true;
+    const cam = this.cameraCtrl.activeCamera;
+    const clipWas = this.renderer.localClippingEnabled;
+    const poolWas = this.poolLitState;
+    const spots = [...this.spotLightPools[0], ...this.spotLightPools[1]];
+    const points = [...this.pointLightPools[0], ...this.pointLightPools[1]];
+    try {
+      this.renderer.localClippingEnabled = true;
+      for (const l of spots) l.visible = true;
+      for (const l of points) l.visible = true;
+      void this.renderer.compileAsync(this.scene, cam).catch(() => {});
+      this.renderer.localClippingEnabled = false;
+      for (const l of spots) l.visible = false;
+      for (const l of points) l.visible = false;
+      void this.renderer.compileAsync(this.scene, cam).catch(() => {});
+    } catch {
+      // best-effort prewarm only — a missed variant compiles on first use as before
+    } finally {
+      this.renderer.localClippingEnabled = clipWas;
+      for (const l of spots) l.visible = poolWas;
+      for (const l of points) l.visible = poolWas;
+    }
   }
 
   public setQualityOverride(tier: BuildQualityTier): void {
@@ -1185,6 +1295,10 @@ export class BuildScene {
     const nextCutH = this.studioView?.cutH ?? 100;
     const cutChanged = Math.abs(this.clipPlane.constant - nextCutH) > 1e-4;
     this.clipPlane.constant = nextCutH;
+    // OPT-02: per-material clipping runs only while a real section cut is active —
+    // `discard` in the fragment shader otherwise disables hardware Early-Z for
+    // every opaque house pixel (~95% of the session).
+    this.renderer.localClippingEnabled = nextCutH < 11.9;
     if (wasExploded !== (this.explodeTarget > 0.05)) {
       this.applyLevelAndWallVisibility();
     } else if (prevCutActive !== (nextCutH < 10)) {
@@ -1248,7 +1362,10 @@ export class BuildScene {
         this.sunLight.position.set(2.5 + sx * 24, Math.max(3, sy * 24), 8.5 + sz * 24);
       }
       this.fillLight.position.set(2.5 - sx * 18, 12, 8.5 - sz * 18);
-      this.fillLight.intensity = isNight ? 0.14 : isStorm ? 0.35 : 0.4;
+      this.fillLightBase = isNight ? 0.14 : isStorm ? 0.35 : 0.4;
+      this.fillLight.intensity = this.fillLightBase;
+      this.fillLight.color.setHex(0xb2cff0);
+      this.fillLightTinted = false;
       this.sunLight.intensity = isNight ? 0.18 : isStorm ? 1.15 : 2.75;
       this.sunLight.color.set(isNight ? 0x6c88b8 : sim.hourOfDay < 7.5 || sim.hourOfDay > 16.5 ? 0xffcb8c : 0xfff4de);
       this.hemiLight.intensity = isNight ? 0.26 : isStorm ? 0.7 : 0.5;
@@ -1878,6 +1995,9 @@ export class BuildScene {
 
     this.rebuildAnimatedFanList();
     this.applyLevelAndWallVisibility();
+    // OPT-02/OPT-05: once the full house exists, pre-compile both macro shader
+    // variants (clipped/lit and unclipped/day) so later toggles never hitch.
+    this.prewarmShaderVariants();
   }
 
   private updateLightPool(derived: DerivedProjectModel): void {
@@ -1901,7 +2021,6 @@ export class BuildScene {
             pt.color.setHex(lightHex);
             pt.intensity = (l.lumens / 500) * l.dimmer * 1.4;
             pt.position.set(l.position.x, clampedY, l.position.z);
-            pt.visible = true;
           } else {
             const spot = spots[spotIdx++];
             if (!spot) continue;
@@ -1923,13 +2042,29 @@ export class BuildScene {
               l.position.z + Math.cos(rotY) * fwdOff,
             );
             spot.target.updateMatrixWorld();
-            spot.visible = true;
           }
         }
       }
 
-      for (let i = spotIdx; i < spots.length; i++) spots[i]!.visible = false;
-      for (let i = pointIdx; i < points.length; i++) points[i]!.visible = false;
+      // OPT-05: unused slots park at `intensity = 0` but keep `visible` managed by
+      // the single Day/Lit macro below — per-slot visible toggling changed
+      // NUM_SPOT_LIGHTS/NUM_POINT_LIGHTS and recompiled every shader on each toggle.
+      for (let i = spotIdx; i < spots.length; i++) spots[i]!.intensity = 0;
+      for (let i = pointIdx; i < points.length; i++) points[i]!.intensity = 0;
+    }
+
+    // OPT-05 macro states: Day (all pool lights hidden — zero BRDF iterations while
+    // the house is unlit) vs Lit (fixed pool visible — NUM_* constants, no recompile).
+    // Both variants are pre-compiled by prewarmShaderVariants(), so the transition
+    // only swaps an already-cached program.
+    const anyActive =
+      enabled && derived.project.levels.some((lv) => lv?.lights.some((l) => l.on && l.dimmer > 0));
+    if (anyActive !== this.poolLitState) {
+      this.poolLitState = anyActive;
+      for (const lvIdx of [0, 1] as const) {
+        for (const s of this.spotLightPools[lvIdx]) s.visible = anyActive;
+        for (const p of this.pointLightPools[lvIdx]) p.visible = anyActive;
+      }
     }
   }
 
@@ -4329,7 +4464,9 @@ export class BuildScene {
 
       const camMoved = this.cameraCtrl.update(dt);
       const explodeActive = Math.abs(this.explodeCurrent - this.explodeTarget) > 0.001;
-      const fansActive = this.animatedFans.length > 0 && !this.reducedMotion;
+      // OPT-09: `animatedFans.length > 0` alone kept the loop awake 100% of the
+      // session; only an on-screen, effectively-visible fan keeps it rendering now.
+      const fansActive = this.anyFanVisibleInFrustum();
       const rainActive = Boolean(this.rainPoints && this.rainPoints.visible && this.rainArray && !this.reducedMotion);
       const lightningActive = this.lightningEnergy > 0.01 && !this.reducedMotion;
       const floodActive = Boolean(this.studioView?.showFloodWater && this.flood && this.flood.streetFloodCm > 0 && !this.reducedMotion);
@@ -4346,6 +4483,12 @@ export class BuildScene {
         floodActive ||
         airActive ||
         draggingActive;
+
+      // OPT-18: compositor blur gating on <body> (tracks real interaction, not just render)
+      this.update3dActiveFlag(
+        camMoved || explodeActive || fansActive || rainActive || floodActive || airActive || draggingActive,
+        now,
+      );
 
       if (!shouldRender) {
         return;
@@ -4395,9 +4538,21 @@ export class BuildScene {
       }
       if (lightningActive) {
         this.lightningEnergy *= Math.exp(-clampedDt * 10);
-        this.lightningLight.intensity = this.lightningEnergy;
+      }
+      // OPT-05: strike energy rides the existing fill light — the third permanent
+      // DirectionalLight cost every PBR pixel one BRDF evaluation 100% of the time.
+      if (this.lightningEnergy > 0.02) {
+        this.fillLight.intensity = this.fillLightBase + this.lightningEnergy;
+        if (!this.fillLightTinted) {
+          this.fillLightTinted = true;
+          this.fillLight.color.setHex(0xdce8ff);
+        }
+      } else if (this.fillLightTinted) {
+        this.fillLight.intensity = this.fillLightBase;
+        this.fillLightTinted = false;
+        this.fillLight.color.setHex(0xb2cff0);
       } else {
-        this.lightningLight.intensity = 0;
+        this.fillLight.intensity = this.fillLightBase;
       }
 
       this.palette.floodUniforms.uTime.value = this.reducedMotion ? 0 : this.simElapsedS;
